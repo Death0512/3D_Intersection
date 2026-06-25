@@ -1,0 +1,18 @@
+{
+  "blend": "assets/road.blend",
+  "collection": "ENV_road",
+  "object": "RoadArm",
+  "arm_width": 14.0,
+  "lane_width": 3.5,
+  "num_lanes": 4,
+  "lane_centerlines_x": [
+    -5.25,
+    -1.75,
+    1.75,
+    5.25
+  ],
+  "approach_length": 54.751,
+  "crosswalk_y": 27.846,
+  "stop_line_y": 27.846,
+  "forward_axis": "+Y"
+}

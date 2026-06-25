@@ -1,0 +1,96 @@
+{
+  "vehicles": {
+    "car": {
+      "class": "car",
+      "blend": "assets/car.blend",
+      "collection": "VEH_car",
+      "dims": [
+        1.893,
+        4.48,
+        1.281
+      ],
+      "plate_material": "LicensePlate_Mat",
+      "plate_node": "materials['LicensePlate_Mat'].node_tree.nodes['Image Texture']",
+      "plate_default_image": "models/car/textures/plate.png",
+      "target_length": 4.47,
+      "missing_textures": []
+    },
+    "van": {
+      "class": "van",
+      "blend": "assets/van.blend",
+      "collection": "VEH_van",
+      "dims": [
+        2.351,
+        5.11,
+        2.376
+      ],
+      "plate_material": "LicensePlate_Mat",
+      "plate_node": "materials['LicensePlate_Mat'].node_tree.nodes['Image Texture']",
+      "plate_default_image": "models/car/textures/plate.png",
+      "target_length": 5.0,
+      "missing_textures": [
+        "specular <- /home/death/Documents/3D_Intersection_Video/models/van/source/spec_optimised.jpg"
+      ]
+    },
+    "bus": {
+      "class": "bus",
+      "blend": "assets/bus.blend",
+      "collection": "VEH_bus",
+      "dims": [
+        2.832,
+        8.502,
+        2.74
+      ],
+      "plate_material": "LicensePlate_Mat",
+      "plate_node": "materials['LicensePlate_Mat'].node_tree.nodes['Image Texture']",
+      "plate_default_image": "models/car/textures/plate.png",
+      "target_length": 8.33,
+      "missing_textures": [
+        "BUSDEST3.png <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/Car folder/BUSDEST3.png",
+        "bustexture_diffuse.png <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/Car folder/bustexture_diffuse.png",
+        "bustexture_diffuse.png.001 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/Car folder/bustexture_diffuse.png",
+        "everytexture.com-stock-metal-texture-00022-normal-2048.jpg <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/skfab template folder/textures/misc/everytexture.com-stock-metal-texture-00022-normal-2048.jpg",
+        "Fabric028_1K_NormalGL.jpg <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/fabric groovy/Fabric028_1K_NormalGL.jpg",
+        "ford texture.jpg <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/car stuff/ford texture.jpg",
+        "hedalight normal.jpg.003 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/textures/misc/hedalight normal.jpg",
+        "hedalight normal.jpg.006 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/car stuff/hedalight normal.jpg",
+        "Metal029_1K_Color.jpg.001 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/paint2/Metal029_1K_Color.jpg",
+        "Metal029_1K_NormalGL.jpg <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/paint2/Metal029_1K_NormalGL.jpg",
+        "Metal029_1K_Roughness.jpg.001 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/paint2/Metal029_1K_Roughness.jpg",
+        "Metal038_1K_NormalGL.jpg.001 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/paint/Metal038_1K_NormalGL.jpg",
+        "tyre normal1.png <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/skfab template folder/textures/wheels/tyre normal1.png",
+        "tyrediffusedirty.png.001 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/skfab template folder/textures/wheels/tyrediffusedirty.png",
+        "tyrediffusedirty.png.002 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/skfab template folder/textures/wheels/tyrediffusedirty.png",
+        "Untitled.001 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/textures/wheels/v8wheel_diffuse.png",
+        "Untitled.002 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/salecars/tralk_coler_1.png",
+        "Untitled.004 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/textures/wheels/v8wheel_diffuse.png",
+        "Untitled.007 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/salecars/tralk_coler_1.png",
+        "Untitled.028 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/salecars/v8wheel_normal.png",
+        "Untitled.029 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/salecars/v8wheel_roughness.png",
+        "v8wheel_metal.png.001 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/salecars/v8wheel_metal.png",
+        "Wood052_1K_Color.jpg.001 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/woody wood/Wood052_1K_Color.jpg",
+        "Wood052_1K_Roughness.jpg.001 <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/woody wood/Wood052_1K_Roughness.jpg",
+        "Wood073_1K_Color.jpg <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/wood weathered/Wood073_1K_Color.jpg",
+        "Wood073_1K_NormalGL.jpg <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/wood weathered/Wood073_1K_NormalGL.jpg",
+        "Wood073_1K_Roughness.jpg <- /home/death/Documents/3D_Intersection_Video/models/bus/source/../blender/1k materials/wood weathered/Wood073_1K_Roughness.jpg"
+      ]
+    },
+    "truck": {
+      "class": "truck",
+      "blend": "assets/truck.blend",
+      "collection": "VEH_truck",
+      "dims": [
+        1.518,
+        7.0,
+        1.986
+      ],
+      "plate_material": "LicensePlate_Mat",
+      "plate_node": "materials['LicensePlate_Mat'].node_tree.nodes['Image Texture']",
+      "plate_default_image": "models/car/textures/plate.png",
+      "target_length": 7.0,
+      "missing_textures": [
+        "tex_dir not found: /home/death/Documents/3D_Intersection_Video/scripts/../models/truck/textures"
+      ]
+    }
+  }
+}
