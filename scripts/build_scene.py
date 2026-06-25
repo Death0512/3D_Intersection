@@ -43,14 +43,14 @@ ASSETS_DIR = os.path.join(HERE, "..", "assets")
 VEHICLES_JSON = os.path.join(ASSETS_DIR, "vehicles.json")
 ROAD_JSON = os.path.join(ASSETS_DIR, "road.json")
 
-LENS_MM = 60.0          # telephoto
-RES_X = 1920
-RES_Y = 1080
-FPS = 30
-CAM_HEIGHT = 7.0        # camera elevation (m)
-CAM_BACK_DIST = 45.0    # how far behind the stop line the camera sits
-                        # (must be > approach_visible_length=40 so vehicles
-                        #  appear IN FRONT of the camera, not behind it)
+LENS_MM = G.LENS_MM          # telephoto (shared single source of truth)
+RES_X = G.RES_X
+RES_Y = G.RES_Y
+FPS = G.FPS
+CAM_HEIGHT = G.CAM_HEIGHT    # camera elevation (m)
+CAM_BACK_DIST = G.CAM_BACK_DIST  # how far behind the stop line the camera sits
+                         # (must be > approach_visible_length=40 so vehicles
+                         #  appear IN FRONT of the camera, not behind it)
 
 
 # ---------------------------------------------------------------------------
@@ -113,20 +113,19 @@ def place_road(approach: G.Direction, road_meta: dict, is_entry: bool = True):
     local +Y end carries the crosswalk / stop-line (crosswalk_y ≈ +27.85) and
     whose local −Y end is the far/back end (≈ −26.9).
 
+    Per-shot frame: road axis centred at (0,0,0); no carriageway lateral offset.
+    Lane centrelines sit at x = LANE_CENTERLINES[k] in the arm's local frame,
+    which aligns with world x after rotation by approach_rotation(approach).
+
     Entry road (is_entry=True):
-        Cars drive TOWARD the box (+approach forward).  We orient the arm so
-        its local +Y (crosswalk) sits exactly at the box near-edge, extending
-        outward.  Arm +Y → approach forward; arm origin = near-edge − forward
-        × crosswalk_y (no lateral offset — arm is centred on the branch axis).
+        The arm's local +Y (crosswalk/stop-line) is placed at the box near-edge
+        (−approach × BOX/2) and extends outward.
+        origin = near_edge − forward × crosswalk_y.
 
     Exit road (is_entry=False):
-        Cars emerge from the box and drive AWAY (outbound = approach direction
-        for out_<D> shots — same direction label).  The crosswalk must sit at
-        the box edge (the camera end), and the car drives outward.  We orient
-        the arm so its local +Y (crosswalk) also sits at the box near-edge but
-        points TOWARD the box (= −approach forward), so the arm extends outward
-        in the +approach direction.  Rotation = approach_rotation(approach) + π.
-        Cars travel in −local-Y of the arm = +approach forward (away from box).
+        The arm's local −Y (back) end is placed at the box far edge
+        (+approach × BOX/2) and extends outward to approach_length.
+        origin = far_edge + forward × arm_back.
     """
     coll = link_collection_from_blend(
         os.path.join(HERE, "..", road_meta["blend"]),
@@ -134,19 +133,19 @@ def place_road(approach: G.Direction, road_meta: dict, is_entry: bool = True):
 
     fx, fy = approach.vec
     crosswalk_y = road_meta.get("crosswalk_y", 0.0)
-    # box near-edge for this approach (world coords, ground)
-    near_edge = (-fx * BOX_HALF, -fy * BOX_HALF)
+    approach_length = road_meta.get("approach_length", crosswalk_y)
+    arm_back = approach_length - crosswalk_y
+    half = BOX_HALF
+    rot = G.approach_rotation(approach)
 
     if is_entry:
-        # arm +Y → approach forward; crosswalk at box near-edge
-        rot = G.approach_rotation(approach)
-        origin_world = (near_edge[0] - fx * crosswalk_y,
-                        near_edge[1] - fy * crosswalk_y)
+        edge = (-fx * half, -fy * half)
+        origin_world = (edge[0] - fx * crosswalk_y,
+                        edge[1] - fy * crosswalk_y)
     else:
-        # arm +Y → toward box (−approach); crosswalk still at box near-edge
-        rot = G.approach_rotation(approach) + math.pi
-        origin_world = (near_edge[0] + fx * crosswalk_y,
-                        near_edge[1] + fy * crosswalk_y)
+        edge = (fx * half, fy * half)
+        origin_world = (edge[0] + fx * arm_back,
+                        edge[1] + fy * arm_back)
 
     label = "in" if is_entry else "out"
     empty = instantiate_linked_collection(coll, f"Road_{approach.value}_{label}",
@@ -189,8 +188,7 @@ def _find_body_material_in_collection(coll):
             if not slot.material:
                 continue
             n = slot.material.name.lower()
-            if any(c in n for c in ("carpaint", "car paint", "bodycolour",
-                                     "paint2", "van_paint", "trailer paint")):
+            if any(c in n for c in ("carpaint", "car paint", "bodycolour")):
                 return slot.material, obj
     return None, None
 
@@ -201,7 +199,7 @@ def assign_plate_and_color(coll, plate_str: str, plates_dir: str, rgba=None):
       * set the body-paint material base color to rgba (if given)
     """
     safe = "".join(c if c.isalnum() else "_" for c in plate_str) + ".png"
-    plate_path = os.path.join(plates_dir, safe)
+    plate_path = os.path.abspath(os.path.join(plates_dir, safe))
     render_plate(plate_str, plate_path)
 
     plate_mat, _ = _find_plate_material_in_collection(coll)
@@ -256,26 +254,31 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str):
         veh["id"], approach, veh["lane"], G.Turn(veh["turn"]),
         veh["speed_ms"], veh["depart_frame"], fps=FPS)
     ax, ay = motion.appear_pos
-    rot = G.approach_rotation(approach)
+    fwd_off = meta.get("forward_offset_deg", 0.0)
 
-    # Create a parent Empty and parent all the collection's meshes to it,
-    # then move the Empty to the appear position. This gives us a single
-    # transform to keyframe.
-    bpy.ops.object.empty_add(type="PLAIN_AXES", location=(ax, ay, 0.0))
+    # Create the parent Empty at the WORLD ORIGIN with no rotation first, then
+    # parent the meshes before moving it. This ensures matrix_parent_inverse is
+    # identity so the meshes are rigidly attached to the empty's local frame and
+    # will follow every location/rotation keyframe exactly.
+    bpy.ops.object.empty_add(type="PLAIN_AXES", location=(0.0, 0.0, 0.0))
     root = bpy.context.view_layer.objects.active
     root.name = f"VEH_{veh['id']}"
-    # Rotation: use the exit direction's heading so the vehicle faces the
-    # correct way on both entry and exit segments. For straight movements
-    # entry and exit headings are the same; for turns the vehicle is
-    # invisible inside the Black Box so the rotation change isn't seen.
-    root.rotation_euler = (0.0, 0.0, rot)
-    # parent each mesh to root (keep transform)
+    root["forward_offset_deg"] = fwd_off
+
+    # Parent meshes while empty is at origin (matrix_parent_inverse = identity).
+    bpy.ops.object.select_all(action="DESELECT")
     mesh_objs = [o for o in coll.objects if o.type == "MESH"]
     for o in mesh_objs:
         o.select_set(True)
     root.select_set(True)
     bpy.context.view_layer.objects.active = root
     bpy.ops.object.parent_set(type="OBJECT", keep_transform=True)
+
+    # Now place the empty at the appear position and apply the heading rotation.
+    # Meshes follow rigidly because their matrix_parent_inverse is identity.
+    rot = G.approach_rotation(approach) + math.radians(fwd_off)
+    root.location = (ax, ay, 0.0)
+    root.rotation_euler = (0.0, 0.0, rot)
     return root, motion
 
 
@@ -286,23 +289,27 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str):
 def keyframe_motion(empty, motion: G.VehicleMotion, is_in_camera: bool):
     """Keyframe location across the visible segment, hide outside it.
     Rotation is also keyframed: on entry use the approach heading, on exit
-    use the exit heading. The rotation change happens while hidden."""
+    use the exit heading. The per-class forward_offset_deg (stashed on the
+    empty by make_vehicle_instance) is included via G.visible_heading so a
+    sideways model stays corrected on both in and out shots — keyframes
+    override the static root rotation, so the offset MUST be applied here too.
+    The rotation change (entry->exit heading) happens while hidden."""
     obj = empty
+    fwd_off = obj.get("forward_offset_deg", 0.0) if hasattr(obj, "get") else 0.0
     if is_in_camera:
         frame_start, frame_end = motion.appear_frame, motion.disappear_frame
         pos_start, pos_end = motion.appear_pos, motion.disappear_pos
-        heading = G.approach_rotation(motion.approach)
     else:
         frame_start, frame_end = motion.reappear_frame, motion.leave_frame
         pos_start, pos_end = motion.reappear_pos, motion.leave_pos
-        heading = G.approach_rotation(motion.exit_direction)
+    heading = G.visible_heading(motion, is_in_camera, forward_offset_deg=fwd_off)
 
     obj.location = (pos_start[0], pos_start[1], 0.0)
     obj.keyframe_insert(data_path="location", frame=frame_start)
     obj.location = (pos_end[0], pos_end[1], 0.0)
     obj.keyframe_insert(data_path="location", frame=frame_end)
 
-    # keyframe rotation (constant across the visible segment)
+    # keyframe rotation (constant across the visible segment, incl. fwd offset)
     obj.rotation_euler.z = heading
     obj.keyframe_insert(data_path="rotation_euler", frame=frame_start)
     obj.keyframe_insert(data_path="rotation_euler", frame=frame_end)
@@ -384,33 +391,20 @@ def place_camera(approach: G.Direction, is_in: bool, road_meta: dict):
         crosswalk end, looking OUTWARD (+approach forward, away from box).
         Cars emerge from the box just ahead of the camera and drive away.
 
-    No lateral offset — each arm is centred on its own branch axis.
+    The camera/look-at positions come from G.camera_pose (single source of
+    truth shared with the per-frame pose ground truth in render.compute_metadata),
+    which applies the lateral carriageway shift so the camera centres on its
+    carriageway.
     """
-    fx, fy = approach.vec
-    arm_back = road_meta.get("approach_length", 54.75) - road_meta.get("crosswalk_y", 27.85)
-    # back-end local Y in arm coords ≈ −(approach_length − crosswalk_y) ≈ −26.9
-
-    if is_in:
-        # Camera at outer (back) end of entry arm, looking toward box.
-        # Arm origin placed so crosswalk is at box near-edge; back end is
-        # crosswalk_y + arm_back further out (away from box).
-        dist_from_box = road_meta.get("crosswalk_y", 27.85) + arm_back
-        cam_ground = (-fx * (BOX_HALF + dist_from_box),
-                      -fy * (BOX_HALF + dist_from_box))
-        # look toward box near-edge (crosswalk), slightly past it
-        look_ground = (-fx * (BOX_HALF - 2.0),
-                       -fy * (BOX_HALF - 2.0), 0.0)
-    else:
-        # Camera at box-edge/crosswalk end of exit arm, looking outward.
-        cam_ground = (-fx * BOX_HALF,
-                      -fy * BOX_HALF)
-        look_ground = (-fx * BOX_HALF + fx * CAM_BACK_DIST,
-                       -fy * BOX_HALF + fy * CAM_BACK_DIST, 0.0)
-
-    cam_loc = (cam_ground[0], cam_ground[1], CAM_HEIGHT)
+    cam_loc, look_ground = G.camera_pose(approach, is_in, road_meta,
+                                         cam_height=CAM_HEIGHT,
+                                         cam_back_dist=CAM_BACK_DIST)
     label = "in" if is_in else "out"
     cam_data = bpy.data.cameras.new(f"CamData_{approach.value}_{label}")
     cam_data.lens = LENS_MM
+    # Sensor fit must match the metadata convention (SENSOR_MM width, horizontal fit)
+    cam_data.sensor_fit = "HORIZONTAL"
+    cam_data.sensor_width = G.SENSOR_MM
     cam_obj = bpy.data.objects.new(f"Camera_{approach.value}_{label}", cam_data)
     bpy.context.scene.collection.objects.link(cam_obj)
     cam_obj.location = cam_loc

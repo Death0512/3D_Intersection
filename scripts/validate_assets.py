@@ -1,4 +1,4 @@
-"""Phase 0 — Asset validation.
+"""Phase 0 — Asset validation (car + road).
 
 Re-opens each prepared asset .blend and asserts the prep invariants hold.
 Prints a PASS/FAIL report. Exits non-zero if any asset fails.
@@ -96,9 +96,15 @@ def validate_vehicle(veh_class: str, meta: dict) -> bool:
     ok &= check("has mesh objects", len(meshes) >= 1, f"{len(meshes)}")
     mn, mx = bbox_world(meshes)
     dims = [round(mx.x - mn.x, 3), round(mx.y - mn.y, 3), round(mx.z - mn.z, 3)]
-    ok &= check(f"length ~ {meta['target_length']} m (±{TOLERANCE*100:.0f}%)",
-                abs(dims[1] - meta["target_length"]) / meta["target_length"] <= TOLERANCE,
-                f"got {dims[1]}")
+    # The model's length axis depends on forward_offset_deg: 0/180 -> length
+    # along Y; +/-90 -> length along X. Compare target_length against the
+    # axis the vehicle will actually travel after the offset is applied.
+    fwd_off = meta.get("forward_offset_deg", 0.0) % 180
+    length_axis_idx = 0 if abs(fwd_off - 90.0) < 1e-3 else 1   # 0=X, 1=Y
+    length_axis_name = "X" if length_axis_idx == 0 else "Y"
+    ok &= check(f"length ~ {meta['target_length']} m on {length_axis_name} (±{TOLERANCE*100:.0f}%)",
+                abs(dims[length_axis_idx] - meta["target_length"]) / meta["target_length"] <= TOLERANCE,
+                f"got dims={dims}")
     ok &= check("min Z ~ 0 (grounded)", abs(mn.z) < 0.05, f"got {mn.z:.3f}")
 
     # license plate material

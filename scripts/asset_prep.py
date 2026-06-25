@@ -1,16 +1,14 @@
-"""Phase 0 — Vehicle asset preparation (per model).
+"""Phase 0 — Vehicle asset preparation (car model).
 
 Normalizes scale, origin, orientation, textures, and license-plate
-infrastructure for each vehicle class, producing a linkable collection.
+infrastructure for the car model, producing a linkable collection.
 
-Usage (one model at a time):
-    blender -b <source.blend> --python scripts/asset_prep.py -- <class>
-
-where <class> is one of: car, van, truck, bus.
+Usage:
+    blender -b <source.blend> --python scripts/asset_prep.py -- car
 
 Produces:
-    assets/<class>.blend     (collection VEH_<class>, LicensePlate_Mat)
-    appends to assets/vehicles.json
+    assets/car.blend     (collection VEH_car, LicensePlate_Mat)
+    writes assets/vehicles.json
 """
 from __future__ import annotations
 
@@ -28,15 +26,10 @@ from mathutils import Vector
 import blender_utils as bu
 
 
-# ---- per-class configuration ------------------------------------------------
+# ---- configuration ----------------------------------------------------------
 # target_length : uniform-scale so the vehicle's Y length matches this (m)
-# plate_offsets : (front, rear) Y offsets from origin where a plate plane is
-#                 added for van/truck/bus. car keeps its existing Plate mesh.
 TARGET_LENGTH = {
     "car": 4.47,
-    "van": 5.0,
-    "truck": 7.0,
-    "bus": 8.33,
 }
 # standard EU plate size
 PLATE_W = 0.52
@@ -240,17 +233,10 @@ def prep_vehicle(veh_class: str):
     n = bu.remap_textures_to_local(tex_dir, missing)
     print(f"  textures: remapped {n}, missing {len(missing)}")
 
-    # 5. Plate setup.
+    # 5. Plate setup (car: standardize the existing Plate mesh + material).
     plate_img = os.path.join(HERE, "..", "models", "car", "textures", "plate.png")
-    if veh_class == "car":
-        mat, tex = prep_car_plate(plate_img)
-        plate_node = f"materials['{LICENSE_MAT}'].node_tree.nodes['{tex.name}']"
-    else:
-        mat, tex = make_license_plate_material(plate_img)
-        half = target_len / 2.0
-        add_plate_plane(f"Plate_Front", +half - 0.08, mat)
-        add_plate_plane(f"Plate_Rear", -half + 0.08, mat)
-        plate_node = f"materials['{LICENSE_MAT}'].node_tree.nodes['{tex.name}']"
+    mat, tex = prep_car_plate(plate_img)
+    plate_node = f"materials['{LICENSE_MAT}'].node_tree.nodes['{tex.name}']"
 
     # 6. Strip stray cameras / lamps / armatures (rigs not needed for Black-Box motion).
     for o in list(bpy.data.objects):
@@ -321,10 +307,10 @@ def update_manifest(entry, out_blend):
 def main():
     args = sys.argv
     if "--" not in args:
-        raise SystemExit("Usage: blender -b <src.blend> --python scripts/asset_prep.py -- <class>")
+        raise SystemExit("Usage: blender -b models/car/S13_SFab_v12.blend --python scripts/asset_prep.py -- car")
     veh_class = args[args.index("--") + 1].strip().lower()
     if veh_class not in TARGET_LENGTH:
-        raise SystemExit(f"Unknown class '{veh_class}'. One of: {list(TARGET_LENGTH)}")
+        raise SystemExit(f"Unknown class '{veh_class}'. Supported: {list(TARGET_LENGTH)}")
     prep_vehicle(veh_class)
 
 

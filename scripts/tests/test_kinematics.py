@@ -46,50 +46,88 @@ def test_straight_exit_keeps_heading_same_lane():
 
 
 def test_right_exit_turns_right():
+    # right-hand driving: RIGHT turn -> curb-side exit lane (NUM_LANES-1).
     right_map = {G.Direction.N: G.Direction.E, G.Direction.E: G.Direction.S,
                  G.Direction.S: G.Direction.W, G.Direction.W: G.Direction.N}
     for ap in G.Direction:
         ob, ex_lane = G.exit_lane_for_movement(ap, 1, G.Turn.RIGHT)
         assert ob == right_map[ap]
-        assert ex_lane == 0
+        assert ex_lane == G.NUM_LANES - 1
 
 
 def test_left_exit_turns_left():
+    # right-hand driving: LEFT turn -> median-side exit lane (index 0).
     left_map = {G.Direction.N: G.Direction.W, G.Direction.W: G.Direction.S,
                 G.Direction.S: G.Direction.E, G.Direction.E: G.Direction.N}
     for ap in G.Direction:
         ob, ex_lane = G.exit_lane_for_movement(ap, 1, G.Turn.LEFT)
         assert ob == left_map[ap]
-        assert ex_lane == G.NUM_LANES - 1
+        assert ex_lane == 0
 
 
 def test_straight_n_exits_at_top_heading_north():
     # N-straight: disappears at box bottom (y=-15), reappears at box TOP (y=+15)
     # and continues north (+Y). leave must have larger Y than reappear.
+    # Per-shot frame: lanes centred on road axis; lane 0 (median-side) at
+    # x = LANE_CENTERLINES[0] = -5.25.
     m = K.plan_motion("v", G.Direction.N, 0, G.Turn.STRAIGHT,
                       speed_ms=K.speed_kmh_to_ms(40), depart_frame=0)
     assert abs(m.disappear_pos[1] - (-G.BOX_SIZE / 2)) < 1e-6  # y = -15
     assert abs(m.reappear_pos[1] - (+G.BOX_SIZE / 2)) < 1e-6   # y = +15
     assert m.leave_pos[1] > m.reappear_pos[1]                  # goes +Y
     assert m.exit_direction == G.Direction.N
+    # axis-centred: entry & exit lane 0 at x = LANE_CENTERLINES[0] = -5.25
+    assert abs(m.disappear_pos[0] - G.LANE_CENTERLINES[0]) < 1e-6
+    assert abs(m.reappear_pos[0] - G.LANE_CENTERLINES[0]) < 1e-6
 
 
 def test_straight_s_exits_at_bottom_heading_south():
+    # S approach: forward = -Y; lane 0 (median-side) at x = +5.25
+    # (right of -Y heading is +X; off = +5.25 rotated by S-right = +X -> x=+5.25... wait:
+    # S forward = (0,-1), S right = (-1,0)*(-1) = actually approach_right(S):
+    # fx,fy=(0,-1) -> right=(fy,-fx)=(-1,0) so x = (-1)*(-5.25)=+5.25).
     m = K.plan_motion("v", G.Direction.S, 0, G.Turn.STRAIGHT,
                       speed_ms=K.speed_kmh_to_ms(40), depart_frame=0)
     assert abs(m.disappear_pos[1] - (+G.BOX_SIZE / 2)) < 1e-6  # y = +15 (S entry at top)
     assert abs(m.reappear_pos[1] - (-G.BOX_SIZE / 2)) < 1e-6   # y = -15
     assert m.leave_pos[1] < m.reappear_pos[1]                  # goes -Y
     assert m.exit_direction == G.Direction.S
+    # S right = (-1,0); lane 0 offset = (-1)*(-5.25) = +5.25
+    expected_x = (-1) * G.LANE_CENTERLINES[0]   # = +5.25
+    assert abs(m.disappear_pos[0] - expected_x) < 1e-6
+    assert abs(m.reappear_pos[0] - expected_x) < 1e-6
+
+
+def test_n_and_s_per_shot_lanes_are_axis_centred():
+    # Per-shot frame: each .blend is independent. N lane 0 x = -5.25;
+    # S lane 0 x = +5.25 (S right = (-1,0)); they are symmetric about 0.
+    # They CAN share the same |x| value because they are in separate scenes.
+    for lane in range(G.NUM_LANES):
+        nx, _ = G.lane_entry_box_edge(G.Direction.N, lane)
+        sx, _ = G.lane_entry_box_edge(G.Direction.S, lane)
+        # N right = (+1,0) -> x = LANE_CENTERLINES[lane]
+        assert abs(nx - G.LANE_CENTERLINES[lane]) < 1e-6
+        # S right = (-1,0) -> x = -LANE_CENTERLINES[lane]
+        assert abs(sx - (-G.LANE_CENTERLINES[lane])) < 1e-6
+    # All lanes stay within the arm width
+    for lane in range(G.NUM_LANES):
+        nx, _ = G.lane_entry_box_edge(G.Direction.N, lane)
+        assert abs(nx) <= G.ARM_WIDTH / 2 + 1e-6
 
 
 def test_right_turn_n_to_e_exits_east():
-    # N-right: outbound = E. Reappear on +X edge, leave toward +X.
+    # N-right: outbound = E, exit lane = curb-side (NUM_LANES-1 = 3).
+    # Reappear on +X edge (x=+15), leave toward +X.
+    # E approach right = (0,-1)*... approach_right(E): fx,fy=(1,0)->right=(0,-1).
+    # Lane 3 (curb-side) offset: right_vec*(LANE_CENTERLINES[3]) = (0,-1)*5.25 -> y=-5.25
     m = K.plan_motion("v", G.Direction.N, 1, G.Turn.RIGHT,
                       speed_ms=K.speed_kmh_to_ms(40), depart_frame=0)
     assert m.exit_direction == G.Direction.E
     assert abs(m.reappear_pos[0] - (+G.BOX_SIZE / 2)) < 1e-6   # x = +15
     assert m.leave_pos[0] > m.reappear_pos[0]                  # goes +X
+    # E right = (0,-1); lane 3 y = (0,-1)*5.25 = -5.25
+    expected_y = (-1) * G.LANE_CENTERLINES[G.NUM_LANES - 1]    # = -5.25
+    assert abs(m.reappear_pos[1] - expected_y) < 1e-6
 
 
 def test_compute_motion_positions_advance():
@@ -139,6 +177,53 @@ def test_headway_conflict_detection():
     assert K.conflict_free(bad) is False
 
 
+def test_catchup_faster_follower_unsafe_at_same_frame():
+    # Error 5: a 60 km/h follower released at the same frame as a 30 km/h
+    # leader in the same lane WILL catch up on the 40 m approach -> unsafe.
+    ls = K.speed_kmh_to_ms(30)
+    fs = K.speed_kmh_to_ms(60)
+    assert K.catchup_safe(0, ls, 4.5, 0, fs) is False
+
+
+def test_catchup_faster_follower_safe_when_delayed():
+    # Pushing the faster follower's depart_frame to the computed minimum makes
+    # the schedule catch-up-safe while preserving both speeds.
+    ls = K.speed_kmh_to_ms(30)
+    fs = K.speed_kmh_to_ms(60)
+    mf = K.min_follow_depart_frame(0, ls, 4.5, fs)
+    assert K.catchup_safe(0, ls, 4.5, mf, fs) is True
+    # one frame earlier is unsafe (boundary)
+    assert K.catchup_safe(0, ls, 4.5, mf - 1, fs) is False
+
+
+def test_catchup_slower_follower_always_safe():
+    # A slower follower can never catch the leader -> safe regardless of gap.
+    ls = K.speed_kmh_to_ms(60)
+    fs = K.speed_kmh_to_ms(30)
+    assert K.catchup_safe(0, ls, 4.5, 5, fs) is True
+
+
+def test_schedule_departures_is_catchup_safe():
+    # End-to-end: a generated scenario must have no start-gap OR catch-up
+    # conflicts in any (approach, lane). For each adjacent pair sorted by
+    # depart_frame, the later vehicle (follower) must not catch the earlier
+    # one (leader) before the leader enters the Black Box.
+    import random
+    import scenario_gen as S
+    rng = random.Random(7)
+    veh = [S.make_vehicle(f"V{i:03d}", rng) for i in range(40)]
+    S.schedule_departures(veh, 300, rng)
+    lanes = {}
+    for v in veh:
+        lanes.setdefault((v["approach"], v["lane"]), []).append(v)
+    for key, vs in lanes.items():
+        vs.sort(key=lambda d: d["depart_frame"])
+        for a, b in zip(vs, vs[1:]):
+            # a is the leader (earlier), b is the follower (later)
+            assert K.catchup_safe(a["depart_frame"], a["speed_ms"], a["length"],
+                                  b["depart_frame"], b["speed_ms"]), (key, a["id"], b["id"])
+
+
 def test_approach_rotation():
     # arm forward is +Y (0,1). For N approach (forward +Y) rotation = 0.
     assert abs(G.approach_rotation(G.Direction.N)) < 1e-6
@@ -146,6 +231,136 @@ def test_approach_rotation():
     assert abs(G.approach_rotation(G.Direction.E) - math.pi / 2) < 1e-6
     # S: forward -Y = (0,-1): atan2(0,-1) = pi
     assert abs(G.approach_rotation(G.Direction.S) - math.pi) < 1e-6
+
+
+def test_camera_pose_axis_centred_and_road_json_driven():
+    # camera_pose must be a pure function of road_meta (no hardcoded road dims)
+    # and must sit on the road axis (lateral x = 0 for N approach).
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    cam_loc, look = G.camera_pose(G.Direction.N, True, road_meta)
+    # N approach: camera on axis -> x = 0
+    assert abs(cam_loc[0] - 0.0) < 1e-6
+    assert cam_loc[2] == G.CAM_HEIGHT
+    # camera behind the box (y < -BOX/2 for N in-shot)
+    assert cam_loc[1] < -(G.BOX_SIZE / 2)
+    # changing road_meta moves the camera (proves it's not hardcoded)
+    road_meta2 = {"crosswalk_y": 30.0, "approach_length": 60.0}
+    cam_loc2, _ = G.camera_pose(G.Direction.N, True, road_meta2)
+    assert abs(cam_loc[1] - cam_loc2[1]) > 1e-6
+
+
+def test_metadata_pose_matches_motion_plan():
+    # Consistency: render.compute_metadata per-frame poses must equal the
+    # linear interpolation of the kinematics motion plan (the same plan
+    # build_scene keyframes). Guards against metadata/render drift.
+    import render
+    v = K.speed_kmh_to_ms(45)
+    scn = {"seed": 1, "fps": 30, "duration_frames": 400, "box_size": G.BOX_SIZE,
+           "vehicles": [{"id": "V0", "class": "car", "color": [0.1, 0.2, 0.8, 1.0],
+                         "color_name": "blue", "plate": "59X-1234", "approach": "N",
+                         "lane": 1, "turn": "right", "speed_ms": v, "speed_kmh": 45,
+                         "length": 4.47, "depart_frame": 5}]}
+    meta = render.compute_metadata(scn)
+    vm = meta["vehicles"][0]
+    motion = K.plan_motion("V0", G.Direction.N, 1, G.Turn.RIGHT, v, 5, fps=30)
+    for fr in vm["frames"]:
+        if fr["frame"] <= motion.disappear_frame:
+            t = (fr["frame"] - motion.appear_frame) / max(1, motion.disappear_frame - motion.appear_frame)
+            ex = motion.appear_pos[0] + (motion.disappear_pos[0] - motion.appear_pos[0]) * t
+            ey = motion.appear_pos[1] + (motion.disappear_pos[1] - motion.appear_pos[1]) * t
+            assert abs(fr["pose"]["x"] - round(ex, 3)) < 1e-3
+            assert abs(fr["pose"]["y"] - round(ey, 3)) < 1e-3
+            assert fr["camera"] == "in_N"
+        else:
+            t = (fr["frame"] - motion.reappear_frame) / max(1, motion.leave_frame - motion.reappear_frame)
+            ex = motion.reappear_pos[0] + (motion.leave_pos[0] - motion.reappear_pos[0]) * t
+            ey = motion.reappear_pos[1] + (motion.leave_pos[1] - motion.reappear_pos[1]) * t
+            assert abs(fr["pose"]["x"] - round(ex, 3)) < 1e-3
+            assert abs(fr["pose"]["y"] - round(ey, 3)) < 1e-3
+            assert fr["camera"] == "out_E"
+    # no bbox field anywhere
+    assert all("bbox" not in fr for fr in vm["frames"])
+
+
+def test_out_camera_aligned_with_exit_vehicles():
+    # Bug A guard: every out_<D> camera must sit at the box far edge, looking
+    # outward along the outbound heading, with the Black Box behind the camera.
+    # Per-shot frame: camera lateral position = 0 (on road axis).
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    half = G.BOX_SIZE / 2
+    for d in G.Direction:
+        m = K.plan_motion("v", d, 0, G.Turn.STRAIGHT,
+                          K.speed_kmh_to_ms(40), depart_frame=0)
+        cam_loc, look = G.camera_pose(d, False, road_meta)
+        ofx, ofy = d.vec
+        # 1. looks outward along travel (rear plate filmed as car drives away)
+        dx, dy = look[0] - cam_loc[0], look[1] - cam_loc[1]
+        assert dx * ofx + dy * ofy > 0, f"out_{d.value} not looking outward"
+        # 2. camera on the outbound side of the box (not filming across it)
+        along = cam_loc[0] * ofx + cam_loc[1] * ofy
+        assert along >= half - 1e-6, f"out_{d.value} camera on wrong side of box"
+        # 3. car reappears at the box far edge
+        car_along = m.reappear_pos[0] * ofx + m.reappear_pos[1] * ofy
+        assert abs(car_along - half) < 1e-6, f"out_{d.value} car not at box edge"
+        # 4. camera on road axis (lateral = 0)
+        perp_axis = (-ofy, ofx)
+        cam_perp = cam_loc[0] * perp_axis[0] + cam_loc[1] * perp_axis[1]
+        assert abs(cam_perp) < 1e-6, f"out_{d.value} camera not on road axis"
+
+
+def test_in_camera_aligned_with_entry_vehicles():
+    # Mirror guard for in_<D>: camera behind the box entry edge, looking toward
+    # the box. Per-shot frame: camera lateral position = 0 (on road axis).
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    half = G.BOX_SIZE / 2
+    for d in G.Direction:
+        m = K.plan_motion("v", d, 0, G.Turn.STRAIGHT,
+                          K.speed_kmh_to_ms(40), depart_frame=0)
+        cam_loc, look = G.camera_pose(d, True, road_meta)
+        fx, fy = d.vec
+        # 1. looks toward box
+        dx, dy = look[0] - cam_loc[0], look[1] - cam_loc[1]
+        assert dx * fx + dy * fy > 0, f"in_{d.value} not looking toward box"
+        # 2. camera behind the entry edge
+        along = cam_loc[0] * fx + cam_loc[1] * fy
+        assert along <= -half + 1e-6, f"in_{d.value} camera not behind box"
+        # 3. camera on road axis (lateral = 0)
+        perp_axis = (-fy, fx)
+        cam_perp = cam_loc[0] * perp_axis[0] + cam_loc[1] * perp_axis[1]
+        assert abs(cam_perp) < 1e-6, f"in_{d.value} camera not on road axis"
+
+
+def test_visible_heading_applies_forward_offset_both_shots():
+    # Bug B guard: forward_offset_deg must be applied on BOTH in and out shots.
+    # Without it, a sideways model (offset ±90) would face the wrong way after
+    # keyframe_motion overrides the static rotation.
+    m = K.plan_motion("v", G.Direction.N, 0, G.Turn.STRAIGHT,
+                      K.speed_kmh_to_ms(40), depart_frame=0)
+    off = -90.0
+    h_in = G.visible_heading(m, is_in_camera=True, forward_offset_deg=off)
+    h_out = G.visible_heading(m, is_in_camera=False, forward_offset_deg=off)
+    base_in = G.approach_rotation(G.Direction.N)
+    base_out = G.approach_rotation(m.exit_direction)   # N straight -> N
+    assert abs(h_in - (base_in + math.radians(off))) < 1e-9
+    assert abs(h_out - (base_out + math.radians(off))) < 1e-9
+    # offset 0 -> heading equals the base rotation (no correction)
+    assert abs(G.visible_heading(m, True, 0.0) - base_in) < 1e-9
+    # out shot of a turning movement uses the EXIT direction's heading + offset
+    mr = K.plan_motion("v", G.Direction.N, 1, G.Turn.RIGHT,
+                       K.speed_kmh_to_ms(40), depart_frame=0)
+    h_r = G.visible_heading(mr, is_in_camera=False, forward_offset_deg=off)
+    assert abs(h_r - (G.approach_rotation(G.Direction.E) + math.radians(off))) < 1e-9
+
+
+def test_validate_length_axis_respects_forward_offset():
+    # validate_assets picks the length axis from forward_offset_deg. Mirror the
+    # pure-python decision so the validator stays coherent with sideways models.
+    def length_axis_idx(fwd_off):
+        return 0 if abs((fwd_off % 180) - 90.0) < 1e-3 else 1
+    assert length_axis_idx(0) == 1      # nose +Y -> length on Y (index 1)
+    assert length_axis_idx(90) == 0     # nose +X -> length on X (index 0)
+    assert length_axis_idx(-90) == 0    # nose -X -> length on X (index 0)
+    assert length_axis_idx(180) == 1    # nose -Y -> length on Y (index 1)
 
 
 def _run_all():

@@ -1,23 +1,29 @@
 """Phase 1 — Intersection geometry (pure Python, no bpy).
 
-Defines the world-space layout of the 4-way intersection consistent with
-KNOWLEDGE_EN.md and the locked parameters:
+Defines the world-space layout for a single-camera shot of the 4-way
+intersection.  Each of the 8 videos is an independent .blend; lanes are
+centred on the road axis (x = 0) with no shared-world carriageway offset.
 
+Locked parameters:
   * Intersection box: 30 x 30 m  (centred at world origin)
-  * Each axis: 4 lanes @ 3.5 m (14 m) per direction + 2 m median
-  * Rendered road arm width: 14 m (one travel direction)
-  * Lane centre lines (arm-local, entry direction +X = right):
-        [-5.25, -1.75, 1.75, 5.25]
+  * Each axis: 4 lanes @ 3.5 m (14 m) per direction
+  * Lane centre lines (relative to road axis, x = 0):
+        [-5.25, -1.75, +1.75, +5.25]
   * 4 approaches: N, E, S, W
   * 12 movements: approach x {left, straight, right}
 
-Coordinate conventions:
-  * World Z = up, ground at Z = 0.
-  * World Y axis = the N-S axis (N = +Y), World X axis = the E-W axis (E = +X).
-  * Approach direction = the direction vehicles travel TOWARD the intersection.
-    e.g. "N approach" = vehicles moving northbound (+Y) toward the box.
-  * Entry lanes (vehicles approaching) and exit lanes (vehicles leaving) are
-    mirror images across the median for a given axis.
+Per-shot coordinate frame:
+  * Each .blend is built around ONE road arm centred at (0,0,0).
+  * Road forward = +Y (car drives +Y toward the box).
+  * Lanes at x = LANE_CENTERLINES[k] (no carriageway offset).
+  * Camera at (0, ±road_length/2, CAM_HEIGHT) looking along the road.
+
+Lane-index convention (LOCKED):
+  * index 0 = MEDIAN-side (innermost); index 3 = CURB-side (outermost).
+  * Turning rules (right-hand driving):
+        LEFT  -> exit lane 0          (median-side)
+        RIGHT -> exit lane NUM_LANES-1 (curb-side)
+        STRAIGHT -> keep entry lane index
 
 This module is unit-testable without Blender.
 """
@@ -40,12 +46,18 @@ AXIS_WIDTH = 2 * ARM_WIDTH + MEDIAN         # 30 m (full carriageway)
 # lane centre lines relative to the centre of one 4-lane direction (arm-local)
 LANE_CENTERLINES = [-5.25, -1.75, 1.75, 5.25]
 
-# Carriageway lateral offset from the axis centerline to a carriageway centre.
-# Each axis has TWO carriageways (entry + exit) separated by the 2 m median.
-# Carriageway centre = axis_centre ± CARRIAGEWAY_OFFSET.
-CARRIAGEWAY_OFFSET = ARM_WIDTH / 2 + MEDIAN / 2   # = 8.0 m
-
 FPS = 30
+
+
+# Camera parameters (single source of truth — shared by build_scene.place_camera
+# and render.compute_metadata). Keeping them here means the Blender camera and
+# the per-frame pose ground truth in metadata.json always agree.
+CAM_HEIGHT = 7.0       # camera elevation (m)
+CAM_BACK_DIST = 45.0   # how far past the box edge the out-camera looks (m)
+LENS_MM = 60.0         # telephoto focal length
+SENSOR_MM = 36.0       # full-frame sensor width (set on the Blender camera too)
+RES_X = 1920
+RES_Y = 1080
 
 
 class Direction(str, Enum):
@@ -97,19 +109,25 @@ def approach_right(approach: Direction) -> Tuple[float, float]:
     return (fy, -fx)
 
 
+def lane_lateral_offset(direction: Direction, lane_index: int) -> Tuple[float, float]:
+    """Lateral (x, y) offset from the road axis to the centre of a specific
+    lane.  In the per-shot frame the road is centred on the axis (x = 0), so
+    the offset is purely the arm-local lane centerline rotated into the
+    approach's right-hand perpendicular direction."""
+    rx, ry = approach_right(direction)
+    off = LANE_CENTERLINES[lane_index]
+    return (rx * off, ry * off)
+
+
 def lane_entry_box_edge(approach: Direction, lane_index: int) -> Tuple[float, float]:
     """World (x, y) of the centre of an ENTRY lane at the box boundary where
     the vehicle disappears (the near edge of the box relative to the approach).
-
-    Each approach has its own self-contained 14 m road arm centred on the
-    branch axis.  Lane index selects a lane from LANE_CENTERLINES (no median
-    offset — the arm covers the full width on its own).
+    Lanes are centred on the road axis (no carriageway offset).
     """
     fx, fy = approach_forward(approach)
-    rx, ry = approach_right(approach)
-    off = LANE_CENTERLINES[lane_index]
-    cx = rx * off - fx * (BOX_SIZE / 2)
-    cy = ry * off - fy * (BOX_SIZE / 2)
+    ox, oy = lane_lateral_offset(approach, lane_index)
+    cx = ox - fx * (BOX_SIZE / 2)
+    cy = oy - fy * (BOX_SIZE / 2)
     return (cx, cy)
 
 
@@ -122,6 +140,12 @@ def exit_lane_for_movement(approach: Direction, lane_index: int, turn: Turn) -> 
       * straight: outbound = approach (keeps going the same way)
       * right:    outbound = approach rotated right (clockwise from above)
       * left:     outbound = approach rotated left  (counter-clockwise)
+
+    Exit lane index follows right-hand driving with the locked convention
+    index 0 = median-side, NUM_LANES-1 = curb-side:
+      * straight: keep the entry lane index
+      * left:     exit lane 0          (median-side)
+      * right:    exit lane NUM_LANES-1 (curb-side)
     """
     right_map = {Direction.N: Direction.E, Direction.E: Direction.S,
                  Direction.S: Direction.W, Direction.W: Direction.N}
@@ -130,25 +154,20 @@ def exit_lane_for_movement(approach: Direction, lane_index: int, turn: Turn) -> 
     if turn == Turn.STRAIGHT:
         return (approach, lane_index)
     if turn == Turn.RIGHT:
-        return (right_map[approach], 0)
+        return (right_map[approach], NUM_LANES - 1)
     if turn == Turn.LEFT:
-        return (left_map[approach], NUM_LANES - 1)
+        return (left_map[approach], 0)
 
 
 def lane_exit_box_edge(outbound: Direction, lane_index: int) -> Tuple[float, float]:
     """World (x, y) of the centre of an EXIT lane at the box boundary where the
-    vehicle reappears (the far edge of the box relative to `outbound`, i.e. the
-    edge the vehicle emerges from).
-
-    Each exit road is its own 14 m arm centred on the outbound branch axis.
-    Lane index selects from LANE_CENTERLINES (right-hand traffic: lane 0 is
-    the leftmost/innermost lane of the outbound arm).
+    vehicle reappears (the far edge of the box relative to `outbound`).
+    Lanes are centred on the road axis (no carriageway offset).
     """
     fx, fy = outbound.vec
-    rx, ry = approach_right(outbound)
-    off = LANE_CENTERLINES[lane_index]
-    cx = rx * off + fx * (BOX_SIZE / 2)
-    cy = ry * off + fy * (BOX_SIZE / 2)
+    ox, oy = lane_lateral_offset(outbound, lane_index)
+    cx = ox + fx * (BOX_SIZE / 2)
+    cy = oy + fy * (BOX_SIZE / 2)
     return (cx, cy)
 
 
@@ -159,6 +178,64 @@ def approach_rotation(approach: Direction) -> float:
     fx, fy = approach_forward(approach)
     # arm forward is +Y = (0,1); we need to rotate (0,1) -> (fx,fy)
     return math.atan2(fx, fy)
+
+
+def visible_heading(motion: "VehicleMotion", is_in_camera: bool,
+                    forward_offset_deg: float = 0.0) -> float:
+    """World Z rotation (radians) a vehicle must face on the visible segment of
+    the given camera view, INCLUDING the per-class forward_offset_deg correction
+    for models whose nose does not point along +Y.
+
+    In-camera  -> the vehicle faces its approach heading (drives toward box).
+    Out-camera -> the vehicle faces its exit/outbound heading (drives away).
+    The forward_offset_deg is added so a sideways model is corrected on BOTH
+    entry and exit shots (the keyframed rotation would otherwise override the
+    static root rotation set in make_vehicle_instance and drop the correction).
+    """
+    base = (approach_rotation(motion.approach) if is_in_camera
+            else approach_rotation(motion.exit_direction))
+    return base + math.radians(forward_offset_deg)
+
+
+def camera_pose(approach: Direction, is_in: bool, road_meta: dict,
+                cam_height: float = CAM_HEIGHT,
+                cam_back_dist: float = CAM_BACK_DIST):
+    """Return (cam_loc (x,y,z), look_at (x,y,z)) for the telephoto CCTV.
+
+    SINGLE SOURCE OF TRUTH — shared by build_scene.place_camera (Blender) and
+    render.compute_metadata (pure-python per-frame pose).
+
+    Per-shot frame: each .blend is independent; road axis centred at (0,0,0).
+    Camera sits on the road axis centre line (lateral x = 0 in the approach's
+    rotated frame) at road_length/2 from the road centre, elevated CAM_HEIGHT.
+
+    Entry (in_<D>): camera at the back/outer end of the entry arm (farthest
+    from box), at -approach × (half + approach_length), looking toward the box.
+    Cars appear near the camera and drive toward the stop line.
+
+    Exit (out_<D>): camera at the box's far (outbound) edge, at
+    +approach × half, looking outward. Cars emerge just ahead and drive away;
+    the box is behind the camera.
+    """
+    fx, fy = approach_forward(approach)
+    half = BOX_SIZE / 2
+    approach_length = road_meta.get("approach_length", 0.0)
+    crosswalk_y = road_meta.get("crosswalk_y", 0.0)
+    if is_in:
+        # Camera at the outer/back end of the entry arm.
+        # arm extends approach_length from the stop line outward;
+        # stop line is at -approach * half from world origin.
+        cam_ground = (-fx * (half + approach_length),
+                      -fy * (half + approach_length))
+        look_ground = (-fx * (half - 2.0),
+                       -fy * (half - 2.0), 0.0)
+    else:
+        # Camera at the box far edge, looking outward.
+        cam_ground = (fx * half, fy * half)
+        look_ground = (fx * (half + cam_back_dist),
+                       fy * (half + cam_back_dist), 0.0)
+    cam_loc = (cam_ground[0], cam_ground[1], cam_height)
+    return cam_loc, look_ground
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +296,7 @@ def camera_names() -> List[str]:
 # Path length through the intersection (for Delta t)
 # ---------------------------------------------------------------------------
 
-def intersection_path_length(turn: Turn, lane_index: int) -> float:
+def intersection_path_length(turn: Turn) -> float:
     """Distance travelled inside the 30x30 box for a given turn.
 
       straight: BOX_SIZE (30 m)
@@ -243,7 +320,7 @@ def delta_t_seconds(turn: Turn, speed_ms: float) -> float:
     """Blind-zone delay time (s) = path length / speed."""
     if speed_ms <= 0:
         raise ValueError("speed must be > 0")
-    return intersection_path_length(turn, 0) / speed_ms
+    return intersection_path_length(turn) / speed_ms
 
 
 def delta_t_frames(turn: Turn, speed_ms: float, fps: int = FPS) -> int:
