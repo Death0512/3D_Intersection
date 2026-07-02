@@ -13,7 +13,7 @@
       "plate_node": "materials['LicensePlate_Mat'].node_tree.nodes['Image Texture']",
       "plate_default_image": "models/car/textures/plate.png",
       "target_length": 4.47,
-      "forward_offset_deg": 180,
+      "forward_offset_deg": 0,
       "missing_textures": []
     }
   }

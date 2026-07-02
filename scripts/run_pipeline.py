@@ -33,6 +33,9 @@ _DOAN_PY = (os.environ.get("DOAN_PYTHON")
 PYTHON = _DOAN_PY if os.path.exists(_DOAN_PY) else sys.executable
 BLENDER = shutil.which("blender") or "blender"
 
+sys.path.insert(0, os.path.join(HERE, "lib"))
+import envfile as ENV
+
 
 def run(cmd: list, cwd=ROOT, check=True):
     print(f"\n$ {' '.join(cmd)}")
@@ -122,6 +125,11 @@ def main():
     print(f"  python : {PYTHON}")
     print(f"  blender: {BLENDER}")
     print("=" * 60)
+
+    # Env files are REQUIRED inputs (camera/road/sun/vehicle anchors). Validate
+    # them up front, unconditionally — NOT skippable via --skip-asset-check.
+    print("\n[0/5] Env file validation (required)")
+    ENV.validate_all_envs(ROOT)
 
     if not args.skip_asset_check:
         print("\n[1/5] Asset validation")

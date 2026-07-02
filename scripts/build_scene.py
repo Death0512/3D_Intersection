@@ -27,6 +27,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.path.join(HERE, ".."))
 sys.path.insert(0, os.path.join(HERE, "lib"))
 sys.path.insert(0, HERE)  # for gen_plate
 
@@ -34,6 +35,7 @@ import bpy
 from mathutils import Vector, Matrix
 
 import blender_utils as bu
+import envfile as ENV
 import geometry as G
 import kinematics as K
 from gen_plate import render_plate
@@ -106,14 +108,15 @@ def instantiate_linked_collection(linked_coll, instance_name: str,
 # Road placement (aligned to lane centerlines)
 # ---------------------------------------------------------------------------
 
-def place_road(approach: G.Direction, road_meta: dict, is_entry: bool = True):
+def place_road(approach: G.Direction, road_meta: dict, is_entry: bool = True,
+               env_road: dict = None):
     """Link the road arm and orient + position it for the given approach.
 
     Each road arm is a self-contained 14 m-wide, ~54.75 m-long asset whose
     local +Y end carries the crosswalk / stop-line (crosswalk_y ≈ +27.85) and
     whose local −Y end is the far/back end (≈ −26.9).
 
-    Per-shot frame: road axis centred at (0,0,0); no carriageway lateral offset.
+    Per-shot frame: road axis centred on (0,0,0); no carriageway lateral offset.
     Lane centrelines sit at x = LANE_CENTERLINES[k] in the arm's local frame,
     which aligns with world x after rotation by approach_rotation(approach).
 
@@ -126,31 +129,26 @@ def place_road(approach: G.Direction, road_meta: dict, is_entry: bool = True):
         The arm's local −Y (back) end is placed at the box far edge
         (+approach × BOX/2) and extends outward to approach_length.
         origin = far_edge + forward × arm_back.
+
+    If ``env_road`` (the env file's ``road`` block) is given, its location and
+    rotation_euler OVERRIDE the computed transform (override layer).
     """
     coll = link_collection_from_blend(
         os.path.join(HERE, "..", road_meta["blend"]),
         road_meta["collection"])
 
-    fx, fy = approach.vec
-    crosswalk_y = road_meta.get("crosswalk_y", 0.0)
-    approach_length = road_meta.get("approach_length", crosswalk_y)
-    arm_back = approach_length - crosswalk_y
-    half = BOX_HALF
-    rot = G.approach_rotation(approach)
-
-    if is_entry:
-        edge = (-fx * half, -fy * half)
-        origin_world = (edge[0] - fx * crosswalk_y,
-                        edge[1] - fy * crosswalk_y)
-    else:
-        edge = (fx * half, fy * half)
-        origin_world = (edge[0] + fx * arm_back,
-                        edge[1] + fy * arm_back)
+    (ox, oy, oz), rot = G.road_arm_transform(approach, road_meta, is_entry=is_entry)
+    if env_road is not None:
+        loc = env_road.get("location")
+        rot_e = env_road.get("rotation_euler")
+        if loc is not None:
+            ox, oy, oz = loc
+        if rot_e is not None and len(rot_e) >= 3:
+            rot = rot_e[2]
 
     label = "in" if is_entry else "out"
     empty = instantiate_linked_collection(coll, f"Road_{approach.value}_{label}",
-                                          (origin_world[0], origin_world[1], 0.0),
-                                          rotation_z=rot)
+                                          (ox, oy, oz), rotation_z=rot)
     return empty, coll
 
 
@@ -233,10 +231,20 @@ def assign_plate_and_color(coll, plate_str: str, plates_dir: str, rgba=None):
                 print(f"  (body color warn: {e})")
 
 
-def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str):
-    """Append + duplicate one vehicle at its appear position, assign plate+color.
-    Returns (root_object, motion). The root object is a parent Empty whose
-    children are the duplicated vehicle meshes (so we can animate the Empty)."""
+def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
+                          anchor_loc, anchor_rot_z: float, is_in_camera: bool,
+                          road_meta: dict):
+    """Append + duplicate one vehicle at its env-JSON spawn anchor, assign
+    plate+color. Returns (root_object, motion).
+
+    ``anchor_loc`` / ``anchor_rot_z`` come from the required env file's
+    ``lane_defaults[lane]`` (the frame-0 spawn pose for this camera view). The
+    full kinematics motion is then keyframed on top so the vehicle still drives
+    forward by speed/turn from that anchor (see keyframe_motion).
+
+    ``road_meta`` (from road.json) is passed through so the motion plan drives
+    the full road length (anchor → box edge for in, box edge → road end for out).
+    """
     cls = veh["class"]
     meta = veh_manifest[cls]
     # Append the vehicle collection (local) so we can edit materials per-vehicle.
@@ -250,10 +258,18 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str):
     assign_plate_and_color(coll, veh["plate"], plates_dir, rgba=veh.get("color"))
 
     approach = G.Direction(veh["approach"])
+    # The motion is anchored at the env-JSON spawn point for THIS camera view:
+    # appear_anchor for in-cameras, reappear_anchor for out-cameras. The other
+    # segment uses the geometry default (not filmed on this camera).
+    # road_meta lets compute_motion drive the full anchor → box edge / road end.
+    ax, ay = anchor_loc[0], anchor_loc[1]
+    anchor_xy = (ax, ay)
     motion = K.plan_motion(
         veh["id"], approach, veh["lane"], G.Turn(veh["turn"]),
-        veh["speed_ms"], veh["depart_frame"], fps=FPS)
-    ax, ay = motion.appear_pos
+        veh["speed_ms"], veh["depart_frame"], fps=FPS,
+        appear_anchor=anchor_xy if is_in_camera else None,
+        reappear_anchor=anchor_xy if not is_in_camera else None,
+        road_meta=road_meta)
     fwd_off = meta.get("forward_offset_deg", 0.0)
 
     # Create the parent Empty at the WORLD ORIGIN with no rotation first, then
@@ -264,6 +280,7 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str):
     root = bpy.context.view_layer.objects.active
     root.name = f"VEH_{veh['id']}"
     root["forward_offset_deg"] = fwd_off
+    root["anchor_rot_z"] = float(anchor_rot_z)
 
     # Parent meshes while empty is at origin (matrix_parent_inverse = identity).
     bpy.ops.object.select_all(action="DESELECT")
@@ -274,9 +291,9 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str):
     bpy.context.view_layer.objects.active = root
     bpy.ops.object.parent_set(type="OBJECT", keep_transform=True)
 
-    # Now place the empty at the appear position and apply the heading rotation.
-    # Meshes follow rigidly because their matrix_parent_inverse is identity.
-    rot = G.approach_rotation(approach) + math.radians(fwd_off)
+    # Now place the empty at the spawn anchor and apply heading (anchor + fwd
+    # offset). Meshes follow rigidly because matrix_parent_inverse is identity.
+    rot = anchor_rot_z + math.radians(fwd_off)
     root.location = (ax, ay, 0.0)
     root.rotation_euler = (0.0, 0.0, rot)
     return root, motion
@@ -288,21 +305,24 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str):
 
 def keyframe_motion(empty, motion: G.VehicleMotion, is_in_camera: bool):
     """Keyframe location across the visible segment, hide outside it.
-    Rotation is also keyframed: on entry use the approach heading, on exit
-    use the exit heading. The per-class forward_offset_deg (stashed on the
-    empty by make_vehicle_instance) is included via G.visible_heading so a
-    sideways model stays corrected on both in and out shots — keyframes
-    override the static root rotation, so the offset MUST be applied here too.
-    The rotation change (entry->exit heading) happens while hidden."""
+    Rotation is also keyframed: the heading is the env-JSON anchor rotation
+    (stashed on the empty by make_vehicle_instance) plus the per-class
+    forward_offset_deg, so a sideways model stays corrected on both in and out
+    shots. The rotation change (entry->exit heading) happens while hidden.
+
+    The motion plan is already anchored at the env-JSON spawn point, so the
+    keyframed locations are the motion positions directly (no extra offset).
+    """
     obj = empty
     fwd_off = obj.get("forward_offset_deg", 0.0) if hasattr(obj, "get") else 0.0
+    anchor_rot_z = float(obj.get("anchor_rot_z", 0.0)) if hasattr(obj, "get") else 0.0
     if is_in_camera:
         frame_start, frame_end = motion.appear_frame, motion.disappear_frame
         pos_start, pos_end = motion.appear_pos, motion.disappear_pos
     else:
         frame_start, frame_end = motion.reappear_frame, motion.leave_frame
         pos_start, pos_end = motion.reappear_pos, motion.leave_pos
-    heading = G.visible_heading(motion, is_in_camera, forward_offset_deg=fwd_off)
+    heading = anchor_rot_z + math.radians(fwd_off)
 
     obj.location = (pos_start[0], pos_start[1], 0.0)
     obj.keyframe_insert(data_path="location", frame=frame_start)
@@ -373,7 +393,8 @@ def _set_step_interpolation(obj, data_path):
 # Camera (telephoto, all cameras film the REAR plate)
 # ---------------------------------------------------------------------------
 
-def place_camera(approach: G.Direction, is_in: bool, road_meta: dict):
+def place_camera(approach: G.Direction, is_in: bool, road_meta: dict,
+                 env_camera: dict = None):
     """Place a telephoto CCTV camera that films the REAR license plate.
 
     The camera sits at the NEAR end of the road arm (the end closest to the
@@ -381,37 +402,38 @@ def place_camera(approach: G.Direction, is_in: bool, road_meta: dict):
     elevated CAM_HEIGHT metres, looking down the road in the direction cars
     drive away.  Cars always drive away from the camera → rear plate is filmed.
 
-    Entry (in_<D>):
-        Road arm extends from box near-edge outward ~54.75 m.  Camera at the
-        outer/back end of the arm, looking TOWARD the box (+approach forward).
-        Cars appear near the camera and drive toward the stop line (top of frame).
-
-    Exit (out_<D>):
-        Road arm extends from box near-edge outward.  Camera at the box-edge/
-        crosswalk end, looking OUTWARD (+approach forward, away from box).
-        Cars emerge from the box just ahead of the camera and drive away.
-
-    The camera/look-at positions come from G.camera_pose (single source of
-    truth shared with the per-frame pose ground truth in render.compute_metadata),
-    which applies the lateral carriageway shift so the camera centres on its
-    carriageway.
+    The default camera/look-at positions come from G.camera_pose (single source
+    of truth shared with the per-frame pose ground truth in render.compute_metadata).
+    If ``env_camera`` (the env file's ``camera`` block) is given, its ``location``
+    and ``look_at`` OVERRIDE the computed values (override layer). When
+    ``rotation_euler`` is non-null in the env it is applied directly; otherwise
+    the rotation is derived from look_at via the track-quat (same as default).
     """
     cam_loc, look_ground = G.camera_pose(approach, is_in, road_meta,
                                          cam_height=CAM_HEIGHT,
                                          cam_back_dist=CAM_BACK_DIST)
+    if env_camera is not None:
+        if env_camera.get("location") is not None:
+            cam_loc = tuple(env_camera["location"])
+        if env_camera.get("look_at") is not None:
+            look_ground = tuple(env_camera["look_at"])
     label = "in" if is_in else "out"
     cam_data = bpy.data.cameras.new(f"CamData_{approach.value}_{label}")
-    cam_data.lens = LENS_MM
+    cam_data.lens = (env_camera or {}).get("lens_mm", LENS_MM)
     # Sensor fit must match the metadata convention (SENSOR_MM width, horizontal fit)
     cam_data.sensor_fit = "HORIZONTAL"
-    cam_data.sensor_width = G.SENSOR_MM
+    cam_data.sensor_width = (env_camera or {}).get("sensor_mm", G.SENSOR_MM)
     cam_obj = bpy.data.objects.new(f"Camera_{approach.value}_{label}", cam_data)
     bpy.context.scene.collection.objects.link(cam_obj)
     cam_obj.location = cam_loc
 
-    direction = Vector(look_ground) - Vector(cam_loc)
-    rot_quat = direction.to_track_quat("-Z", "Y")
-    cam_obj.rotation_euler = rot_quat.to_euler()
+    rot_override = (env_camera or {}).get("rotation_euler")
+    if rot_override is not None:
+        cam_obj.rotation_euler = tuple(rot_override)
+    else:
+        direction = Vector(look_ground) - Vector(cam_loc)
+        rot_quat = direction.to_track_quat("-Z", "Y")
+        cam_obj.rotation_euler = rot_quat.to_euler()
 
     bpy.context.scene.camera = cam_obj
     return cam_obj
@@ -465,8 +487,12 @@ def configure_gpu():
 # Render settings
 # ---------------------------------------------------------------------------
 
-def setup_render():
-    """Configure Cycles + OPTIX GPU rendering at 1080p, 30 fps, PNG sequence."""
+def setup_render(env_lights: dict = None):
+    """Configure Cycles + OPTIX GPU rendering at 1080p, 30 fps, PNG sequence.
+
+    If ``env_lights`` (the env file's ``lights`` block) is given, the Sun
+    light's rotation/energy are overridden from it.
+    """
     scene = bpy.context.scene
     # Engine: Cycles (EEVEE cannot use the GPU in headless -b mode).
     scene.render.engine = "CYCLES"
@@ -500,10 +526,12 @@ def setup_render():
         bg.inputs["Strength"].default_value = 2.0
     if not any(o.type == "LIGHT" and o.data.type == "SUN" for o in bpy.data.objects):
         sun = bpy.data.lights.new("Sun", type="SUN")
-        sun.energy = 4.0
         sun_obj = bpy.data.objects.new("Sun", sun)
         bpy.context.scene.collection.objects.link(sun_obj)
-        sun_obj.rotation_euler = (math.radians(55), 0.0, math.radians(30))
+        sun_env = (env_lights or {}).get("Sun", {})
+        sun.energy = sun_env.get("energy", 4.0)
+        rot_e = sun_env.get("rotation_euler", [math.radians(55), 0.0, math.radians(30)])
+        sun_obj.rotation_euler = tuple(rot_e)
 
 
 # ---------------------------------------------------------------------------
@@ -525,31 +553,46 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
     plates_dir = os.path.join(os.path.dirname(out_blend), "plates")
     os.makedirs(plates_dir, exist_ok=True)
 
+    # Load the REQUIRED per-camera env file (hard-fails if missing/invalid).
+    env = ENV.load_env(camera_tag, ROOT)
+
     # 1. Road. In-camera shows the entry carriageway of the approach; Out-camera
     #    shows the exit carriageway (outbound direction = approach for out_<D>).
-    place_road(approach, road_meta, is_entry=is_in)
+    place_road(approach, road_meta, is_entry=is_in, env_road=env.get("road"))
 
-    # 2. Vehicles visible on this camera.
+    # 2. Vehicles visible on this camera. Each spawns at its env-JSON
+    #    lane_defaults[lane] anchor, then drives forward by the kinematics.
     scene_objs = []
     motions = []
     for veh in scenario["vehicles"]:
         if is_in:
             if veh["approach"] != approach.value:
                 continue
+            anchor_lane = veh["lane"]
         else:
-            ex_dir, _ = G.exit_lane_for_movement(
+            ex_dir, ex_lane = G.exit_lane_for_movement(
                 G.Direction(veh["approach"]), veh["lane"], G.Turn(veh["turn"]))
             if ex_dir != approach:
                 continue
-        empty, motion = make_vehicle_instance(veh, veh_manifest, plates_dir)
+            anchor_lane = ex_lane
+        anchor_loc, anchor_rot_z = ENV.lane_default_anchor(env, anchor_lane)
+        empty, motion = make_vehicle_instance(
+            veh, veh_manifest, plates_dir,
+            anchor_loc=anchor_loc, anchor_rot_z=anchor_rot_z,
+            is_in_camera=is_in, road_meta=road_meta)
         keyframe_motion(empty, motion, is_in_camera=is_in)
         scene_objs.append(empty)
         motions.append((veh, motion))
 
     # 3. Camera + render setup (GPU: Cycles + OPTIX)
-    place_camera(approach, is_in, road_meta)
+    place_camera(approach, is_in, road_meta, env_camera=env.get("camera"))
+    # Warn if the env camera diverges from the geometry-derived one — metadata
+    # is always geometry-derived, so a drift means render != metadata.
+    drift = ENV.camera_drift(env, scenario, camera_tag, road_meta)
+    if drift:
+        print(f"  [env] WARNING camera drift: {drift} — render will not match metadata.json")
     configure_gpu()
-    setup_render()
+    setup_render(env_lights=env.get("lights"))
     bpy.context.scene.frame_start = 0
     bpy.context.scene.frame_end = scenario["duration_frames"]
 

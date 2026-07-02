@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # ---- locked constants -------------------------------------------------------
@@ -53,7 +53,7 @@ FPS = 30
 # and render.compute_metadata). Keeping them here means the Blender camera and
 # the per-frame pose ground truth in metadata.json always agree.
 CAM_HEIGHT = 7.0       # camera elevation (m)
-CAM_BACK_DIST = 45.0   # how far past the box edge the out-camera looks (m)
+CAM_BACK_DIST = 100.0   # how far past the box edge the out-camera looks (m)
 LENS_MM = 60.0         # telephoto focal length
 SENSOR_MM = 36.0       # full-frame sensor width (set on the Blender camera too)
 RES_X = 1920
@@ -178,6 +178,30 @@ def approach_rotation(approach: Direction) -> float:
     fx, fy = approach_forward(approach)
     # arm forward is +Y = (0,1); we need to rotate (0,1) -> (fx,fy)
     return math.atan2(fx, fy)
+
+
+def road_arm_transform(approach: Direction, road_meta: dict,
+                       is_entry: bool) -> Tuple[Tuple[float, float, float], float]:
+    """World (location xyz, rotation_z) for the road arm empty in the per-shot
+    frame.  Mirrors build_scene.place_road exactly — kept here as the single
+    source of truth so the env-file generator and the Blender placement agree.
+
+    Entry (is_entry=True): arm +Y (crosswalk) at box near-edge, body outward.
+    Exit (is_entry=False): arm −Y (back) at box far edge, body outward.
+    """
+    fx, fy = approach_forward(approach)
+    crosswalk_y = road_meta.get("crosswalk_y", 0.0)
+    approach_length = road_meta.get("approach_length", crosswalk_y)
+    arm_back = approach_length - crosswalk_y
+    half = BOX_SIZE / 2
+    rot = approach_rotation(approach)
+    if is_entry:
+        edge = (-fx * half, -fy * half)
+        ox, oy = edge[0] - fx * crosswalk_y, edge[1] - fy * crosswalk_y
+    else:
+        edge = (fx * half, fy * half)
+        ox, oy = edge[0] + fx * arm_back, edge[1] + fy * arm_back
+    return ((ox, oy, 0.0), rot)
 
 
 def visible_heading(motion: "VehicleMotion", is_in_camera: bool,
@@ -359,7 +383,10 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
                    speed_ms: float, depart_frame: int,
                    approach_visible_length: float = 40.0,
                    exit_visible_length: float = 40.0,
-                   fps: int = FPS) -> VehicleMotion:
+                   fps: int = FPS,
+                   appear_anchor: Optional[Tuple[float, float]] = None,
+                   reappear_anchor: Optional[Tuple[float, float]] = None,
+                   road_meta: Optional[dict] = None) -> VehicleMotion:
     """Compute the frame numbers and world positions for a vehicle's full
     In -> Black-Box -> Out trajectory.
 
@@ -370,14 +397,32 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
       * After the Black-Box delay it reappears at the box's far edge along the
         OUTBOUND heading (the heading it has after the turn), at the exit lane
         centre, and continues OUTWARD along that outbound heading.
+      * With ``road_meta`` (from ``road.json``) the IN segment ends at the box
+        edge and the OUT segment ends at the road far end, so the vehicle
+        drives the **full visible length** of the road arm.  Without it the
+        fixed ``approach_visible_length`` / ``exit_visible_length`` defaults
+        are used (legacy behaviour).
 
-    approach_visible_length: how far back along the approach the In-camera can
-        see (vehicle appears this far behind the stop line).
-    exit_visible_length: how far along the exit the Out-camera can see (vehicle
-        leaves when it passes this far beyond the crosswalk).
+    appear_anchor / reappear_anchor: optional explicit START positions for the
+        in-segment (appear) and out-segment (reappear). When given and
+        ``road_meta`` is also provided the vehicle traverses the full road;
+        when ``road_meta`` is absent the fixed-length defaults are used.
     """
-    dt_approach = approach_visible_length / speed_ms
-    dt_exit = exit_visible_length / speed_ms
+    # ---- effective visible lengths -------------------------------------------
+    _avl = approach_visible_length
+    _evl = exit_visible_length
+    if appear_anchor is not None and road_meta is not None:
+        # IN segment ends at intersection box near edge.
+        disappear_pos = lane_entry_box_edge(approach, lane)
+        dx = disappear_pos[0] - appear_anchor[0]
+        dy = disappear_pos[1] - appear_anchor[1]
+        _avl = math.sqrt(dx * dx + dy * dy)
+    if reappear_anchor is not None and road_meta is not None:
+        _evl = road_meta["approach_length"]
+
+    # ---- frame timing --------------------------------------------------------
+    dt_approach = _avl / speed_ms
+    dt_exit = _evl / speed_ms
     dt_box_frames = delta_t_frames(turn, speed_ms, fps)
 
     appear_frame = depart_frame
@@ -385,18 +430,31 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
     reappear_frame = disappear_frame + dt_box_frames
     leave_frame = reappear_frame + int(round(dt_exit * fps))
 
-    # ENTRY segment: along `approach` forward, on the entry lane (right-hand).
+    # ---- positions: ENTRY segment --------------------------------------------
     fx, fy = approach_forward(approach)
-    disappear_pos = lane_entry_box_edge(approach, lane)
-    appear_pos = (disappear_pos[0] - fx * approach_visible_length,
-                  disappear_pos[1] - fy * approach_visible_length)
+    if appear_anchor is not None:
+        appear_pos = (appear_anchor[0], appear_anchor[1])
+        if road_meta is not None:
+            disappear_pos = lane_entry_box_edge(approach, lane)
+        else:
+            disappear_pos = (appear_pos[0] + fx * _avl,
+                             appear_pos[1] + fy * _avl)
+    else:
+        disappear_pos = lane_entry_box_edge(approach, lane)
+        appear_pos = (disappear_pos[0] - fx * _avl,
+                      disappear_pos[1] - fy * _avl)
 
-    # EXIT segment: along OUTBOUND heading, on the exit lane (right-hand).
+    # ---- positions: EXIT segment ---------------------------------------------
     outbound, ex_lane = exit_lane_for_movement(approach, lane, turn)
     ofx, ofy = outbound.vec
-    reappear_pos = lane_exit_box_edge(outbound, ex_lane)
-    leave_pos = (reappear_pos[0] + ofx * exit_visible_length,
-                 reappear_pos[1] + ofy * exit_visible_length)
+    if reappear_anchor is not None:
+        reappear_pos = (reappear_anchor[0], reappear_anchor[1])
+        leave_pos = (reappear_pos[0] + ofx * _evl,
+                     reappear_pos[1] + ofy * _evl)
+    else:
+        reappear_pos = lane_exit_box_edge(outbound, ex_lane)
+        leave_pos = (reappear_pos[0] + ofx * _evl,
+                     reappear_pos[1] + ofy * _evl)
 
     return VehicleMotion(
         vehicle_id=vehicle_id, approach=approach, lane=lane, turn=turn,

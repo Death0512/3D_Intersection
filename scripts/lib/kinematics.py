@@ -30,10 +30,15 @@ def min_headway_frames(vehicle_length: float, speed_ms: float,
 
 def plan_motion(vehicle_id: str, approach, lane, turn, speed_ms, depart_frame,
                 approach_visible_length=40.0, exit_visible_length=40.0,
-                fps=G.FPS) -> G.VehicleMotion:
+                fps=G.FPS,
+                appear_anchor=None, reappear_anchor=None,
+                road_meta=None) -> G.VehicleMotion:
     return G.compute_motion(vehicle_id, approach, lane, turn, speed_ms,
                             depart_frame, approach_visible_length,
-                            exit_visible_length, fps)
+                            exit_visible_length, fps,
+                            appear_anchor=appear_anchor,
+                            reappear_anchor=reappear_anchor,
+                            road_meta=road_meta)
 
 
 def conflict_free(departures: List[Tuple[int, float, float]],

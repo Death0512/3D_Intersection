@@ -8,9 +8,9 @@ For each of the 8 cameras (in_N, out_N, in_E, out_E, ...), builds the scene
 
 No 2D bounding box is emitted: the metadata is pure ground truth for
 stress-testing detection / LPR models, which must localise vehicles themselves.
-Camera placement is sourced from geometry.camera_pose (single source of truth
-shared with build_scene.place_camera), so the rendered view and the metadata
-always agree.
+Camera placement and per-lane vehicle start anchors come from the required env
+files (assets/envs/<tag>.json), loaded by envfile.load_env; build_scene reads
+the SAME files, so the rendered view and the metadata always agree.
 
 Run:
     blender -b --python scripts/render.py -- --scenario output/run1/scenario.json --out output/run1
@@ -23,6 +23,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.path.join(HERE, ".."))
 sys.path.insert(0, os.path.join(HERE, "lib"))
 sys.path.insert(0, HERE)
 
@@ -36,35 +37,56 @@ except ImportError:
 
 import geometry as G
 import kinematics as K
+import envfile as ENV
 
 
 # ---------------------------------------------------------------------------
 # Metadata assembly (pure-python, sparse pose ground truth)
 # ---------------------------------------------------------------------------
 
-def compute_metadata(scenario: dict) -> dict:
-    """Build the full metadata structure from the scenario + kinematics.
+def compute_metadata(scenario: dict, root: str) -> dict:
+    """Build the full metadata structure from the scenario + kinematics + env.
 
     Per-frame data is SPARSE: only visible frames are listed, each carrying the
     vehicle's world pose (x, y, z, rot_z), visibility flag, and the camera tag
     that films it. Poses are derived by linear interpolation of the kinematics
     motion plan (the same plan build_scene keyframes), so metadata and render
     stay consistent.
+
+    Vehicle START positions come from the required env files
+    (``assets/envs/<tag>.json`` lane_defaults) — the SAME anchors build_scene
+    uses — so the render and the ground-truth metadata agree exactly. The env
+    files are loaded once and validated (hard-fail if missing/invalid).
     """
     fps = scenario["fps"]
     duration = scenario["duration_frames"]
+    envs = {tag: ENV.load_env(tag, root) for tag in G.camera_names()}
+
+    road_path = os.path.join(root, "assets", "road.json")
+    if not os.path.exists(road_path):
+        raise SystemExit(f"FAIL: road.json not found: {road_path}")
+    with open(road_path) as f:
+        road_meta = json.load(f)
+
     vehicles_meta = []
     for veh in scenario["vehicles"]:
         approach = G.Direction(veh["approach"])
         turn = G.Turn(veh["turn"])
-        motion = K.plan_motion(veh["id"], approach, veh["lane"], turn,
-                               veh["speed_ms"], veh["depart_frame"], fps=fps)
+        exit_dir, ex_lane = G.exit_lane_for_movement(approach, veh["lane"], turn)
         in_cam_tag = f"in_{approach.value}"
-        out_cam_tag = f"out_{motion.exit_direction.value}"
+        out_cam_tag = f"out_{exit_dir.value}"
+        # Required env anchors for this vehicle's in/out segments.
+        in_anchor, in_rot_z = ENV.lane_default_anchor(envs[in_cam_tag], veh["lane"])
+        out_anchor, out_rot_z = ENV.lane_default_anchor(envs[out_cam_tag], ex_lane)
+        motion = K.plan_motion(veh["id"], approach, veh["lane"], turn,
+                               veh["speed_ms"], veh["depart_frame"], fps=fps,
+                               appear_anchor=in_anchor[:2],
+                               reappear_anchor=out_anchor[:2],
+                               road_meta=road_meta)
 
         frames = []
-        # In segment
-        in_rot = G.approach_rotation(approach)
+        # In segment — rot_z is the env anchor heading (true vehicle heading;
+        # equals approach_rotation for an unedited file).
         for f in range(motion.appear_frame, min(motion.disappear_frame, duration) + 1):
             t = (f - motion.appear_frame) / max(1, motion.disappear_frame - motion.appear_frame)
             x = motion.appear_pos[0] + (motion.disappear_pos[0] - motion.appear_pos[0]) * t
@@ -72,10 +94,9 @@ def compute_metadata(scenario: dict) -> dict:
             frames.append({
                 "frame": f, "visible": True, "camera": in_cam_tag,
                 "pose": {"x": round(x, 3), "y": round(y, 3), "z": 0.0,
-                         "rot_z": round(in_rot, 4)},
+                         "rot_z": round(in_rot_z, 4)},
             })
-        # Out segment
-        out_rot = G.approach_rotation(motion.exit_direction)
+        # Out segment — rot_z is the env anchor heading for the exit lane.
         for f in range(max(motion.reappear_frame, 0), min(motion.leave_frame, duration) + 1):
             t = (f - motion.reappear_frame) / max(1, motion.leave_frame - motion.reappear_frame)
             x = motion.reappear_pos[0] + (motion.leave_pos[0] - motion.reappear_pos[0]) * t
@@ -83,7 +104,7 @@ def compute_metadata(scenario: dict) -> dict:
             frames.append({
                 "frame": f, "visible": True, "camera": out_cam_tag,
                 "pose": {"x": round(x, 3), "y": round(y, 3), "z": 0.0,
-                         "rot_z": round(out_rot, 4)},
+                         "rot_z": round(out_rot_z, 4)},
             })
         frames.sort(key=lambda d: d["frame"])
 
@@ -214,7 +235,7 @@ def main():
             print(f"  FAILED {tag}: {e}")
 
     # metadata
-    meta = compute_metadata(scenario)
+    meta = compute_metadata(scenario, ROOT)
     meta["videos"] = rendered
     meta_path = os.path.join(ns.out, "metadata.json")
     with open(meta_path, "w") as f:

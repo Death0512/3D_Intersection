@@ -19,8 +19,10 @@ import bpy
 from mathutils import Vector
 
 import blender_utils as bu
+import envfile as ENV
 
 ASSETS_DIR = os.path.join(HERE, "..", "assets")
+ROOT = os.path.abspath(os.path.join(HERE, ".."))
 VEHICLES_JSON = os.path.join(ASSETS_DIR, "vehicles.json")
 ROAD_JSON = os.path.join(ASSETS_DIR, "road.json")
 
@@ -130,8 +132,23 @@ def validate_vehicle(veh_class: str, meta: dict) -> bool:
     return ok
 
 
+def validate_env_files() -> bool:
+    """Validate all 8 required env files (pure-python; hard-fails on first
+    missing/invalid file via ENV.load_env)."""
+    print("=" * 60)
+    print("VALIDATE: env files (required inputs)")
+    print("=" * 60)
+    try:
+        ENV.validate_all_envs(ROOT)
+        return True
+    except SystemExit as e:
+        print(f"  [FAIL] {e}")
+        return False
+
+
 def main():
     all_ok = True
+    all_ok &= validate_env_files()
     all_ok &= validate_road()
     if not os.path.exists(VEHICLES_JSON):
         print("FAIL: vehicles.json not found")

@@ -26,6 +26,8 @@ import geometry as G
 import kinematics as K
 from gen_plate import random_plate
 
+ROAD_JSON = os.path.join(HERE, "..", "assets", "road.json")
+
 
 # ---- defaults ---------------------------------------------------------------
 DEFAULT_SEED = 42
@@ -141,7 +143,15 @@ def generate(seed: int, num_vehicles: int, duration_frames: int,
              out_dir: str, fps: int = G.FPS) -> dict:
     rng = random.Random(seed)
     vehicles = [make_vehicle(f"V{i:03d}", rng) for i in range(num_vehicles)]
-    vehicles = schedule_departures(vehicles, duration_frames, rng)
+    # Use the true road approach length for catch-up spacing so the
+    # scheduling is consistent with the longer visible segment driven at render.
+    approach_len = 40.0
+    if os.path.exists(ROAD_JSON):
+        with open(ROAD_JSON) as f:
+            approach_len = json.load(f).get("approach_length", 40.0)
+    vehicles = schedule_departures(
+        vehicles, duration_frames, rng,
+        approach_visible_length=approach_len)
 
     scenario = {
         "seed": seed,

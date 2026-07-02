@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 from lib import geometry as G
 from lib import kinematics as K
+from lib import envfile as ENV
 
 
 def test_box_and_lane_dims():
@@ -167,6 +168,116 @@ def test_compute_motion_frame_ordering():
         G.Turn.STRAIGHT, K.speed_kmh_to_ms(40))
 
 
+def test_compute_motion_with_appear_anchor_overrides_start():
+    # An explicit appear_anchor sets appear_pos; disappear_pos is derived
+    # forward from it by approach_visible_length. Timing is unchanged.
+    v = K.speed_kmh_to_ms(40)
+    base = K.plan_motion("v", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0, fps=30)
+    anchored = K.plan_motion("v", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0, fps=30,
+                             appear_anchor=(10.0, -100.0))
+    # appear_pos is the anchor
+    assert anchored.appear_pos == (10.0, -100.0)
+    # disappear is 40m forward (N = +Y) from the anchor
+    assert abs(anchored.disappear_pos[0] - 10.0) < 1e-9
+    assert abs(anchored.disappear_pos[1] - (-100.0 + 40.0)) < 1e-9
+    # frames unchanged (anchor only moves position, not timing)
+    assert anchored.appear_frame == base.appear_frame
+    assert anchored.disappear_frame == base.disappear_frame
+    # the out segment is untouched when only appear_anchor is given
+    assert anchored.reappear_pos == base.reappear_pos
+
+
+def test_compute_motion_with_reappear_anchor_overrides_out_segment():
+    v = K.speed_kmh_to_ms(40)
+    base = K.plan_motion("v", G.Direction.N, 1, G.Turn.RIGHT, v, 0, fps=30)
+    anchored = K.plan_motion("v", G.Direction.N, 1, G.Turn.RIGHT, v, 0, fps=30,
+                             reappear_anchor=(50.0, 20.0))
+    assert anchored.reappear_pos == (50.0, 20.0)
+    # exit direction for N->right is E (+X): leave is 40m further along +X
+    assert abs(anchored.leave_pos[0] - (50.0 + 40.0)) < 1e-9
+    assert abs(anchored.leave_pos[1] - 20.0) < 1e-9
+    # in segment untouched
+    assert anchored.appear_pos == base.appear_pos
+
+
+def test_anchor_equivalent_to_default_when_matching_geometry():
+    # When the anchor equals the geometry-derived position, anchored motion
+    # is identical to the default motion (proves env files that match geometry
+    # reproduce the procedural output exactly).
+    v = K.speed_kmh_to_ms(45)
+    base = K.plan_motion("V0", G.Direction.N, 1, G.Turn.RIGHT, v, 5, fps=30)
+    anchored = K.plan_motion("V0", G.Direction.N, 1, G.Turn.RIGHT, v, 5, fps=30,
+                             appear_anchor=base.appear_pos,
+                             reappear_anchor=base.reappear_pos)
+    assert anchored.appear_pos == base.appear_pos
+    assert anchored.disappear_pos == base.disappear_pos
+    assert anchored.reappear_pos == base.reappear_pos
+    assert anchored.leave_pos == base.leave_pos
+
+
+def test_road_meta_in_anchor_drives_to_box_edge():
+    # When road_meta + appear_anchor are given, disappear_pos = lane_entry_box_edge
+    # (the box near edge), not anchor + fixed visible_length.
+    v = K.speed_kmh_to_ms(40)
+    road = {"approach_length": 54.751}
+    anchor = (10.0, -100.0)
+    anchored = K.plan_motion("v", G.Direction.N, 0, G.Turn.STRAIGHT,
+                             v, 0, fps=30,
+                             appear_anchor=anchor, road_meta=road)
+    # disappear is the box near edge for N lane 0
+    expected_disappear = G.lane_entry_box_edge(G.Direction.N, 0)
+    assert abs(anchored.disappear_pos[0] - expected_disappear[0]) < 1e-9
+    assert abs(anchored.disappear_pos[1] - expected_disappear[1]) < 1e-9
+    # appear is the anchor itself
+    assert anchored.appear_pos == anchor
+    # out segment (no reappear_anchor) uses geometry default (unchanged)
+    assert anchored.reappear_pos == G.lane_exit_box_edge(
+        *G.exit_lane_for_movement(G.Direction.N, 0, G.Turn.STRAIGHT))
+
+
+def test_road_meta_out_anchor_drives_to_road_end():
+    # When road_meta + reappear_anchor are given, leave_pos = anchor + outbound *
+    # road_meta["approach_length"] (the far end of the exit road).
+    v = K.speed_kmh_to_ms(40)
+    road = {"approach_length": 54.751}
+    # N turn right -> outbound = E (+X)
+    anchor = (15.0, -5.25)  # typical out_E lane 3 reappear anchor
+    anchored = K.plan_motion("v", G.Direction.N, 1, G.Turn.RIGHT,
+                             v, 0, fps=30,
+                             reappear_anchor=anchor, road_meta=road)
+    assert anchored.reappear_pos == anchor
+    # leave is 54.751 m east of the reappear anchor
+    assert abs(anchored.leave_pos[0] - (15.0 + 54.751)) < 1e-9
+    assert abs(anchored.leave_pos[1] - (-5.25)) < 1e-9
+    # In segment (no appear_anchor) uses geometry default
+    base = K.plan_motion("v", G.Direction.N, 1, G.Turn.RIGHT, v, 0, fps=30)
+    assert anchored.appear_pos == base.appear_pos
+
+
+def test_road_meta_timing_scales_with_full_distance():
+    # Frame counts should increase proportionally when travel distance grows.
+    v = K.speed_kmh_to_ms(10)  # slow vehicle to amplify frame differences
+    road = {"approach_length": 54.751}
+    short = K.plan_motion("v", G.Direction.N, 0, G.Turn.STRAIGHT,
+                          v, 0, fps=30,
+                          appear_anchor=(-5.25, -55.0))  # 40m travel
+    full = K.plan_motion("v", G.Direction.N, 0, G.Turn.STRAIGHT,
+                         v, 0, fps=30,
+                         appear_anchor=(-5.25, -55.0), road_meta=road)
+    # full travel (55→15=40m) same as short, so frames are equal
+    # When anchor is at -75 (60m to box edge), frames should be ~1.5x
+    further = K.plan_motion("v", G.Direction.N, 0, G.Turn.STRAIGHT,
+                            v, 0, fps=30,
+                            appear_anchor=(-5.25, -75.0), road_meta=road)
+    # 60m / 40m = 1.5 → 1.5 * short frames (rounding may give slight diff)
+    short_frames = short.disappear_frame - short.appear_frame
+    further_frames = further.disappear_frame - further.appear_frame
+    assert further_frames > short_frames, f"{further_frames} <= {short_frames}"
+    # 60m at 10km/h (2.778 m/s) = 21.6 s = 648 frames @30fps
+    # 40m = 14.4 s = 432 frames
+    assert abs(further_frames - 648) <= 1
+
+
 def test_headway_conflict_detection():
     # departures in same lane: (frame, length, speed)
     # two cars 4.5m long at 11.1 m/s; min headway = (4.5+2)/11.1 * 30 ~ 17.6 -> 18 frames
@@ -253,16 +364,27 @@ def test_metadata_pose_matches_motion_plan():
     # Consistency: render.compute_metadata per-frame poses must equal the
     # linear interpolation of the kinematics motion plan (the same plan
     # build_scene keyframes). Guards against metadata/render drift.
+    # The reference plan_motion uses the SAME anchors + road_meta that
+    # compute_metadata loads from env files and road.json.
     import render
     v = K.speed_kmh_to_ms(45)
     scn = {"seed": 1, "fps": 30, "duration_frames": 400, "box_size": G.BOX_SIZE,
            "vehicles": [{"id": "V0", "class": "car", "color": [0.1, 0.2, 0.8, 1.0],
-                         "color_name": "blue", "plate": "59X-1234", "approach": "N",
-                         "lane": 1, "turn": "right", "speed_ms": v, "speed_kmh": 45,
-                         "length": 4.47, "depart_frame": 5}]}
-    meta = render.compute_metadata(scn)
+                          "color_name": "blue", "plate": "59X-1234", "approach": "N",
+                          "lane": 1, "turn": "right", "speed_ms": v, "speed_kmh": 45,
+                          "length": 4.47, "depart_frame": 5}]}
+    meta = render.compute_metadata(scn, ROOT)
     vm = meta["vehicles"][0]
-    motion = K.plan_motion("V0", G.Direction.N, 1, G.Turn.RIGHT, v, 5, fps=30)
+    # Replicate the same plan inputs that compute_metadata uses internally.
+    env_in = ENV.load_env("in_N", ROOT)
+    env_out = ENV.load_env("out_E", ROOT)
+    in_anchor, _ = ENV.lane_default_anchor(env_in, 1)
+    out_anchor, _ = ENV.lane_default_anchor(env_out, 3)
+    road_meta_ref = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    motion = K.plan_motion("V0", G.Direction.N, 1, G.Turn.RIGHT, v, 5, fps=30,
+                           appear_anchor=in_anchor[:2],
+                           reappear_anchor=out_anchor[:2],
+                           road_meta=road_meta_ref)
     for fr in vm["frames"]:
         if fr["frame"] <= motion.disappear_frame:
             t = (fr["frame"] - motion.appear_frame) / max(1, motion.disappear_frame - motion.appear_frame)

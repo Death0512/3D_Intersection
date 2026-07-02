@@ -1,0 +1,97 @@
+{
+  "camera_tag": "out_S",
+  "approach": "S",
+  "role": "out",
+  "schema_version": 2,
+  "generated_from": "geometry.camera_pose + geometry.road_arm_transform",
+  "camera": {
+    "location": [
+      0.0,
+      5.0,
+      10.0
+    ],
+    "look_at": [
+      0.0,
+      -35.0,
+      0.0
+    ],
+    "rotation_euler": null,
+    "lens_mm": 60.0,
+    "sensor_mm": 36.0
+  },
+  "road": {
+    "object": "Road_S_out",
+    "location": [
+      0.0,
+      -41.905,
+      0.0
+    ],
+    "rotation_euler": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "lights": {
+    "Sun": {
+      "rotation_euler": [
+        0.9599310885968813,
+        0.0,
+        0.5235987755982988
+      ],
+      "energy": 4.0
+    }
+  },
+  "vehicles": {
+    "lane_defaults": {
+      "0": {
+        "location": [
+          5.25,
+          -15.0,
+          0.0
+        ],
+        "rotation_euler": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "1": {
+        "location": [
+          1.75,
+          -15.0,
+          0.0
+        ],
+        "rotation_euler": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "2": {
+        "location": [
+          -1.75,
+          -15.0,
+          0.0
+        ],
+        "rotation_euler": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "3": {
+        "location": [
+          -5.25,
+          -15.0,
+          0.0
+        ],
+        "rotation_euler": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    }
+  }
+}

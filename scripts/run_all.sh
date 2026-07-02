@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # run_all.sh — Full synthetic CCTV intersection video pipeline
 #
+# Required inputs:
+#   assets/envs/{in,out}_{N,S,E,W}.json — per-camera env files that drive the
+#   camera, road, sun, and per-lane vehicle spawn anchors. The pipeline
+#   hard-fails if any of these 8 files is missing or has a null required field.
+#
 # Usage:
 #   bash scripts/run_all.sh [OPTIONS]
 #
@@ -23,10 +28,10 @@ set -euo pipefail
 # Defaults
 # ---------------------------------------------------------------------------
 SEED=42
-NUM_VEHICLES=30
+NUM_VEHICLES=120
 FPS=30
-SECONDS_VAL=12
-DURATION=12
+SECONDS_VAL=5
+DURATION=300
 OUT_DIR="output/run_car"
 ONLY=""
 SKIP_ASSET_CHECK=0
