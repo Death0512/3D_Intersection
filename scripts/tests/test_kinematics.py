@@ -30,11 +30,13 @@ def test_box_and_lane_dims():
     assert s["num_lanes"] == 4
 
 
-def test_routing_table_has_12_movements_per_approach():
-    # 4 approaches x 4 lanes x 3 turns = 48 rows actually (lane-indexed).
-    assert len(G.ROUTING_TABLE) == 4 * 4 * 3
-    # 8 cameras
+def test_routing_table_has_legal_movements_per_approach():
+    # Strict lane-use: lane0={L,S}, lane1={S}, lane2={S}, lane3={S,R}
+    # => 6 legal lane-turn movements per approach.
+    assert len(G.ROUTING_TABLE) == 4 * 6
     assert len(G.camera_names()) == 8
+    for m in G.ROUTING_TABLE:
+        assert m.turn in G.allowed_turns(m.lane)
 
 
 def test_straight_exit_keeps_heading_same_lane():
@@ -148,15 +150,25 @@ def test_delta_t_straight_40kmh():
     assert frames == round(G.BOX_SIZE / v * 30)  # ~81
 
 
-def test_delta_t_turns_longer_or_shorter():
+def test_delta_t_turns_legacy_constant_speed():
     v = K.speed_kmh_to_ms(40)
     dt_straight = G.delta_t_seconds(G.Turn.STRAIGHT, v)
     dt_right = G.delta_t_seconds(G.Turn.RIGHT, v)
     dt_left = G.delta_t_seconds(G.Turn.LEFT, v)
-    # right turn arc (radius 6) is shorter than straight; left (radius 12) shorter too
+    # Legacy fallback (no lane_index) preserves the fixed-speed model.
     assert dt_right < dt_straight
     assert dt_left < dt_straight
     assert dt_left > dt_right
+
+
+def test_delta_t_turns_with_lane_deceleration_are_longer():
+    v = K.speed_kmh_to_ms(60)
+    dt_straight = G.delta_t_seconds(G.Turn.STRAIGHT, v, lane_index=3)
+    dt_right = G.delta_t_seconds(G.Turn.RIGHT, v, lane_index=3)
+    dt_left = G.delta_t_seconds(G.Turn.LEFT, v, lane_index=0)
+    assert dt_right > dt_straight
+    assert dt_left > dt_straight
+    assert G.turn_radius(G.Turn.RIGHT, 3) < G.turn_radius(G.Turn.LEFT, 0)
 
 
 def test_compute_motion_frame_ordering():
@@ -278,6 +290,52 @@ def test_road_meta_timing_scales_with_full_distance():
     assert abs(further_frames - 648) <= 1
 
 
+def test_safe_gap_increases_with_speed():
+    length = 4.5
+    g30 = K.safe_gap_m(K.speed_kmh_to_ms(30), length)
+    g60 = K.safe_gap_m(K.speed_kmh_to_ms(60), length)
+    g80 = K.safe_gap_m(K.speed_kmh_to_ms(80), length)
+    assert g30 > length + 2.0
+    assert g60 > g30
+    assert g80 > g60
+
+
+def test_min_headway_frames_uses_time_headway():
+    length = 4.5
+    v = K.speed_kmh_to_ms(50)
+    frames = K.min_headway_frames(length, v, fps=30)
+    # At 50 km/h with 2s headway, the frame gap should be roughly 2s plus
+    # vehicle-length traversal time, not just a few frames from a 2m gap.
+    assert frames >= 60
+
+
+def test_bezier_point_matches_linear_at_endpoints():
+    # Bézier curve B(t) at t=0 and t=1 must equal the start/end points.
+    p0 = (0.0, 0.0)
+    p1 = (2.0, 3.0)
+    p2 = (8.0, 7.0)
+    p3 = (10.0, 10.0)
+    assert G.bezier_point(0.0, p0, p1, p2, p3) == p0
+    assert G.bezier_point(1.0, p0, p1, p2, p3) == p3
+
+
+def test_sample_track_linear_matches_legacy():
+    # A 2-point LINEAR track reproduces the old linear interpolation.
+    import os, json
+    V = K.speed_kmh_to_ms(40)
+    road = {"approach_length": 54.751}
+    motion = K.plan_motion("v", G.Direction.N, 0, G.Turn.STRAIGHT,
+                           V, 0, fps=30, road_meta=road,
+                           appear_anchor=(-5.25, -75.0))
+    for f in range(motion.appear_frame, motion.disappear_frame + 1):
+        ref = G.sample_track(motion.track_in, f)
+        t = (f - motion.appear_frame) / max(1, motion.disappear_frame - motion.appear_frame)
+        ex = motion.appear_pos[0] + (motion.disappear_pos[0] - motion.appear_pos[0]) * t
+        ey = motion.appear_pos[1] + (motion.disappear_pos[1] - motion.appear_pos[1]) * t
+        assert abs(ref[0] - ex) < 1e-9
+        assert abs(ref[1] - ey) < 1e-9
+
+
 def test_headway_conflict_detection():
     # departures in same lane: (frame, length, speed)
     # two cars 4.5m long at 11.1 m/s; min headway = (4.5+2)/11.1 * 30 ~ 17.6 -> 18 frames
@@ -323,6 +381,7 @@ def test_schedule_departures_is_catchup_safe():
     import scenario_gen as S
     rng = random.Random(7)
     veh = [S.make_vehicle(f"V{i:03d}", rng) for i in range(40)]
+    assert all(G.Turn(v["turn"]) in G.allowed_turns(v["lane"]) for v in veh)
     S.schedule_departures(veh, 300, rng)
     lanes = {}
     for v in veh:
@@ -371,32 +430,31 @@ def test_metadata_pose_matches_motion_plan():
     scn = {"seed": 1, "fps": 30, "duration_frames": 400, "box_size": G.BOX_SIZE,
            "vehicles": [{"id": "V0", "class": "car", "color": [0.1, 0.2, 0.8, 1.0],
                           "color_name": "blue", "plate": "59X-1234", "approach": "N",
-                          "lane": 1, "turn": "right", "speed_ms": v, "speed_kmh": 45,
+                          "lane": 3, "turn": "right", "speed_ms": v, "speed_kmh": 45,
                           "length": 4.47, "depart_frame": 5}]}
     meta = render.compute_metadata(scn, ROOT)
     vm = meta["vehicles"][0]
     # Replicate the same plan inputs that compute_metadata uses internally.
     env_in = ENV.load_env("in_N", ROOT)
     env_out = ENV.load_env("out_E", ROOT)
-    in_anchor, _ = ENV.lane_default_anchor(env_in, 1)
+    in_anchor, _ = ENV.lane_default_anchor(env_in, 3)
     out_anchor, _ = ENV.lane_default_anchor(env_out, 3)
     road_meta_ref = {"crosswalk_y": 27.846, "approach_length": 54.751}
-    motion = K.plan_motion("V0", G.Direction.N, 1, G.Turn.RIGHT, v, 5, fps=30,
+    motion = K.plan_motion("V0", G.Direction.N, 3, G.Turn.RIGHT, v, 5, fps=30,
                            appear_anchor=in_anchor[:2],
                            reappear_anchor=out_anchor[:2],
                            road_meta=road_meta_ref)
     for fr in vm["frames"]:
-        if fr["frame"] <= motion.disappear_frame:
-            t = (fr["frame"] - motion.appear_frame) / max(1, motion.disappear_frame - motion.appear_frame)
-            ex = motion.appear_pos[0] + (motion.disappear_pos[0] - motion.appear_pos[0]) * t
-            ey = motion.appear_pos[1] + (motion.disappear_pos[1] - motion.appear_pos[1]) * t
+        ref = G.sample_track(motion.track_in, fr["frame"])
+        if ref is not None:
+            ex, ey = ref
             assert abs(fr["pose"]["x"] - round(ex, 3)) < 1e-3
             assert abs(fr["pose"]["y"] - round(ey, 3)) < 1e-3
             assert fr["camera"] == "in_N"
-        else:
-            t = (fr["frame"] - motion.reappear_frame) / max(1, motion.leave_frame - motion.reappear_frame)
-            ex = motion.reappear_pos[0] + (motion.leave_pos[0] - motion.reappear_pos[0]) * t
-            ey = motion.reappear_pos[1] + (motion.leave_pos[1] - motion.reappear_pos[1]) * t
+            continue
+        ref = G.sample_track(motion.track_out, fr["frame"])
+        if ref is not None:
+            ex, ey = ref
             assert abs(fr["pose"]["x"] - round(ex, 3)) < 1e-3
             assert abs(fr["pose"]["y"] - round(ey, 3)) < 1e-3
             assert fr["camera"] == "out_E"
@@ -484,6 +542,491 @@ def test_validate_length_axis_respects_forward_offset():
     assert length_axis_idx(-90) == 0    # nose -X -> length on X (index 0)
     assert length_axis_idx(180) == 1    # nose -Y -> length on Y (index 1)
 
+
+# -----------------------------------------------------------------------------
+# Signal plan tests
+# -----------------------------------------------------------------------------
+
+def test_signal_phase_boundaries():
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    assert sp.cycle_frames == 2100  # (30+3+2) * 2 * 30
+    # NS_GREEN: 0-899
+    assert sp._phase_at(0) == "NS_GREEN"
+    assert sp._phase_at(899) == "NS_GREEN"
+    assert sp._phase_at(900) == "NS_YELLOW"
+    assert sp._phase_at(989) == "NS_YELLOW"
+    assert sp._phase_at(990) == "ALL_RED"
+    assert sp._phase_at(1049) == "ALL_RED"
+    assert sp._phase_at(1050) == "EW_GREEN"
+    assert sp._phase_at(1949) == "EW_GREEN"
+    assert sp._phase_at(1950) == "EW_YELLOW"
+    assert sp._phase_at(2039) == "EW_YELLOW"
+    assert sp._phase_at(2040) == "ALL_RED"
+    assert sp._phase_at(2099) == "ALL_RED"
+    # wraps to next cycle
+    assert sp._phase_at(2100) == "NS_GREEN"
+
+
+def test_signal_is_green_correctly_distinguishes_phases():
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    # NS_GREEN -> N/S green, E/W red
+    assert sp.is_green(G.Direction.N, G.Turn.STRAIGHT, 0) is True
+    assert sp.is_green(G.Direction.S, G.Turn.LEFT, 500) is True
+    assert sp.is_green(G.Direction.E, G.Turn.STRAIGHT, 0) is False
+    # NS_YELLOW -> not green (yellow is not green)
+    assert sp.is_green(G.Direction.N, G.Turn.STRAIGHT, 900) is False
+    assert sp.is_green(G.Direction.S, G.Turn.LEFT, 950) is False
+    # ALL_RED -> no one is green
+    assert sp.is_green(G.Direction.N, G.Turn.STRAIGHT, 990) is False
+    assert sp.is_green(G.Direction.E, G.Turn.STRAIGHT, 1000) is False
+    # EW_GREEN -> E/W green, N/S red
+    assert sp.is_green(G.Direction.E, G.Turn.STRAIGHT, 1200) is True
+    assert sp.is_green(G.Direction.W, G.Turn.RIGHT, 1500) is True
+    assert sp.is_green(G.Direction.N, G.Turn.STRAIGHT, 1200) is False
+    # EW_YELLOW -> not green
+    assert sp.is_green(G.Direction.E, G.Turn.STRAIGHT, 1950) is False
+    assert sp.is_green(G.Direction.W, G.Turn.LEFT, 2000) is False
+
+
+def test_signal_next_green_frame_monotonic():
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    # N/S next green from within NS_GREEN = same frame
+    assert sp.next_green_frame(G.Direction.N, G.Turn.STRAIGHT, 0) == 0
+    # N/S next green from middle of EW_GREEN = next NS_GREEN after 1050
+    f = sp.next_green_frame(G.Direction.N, G.Turn.STRAIGHT, 1200)
+    assert f == 2100  # wraps to next cycle
+    # E/W next green from NS_YELLOW = start of EW_GREEN at 1050
+    f = sp.next_green_frame(G.Direction.E, G.Turn.STRAIGHT, 950)
+    assert f == 1050
+    # N/S next green from NS_YELLOW = immediate next cycle start
+    f = sp.next_green_frame(G.Direction.N, G.Turn.STRAIGHT, 900)
+    assert f == 2100
+
+
+def test_signal_raises_for_never_green():
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    f = sp.next_green_frame(G.Direction.N, G.Turn.STRAIGHT, 5000)
+    assert f >= 5000
+
+
+def test_signal_next_red_frame():
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    # N/S red from middle of NS_GREEN = start of NS_YELLOW at 900
+    f = sp.next_red_frame(G.Direction.N, G.Turn.STRAIGHT, 100)
+    assert f == 900
+    # N/S red from all-red = immediate
+    f = sp.next_red_frame(G.Direction.N, G.Turn.STRAIGHT, 990)
+    assert f == 990
+
+
+# -----------------------------------------------------------------------------
+# Queue track tests
+# -----------------------------------------------------------------------------
+
+def test_compute_motion_queue_track_has_three_points():
+    """A queued vehicle (stop_frame < release_frame) produces 3-point
+    IN track with an idle segment."""
+    v = K.speed_kmh_to_ms(45)
+    appear_anchor = (-5.25, -75.0)
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    stop_f = 100  # reaches stop line at frame 100
+    release_f = 200  # enters box at frame 200 (waited 100 frames)
+    m = K.plan_motion("V0", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                      appear_anchor=appear_anchor,
+                      road_meta=road_meta,
+                      stop_frame=stop_f, release_frame=release_f)
+    assert len(m.track_in) == 3
+    assert m.track_in[0].frame < m.track_in[1].frame < m.track_in[2].frame
+    # Point 1 and 2 have same position (idle at stop line)
+    assert m.track_in[1].x == m.track_in[2].x
+    assert m.track_in[1].y == m.track_in[2].y
+    # disappear_frame = release_frame
+    assert m.disappear_frame == release_f
+    # reappear_frame = release_frame + dt_box
+    assert m.reappear_frame > release_f
+
+
+def test_compute_motion_queue_track_vs_freeflow():
+    """Same vehicle with queue params vs without should differ only in
+    the IN track structure and disappear timing."""
+    v = K.speed_kmh_to_ms(45)
+    appear_anchor = (-5.25, -75.0)
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    stop_f = 100
+    release_f = 200
+    m_queue = K.plan_motion("V0", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                            appear_anchor=appear_anchor,
+                            road_meta=road_meta,
+                            stop_frame=stop_f, release_frame=release_f)
+    m_free = K.plan_motion("V0", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                           appear_anchor=appear_anchor,
+                           road_meta=road_meta)
+    # Free-flow has 2-point track
+    assert len(m_free.track_in) == 2
+    # Queued has 3-point track
+    assert len(m_queue.track_in) == 3
+    # Free-flow disappear = depart + travel time
+    # Queued disappear = release_frame
+    assert m_free.disappear_frame < m_queue.disappear_frame
+    # Same positions
+    assert m_queue.appear_pos == m_free.appear_pos
+    assert m_queue.disappear_pos == m_free.disappear_pos
+
+
+def test_queue_track_idle_segment_stationary():
+    """During the idle period (between stop_frame and release_frame),
+    sample_track returns the constant stop position."""
+    v = K.speed_kmh_to_ms(45)
+    appear_anchor = (-5.25, -75.0)
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    stop_f = 100
+    release_f = 200
+    m = K.plan_motion("V0", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                      appear_anchor=appear_anchor,
+                      road_meta=road_meta,
+                      stop_frame=stop_f, release_frame=release_f)
+    # sample at several frames during idle
+    for f in range(stop_f, release_f + 1):
+        p = G.sample_track(m.track_in, f)
+        assert p is not None
+        assert abs(p[0] - m.disappear_pos[0]) < 1e-3
+        assert abs(p[1] - m.disappear_pos[1]) < 1e-3
+
+
+# -----------------------------------------------------------------------------
+# Scenario generator integration tests
+# -----------------------------------------------------------------------------
+
+def test_signal_gating_sets_stop_release_on_red():
+    """Vehicles arriving on red get proper queue fields; green arrivals
+    are free-flow."""
+    import scenario_gen as S
+    import random
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    rng = random.Random(1)
+    vehicles = [S.make_vehicle("V0", rng)]
+    # Force depart_frame such that stop_arrival falls on red
+    v = vehicles[0]
+    travel_f = int(round(54.751 / v["speed_ms"] * 30))
+    # Place depart so stop_arrival = 1000 (ALL_RED at frame 990-1049)
+    v["depart_frame"] = max(0, 1000 - travel_f)
+    S._apply_signal_gating(vehicles, 54.751, sp, 30)
+    assert "stop_frame" in v
+    assert "release_frame" in v
+    # On red -> release_frame > stop_frame
+    assert v["release_frame"] > v["stop_frame"], (
+        f"stop={v['stop_frame']} release={v['release_frame']}")
+    # queue_slot >= 0 means queued
+    assert v["queue_slot"] >= 0
+    # wait_frames > 0
+    assert v["wait_frames"] > 0
+
+
+def test_signal_gating_freeflow_on_green():
+    """Vehicles arriving on green should NOT queue."""
+    import scenario_gen as S
+    import random
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    rng = random.Random(2)
+    vehicles = [S.make_vehicle("V0", rng)]
+    v = vehicles[0]
+    travel_f = int(round(54.751 / v["speed_ms"] * 30))
+    # Place depart so stop_arrival = 100 (NS_GREEN 0-899)
+    v["depart_frame"] = max(0, 100 - travel_f)
+    S._apply_signal_gating(vehicles, 54.751, sp, 30)
+    assert v["stop_frame"] is not None
+    assert v["release_frame"] == v["stop_frame"]
+    assert v["queue_slot"] == -1
+    assert v["wait_frames"] == 0
+
+
+def test_resolve_all_no_red_crossings():
+    """After _resolve_all with signal_plan, no vehicle crosses the stop
+    line on red."""
+    import scenario_gen as S
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    import random
+    rng = random.Random(3)
+    vehicles = [S.make_vehicle(f"V{i:03d}", rng) for i in range(30)]
+    S.schedule_departures(vehicles, 2100, rng,
+                          approach_visible_length=54.751)
+    S._resolve_all(vehicles, 54.751, 30, signal_plan=sp)
+    for v in vehicles:
+        if v.get("queue_slot", -1) >= 0:
+            # Queued: arrives at stop line on red, waits, enters on green
+            approach = G.Direction(v["approach"])
+            turn = G.Turn(v["turn"])
+            # stop_frame should be red
+            assert not sp.is_green(approach, turn, v["stop_frame"]), (
+                f"{v['id']} stop_frame {v['stop_frame']} should be red")
+            # release_frame should be green
+            assert sp.is_green(approach, turn, v["release_frame"]), (
+                f"{v['id']} release_frame {v['release_frame']} should be green")
+        else:
+            # Free-flow: arrives on green
+            approach = G.Direction(v["approach"])
+            turn = G.Turn(v["turn"])
+            stop_f = v.get("stop_frame", v["depart_frame"] + int(
+                round(54.751 / v["speed_ms"] * 30)))
+            assert sp.is_green(approach, turn, stop_f), (
+                f"{v['id']} free-flow stop_frame {stop_f} should be green")
+
+
+def test_resolve_all_exit_conflicts_resolved():
+    """After _resolve_all, no exit-lane interval overlaps exceed the
+    buffer threshold."""
+    import scenario_gen as S
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    import random
+    rng = random.Random(5)
+    vehicles = [S.make_vehicle(f"V{i:03d}", rng) for i in range(60)]
+    S.schedule_departures(vehicles, 2100, rng,
+                          approach_visible_length=54.751)
+    S._resolve_all(vehicles, 54.751, 30, signal_plan=sp)
+    # Group by exit lane and check intervals
+    groups = {}
+    for v in vehicles:
+        travel_f = int(round(54.751 / v["speed_ms"] * 30))
+        release_f = v.get("release_frame", v["depart_frame"] + travel_f)
+        reappear_f = release_f + G.delta_t_frames(
+            G.Turn(v["turn"]), v["speed_ms"], 30, lane_index=v["lane"])
+        leave_f = reappear_f + travel_f
+        out_dir, ex_lane = G.exit_lane_for_movement(
+            G.Direction(v["approach"]), v["lane"], G.Turn(v["turn"]))
+        key = (out_dir.value, ex_lane)
+        groups.setdefault(key, []).append((v["id"], reappear_f, leave_f))
+    for key, grp in groups.items():
+        grp.sort(key=lambda x: x[1])
+        last_leave = -1
+        for vid, r, l in grp:
+            if last_leave > 0:
+                assert r >= last_leave + 5 - 1, (
+                    f"exit {key} {vid}: reappear {r} < last_leave {last_leave} + 5")
+            last_leave = l
+
+
+def test_resolve_all_headway_maintained():
+    """After _resolve_all, same-lane headway and catch-up constraints
+    still hold."""
+    import scenario_gen as S
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    import random
+    rng = random.Random(7)
+    vehicles = [S.make_vehicle(f"V{i:03d}", rng) for i in range(40)]
+    S.schedule_departures(vehicles, 2100, rng,
+                          approach_visible_length=54.751)
+    S._resolve_all(vehicles, 54.751, 30, signal_plan=sp)
+    lanes = {}
+    for v in vehicles:
+        lanes.setdefault((v["approach"], v["lane"]), []).append(v)
+    for key, vs in lanes.items():
+        vs.sort(key=lambda d: d["depart_frame"])
+        for a, b in zip(vs, vs[1:]):
+            assert K.catchup_safe(a["depart_frame"], a["speed_ms"], a["length"],
+                                   b["depart_frame"], b["speed_ms"],
+                                   approach_visible_length=54.751), (
+                f"headway fail {key} {a['id']}->{b['id']}")
+
+
+def test_scenario_signal_generation_creates_json_with_signal_field():
+    """generate() with signal_plan writes signal_cycle_frames to JSON."""
+    import scenario_gen as S
+    import tempfile
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    with tempfile.TemporaryDirectory() as tmp:
+        scn = S.generate(1, 10, 300, tmp, fps=30, signal_plan=sp)
+        assert "signal_cycle_frames" in scn
+        assert scn["signal_cycle_frames"] == 2100
+        # seed written to dict
+        assert "seed" in scn
+        assert scn["seed"] == 1
+
+
+def test_multi_seed_resolve_all_invariants():
+    """Multi-seed sweep: after _resolve_all with signal_plan, the output
+    must satisfy ALL invariants AND be fixpoint-stable (one extra signal
+    pass produces no change).  Sweeps seeds 0-19 with 60 vehicles each."""
+    import scenario_gen as S
+    import random
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    for seed in range(20):
+        rng = random.Random(seed)
+        vehicles = [S.make_vehicle(f"V{i:03d}", rng) for i in range(60)]
+        S.schedule_departures(vehicles, 2100, rng,
+                              approach_visible_length=54.751)
+        S._resolve_all(vehicles, 54.751, 30, signal_plan=sp)
+
+        # --- stability: one more signal-gating pass changes nothing ---
+        snap_before = [(x["queue_slot"], x["stop_frame"], x["release_frame"])
+                       for x in vehicles]
+        S._apply_signal_gating(vehicles, 54.751, sp, 30)
+        snap_after = [(x["queue_slot"], x["stop_frame"], x["release_frame"])
+                      for x in vehicles]
+        assert snap_before == snap_after, (
+            f"seed {seed}: fixpoint not stable after convergence")
+
+        # --- no red crossing ---
+        for x in vehicles:
+            ap = G.Direction(x["approach"])
+            tn = G.Turn(x["turn"])
+            qs = x.get("queue_slot", -1)
+            if qs >= 0:
+                assert not sp.is_green(ap, tn, x["stop_frame"]), (
+                    f"seed {seed} {x['id']}: queued stop {x['stop_frame']} is green")
+                assert sp.is_green(ap, tn, x["release_frame"]), (
+                    f"seed {seed} {x['id']}: queued release {x['release_frame']} not green")
+            else:
+                sf = x.get("stop_frame",
+                           x["depart_frame"] + int(round(54.751 / x["speed_ms"] * 30)))
+                assert sp.is_green(ap, tn, sf), (
+                    f"seed {seed} {x['id']}: free-flow stop {sf} not green")
+
+        # --- no exit-lane overlap (5-frame buffer) ---
+        groups = {}
+        for x in vehicles:
+            tf = int(round(54.751 / x["speed_ms"] * 30))
+            rf = x.get("release_frame", x["depart_frame"] + tf)
+            rp = rf + G.delta_t_frames(G.Turn(x["turn"]), x["speed_ms"], 30,
+                                        lane_index=x["lane"])
+            lv = rp + tf
+            od, el = G.exit_lane_for_movement(
+                G.Direction(x["approach"]), x["lane"], G.Turn(x["turn"]))
+            groups.setdefault((od.value, el), []).append((rp, lv))
+        for g in groups.values():
+            g.sort()
+            last = -1
+            for r, lv in g:
+                if last > 0:
+                    assert r >= last + 5, f"seed {seed}: exit overlap r={r} < last_leave={last}+5"
+                last = lv
+
+        # --- no headway / catch-up violation ---
+        lanes = {}
+        for x in vehicles:
+            lanes.setdefault((x["approach"], x["lane"]), []).append(x)
+        for vs in lanes.values():
+            vs.sort(key=lambda d: d["depart_frame"])
+            for a, b in zip(vs, vs[1:]):
+                assert K.catchup_safe(a["depart_frame"], a["speed_ms"], a["length"],
+                                       b["depart_frame"], b["speed_ms"],
+                                       approach_visible_length=54.751), (
+                    f"seed {seed} {a['id']}->{b['id']}")
+
+        # --- same-lane queued release gaps >= 0.5 s (platoon spacing) ---
+        for vs in lanes.values():
+            queued = [x for x in vs if x.get("queue_slot", -1) >= 0]
+            queued.sort(key=lambda x: x["release_frame"])
+            for a, b in zip(queued, queued[1:]):
+                gap = b["release_frame"] - a["release_frame"]
+                assert gap >= 15, (
+                    f"seed {seed} lane ({a['approach']},{a['lane']}) "
+                    f"{a['id']}@{a['release_frame']}->{b['id']}@{b['release_frame']} "
+                    f"gap={gap} < 0.5s")
+
+
+def test_multi_seed_saturation_invariants():
+    """Saturation sweep: 120 vehicles (2× normal density).  Same invariants
+    as the standard multi-seed test, verifying that the green-window rebase
+    in the main slot-assignment loop prevents red-crossing violations even
+    when ``extra_stagger_frames`` grows large under saturation.
+
+    Sweeps seeds 1000–1019 (offset to avoid cross-contamination with the
+    standard-density test)."""
+    import scenario_gen as S
+    import random
+    from lib import signal as SG
+    sp = SG.SignalPlan(fps=30)
+    for seed in range(1000, 1020):
+        rng = random.Random(seed)
+        vehicles = [S.make_vehicle(f"V{i:03d}", rng) for i in range(120)]
+        S.schedule_departures(vehicles, 2100, rng,
+                              approach_visible_length=54.751)
+        S._resolve_all(vehicles, 54.751, 30, signal_plan=sp)
+
+        # --- stability ---
+        snap_before = [(x["queue_slot"], x["stop_frame"], x["release_frame"])
+                       for x in vehicles]
+        S._apply_signal_gating(vehicles, 54.751, sp, 30)
+        snap_after = [(x["queue_slot"], x["stop_frame"], x["release_frame"])
+                      for x in vehicles]
+        assert snap_before == snap_after, (
+            f"seed {seed}: saturation fixpoint not stable")
+
+        # --- no red crossing ---
+        for x in vehicles:
+            ap = G.Direction(x["approach"])
+            tn = G.Turn(x["turn"])
+            qs = x.get("queue_slot", -1)
+            if qs >= 0:
+                assert not sp.is_green(ap, tn, x["stop_frame"]), (
+                    f"seed {seed} {x['id']}: queued stop {x['stop_frame']} green")
+                assert sp.is_green(ap, tn, x["release_frame"]), (
+                    f"seed {seed} {x['id']}: queued release {x['release_frame']} red")
+            else:
+                sf = x.get("stop_frame",
+                           x["depart_frame"] + int(round(54.751 / x["speed_ms"] * 30)))
+                assert sp.is_green(ap, tn, sf), (
+                    f"seed {seed} {x['id']}: free-flow stop {sf} red")
+
+        # --- no exit-lane overlap (5-frame buffer) ---
+        groups = {}
+        for x in vehicles:
+            tf = int(round(54.751 / x["speed_ms"] * 30))
+            rf = x.get("release_frame", x["depart_frame"] + tf)
+            rp = rf + G.delta_t_frames(G.Turn(x["turn"]), x["speed_ms"], 30,
+                                        lane_index=x["lane"])
+            lv = rp + tf
+            od, el = G.exit_lane_for_movement(
+                G.Direction(x["approach"]), x["lane"], G.Turn(x["turn"]))
+            groups.setdefault((od.value, el), []).append((rp, lv))
+        for g in groups.values():
+            g.sort()
+            last = -1
+            for r, lv in g:
+                if last > 0:
+                    assert r >= last + 5, (
+                        f"seed {seed}: exit overlap r={r} < {last}+5")
+                last = lv
+
+        # --- no headway violation ---
+        lanes = {}
+        for x in vehicles:
+            lanes.setdefault((x["approach"], x["lane"]), []).append(x)
+        for vs in lanes.values():
+            vs.sort(key=lambda d: d["depart_frame"])
+            for a, b in zip(vs, vs[1:]):
+                assert K.catchup_safe(a["depart_frame"], a["speed_ms"], a["length"],
+                                       b["depart_frame"], b["speed_ms"],
+                                       approach_visible_length=54.751), (
+                    f"seed {seed} {a['id']}->{b['id']}")
+
+        # --- same-lane queued release gaps >= 0.5 s ---
+        for vs in lanes.values():
+            queued = [x for x in vs if x.get("queue_slot", -1) >= 0]
+            queued.sort(key=lambda x: x["release_frame"])
+            for a, b in zip(queued, queued[1:]):
+                gap = b["release_frame"] - a["release_frame"]
+                assert gap >= 15, (
+                    f"seed {seed} lane ({a['approach']},{a['lane']}) "
+                    f"{a['id']}@{a['release_frame']}->{b['id']}@{b['release_frame']} "
+                    f"gap={gap} < 0.5s")
+
+
+# -----------------------------------------------------------------------------
+# runner
+# -----------------------------------------------------------------------------
 
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

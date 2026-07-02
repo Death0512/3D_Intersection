@@ -2,16 +2,21 @@
 """Phase 5 — Pipeline driver.
 
 Orchestrates the full dataset generation:
-  1. Generate scenario        (conda python: scenario_gen.py)
-  2. Pre-generate plate PNGs  (conda python: gen_plate batch)
-  3. Validate assets          (blender headless: validate_assets.py)
-  4. Render all 8 cameras     (blender headless: render.py)
-  5. Validate the run         (conda python: validate_run.py)
+  1. Validate env files       (conda/venv python: envfile)
+  2. (Optional) Validate assets  (blender headless: validate_assets.py)
+  3. Generate scenario         (conda/venv python: scenario_gen.py)
+  4. Pre-generate plate PNGs   (conda/venv python: gen_plate batch)
+  5. Render all 8 cameras      (blender headless: render.py)
+  6. Validate the run          (conda/venv python: validate_run.py)
 
-Run (from the project root, with conda python):
-    python3 scripts/run_pipeline.py --seed 42 --num-vehicles 10 --duration 200 --out output/run1
+The scenario duration auto-extends to fit all vehicles (``--seconds`` is the
+minimum floor).
 
-Blender is invoked via subprocess; conda python is the current interpreter.
+Run (from the project root, with venv python):
+    python3 scripts/run_pipeline.py --seed 42 --num-vehicles 10 --seconds 12.0 --out output/run1
+
+Blender is invoked via subprocess; the python interpreter with Pillow is
+resolved from the DOAN_PYTHON env var (set by scripts/env.sh).
 """
 from __future__ import annotations
 
@@ -25,12 +30,11 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
-# Python interpreter with Pillow (for plate pre-generation). Override with the
-# DOAN_PYTHON env var; otherwise fall back to a common conda env path, else the
-# current interpreter.
-_DOAN_PY = (os.environ.get("DOAN_PYTHON")
-            or os.path.expanduser("~/miniconda3/envs/DoAn/bin/python"))
-PYTHON = _DOAN_PY if os.path.exists(_DOAN_PY) else sys.executable
+# Python interpreter with Pillow (for plate pre-generation). Set by the
+# DOAN_PYTHON env var (exported by scripts/env.sh) or fall back to the current
+# interpreter.
+_DOAN_PY = os.environ.get("DOAN_PYTHON")
+PYTHON = _DOAN_PY if _DOAN_PY and os.path.exists(_DOAN_PY) else sys.executable
 BLENDER = shutil.which("blender") or "blender"
 
 sys.path.insert(0, os.path.join(HERE, "lib"))
@@ -57,14 +61,16 @@ def step_assets_validate():
     run([BLENDER, "-b", "--python", os.path.join(HERE, "validate_assets.py")])
 
 
-def step_scenario(seed, num_vehicles, duration, out_dir, fps=None):
+def step_scenario(seed, num_vehicles, seconds, out_dir, fps=None, signal=False):
     cmd = [PYTHON, os.path.join(HERE, "scenario_gen.py"),
            "--seed", str(seed),
            "--num-vehicles", str(num_vehicles),
-           "--duration", str(duration),
+           "--seconds", str(seconds),
            "--out", out_dir]
     if fps is not None:
         cmd += ["--fps", str(fps)]
+    if signal:
+        cmd += ["--signal"]
     run(cmd)
     return os.path.join(out_dir, "scenario.json")
 
@@ -101,42 +107,38 @@ def main():
     ap.add_argument("--num-vehicles", type=int, default=10)
     ap.add_argument("--fps", type=int, default=None,
                     help="frames per second (default: geometry.FPS)")
-    ap.add_argument("--seconds", type=float, default=None,
-                    help="video length in seconds; overrides --duration")
-    ap.add_argument("--duration", type=int, default=200,
-                    help="duration in frames (ignored if --seconds given)")
+    ap.add_argument("--seconds", type=float, default=12.0,
+                    help="minimum video length in seconds (actual duration auto-extends "
+                         "to fit all vehicles)")
     ap.add_argument("--out", type=str, default=os.path.join(ROOT, "output", "run1"))
     ap.add_argument("--only", help="render only this camera (debug)")
     ap.add_argument("--skip-asset-check", action="store_true")
+    ap.add_argument("--signal", action="store_true",
+                    help="enable traffic signal SPaT gating + queue")
     args = ap.parse_args()
 
-    fps = args.fps  # may be None -> scenario_gen uses G.FPS default
-    if args.seconds is not None:
-        effective_fps = fps if fps is not None else 30
-        duration = int(round(args.seconds * effective_fps))
-    else:
-        duration = args.duration
-
+    fps = args.fps
+    seconds = args.seconds
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
     fps_label = f"{fps} fps" if fps else "default fps"
     print("=" * 60)
-    print(f"PIPELINE  seed={args.seed} n={args.num_vehicles} dur={duration}f ({fps_label})  out={out_dir}")
+    print(f"PIPELINE  seed={args.seed} n={args.num_vehicles}  "
+          f"min={seconds}s ({fps_label})  out={out_dir}")
     print(f"  python : {PYTHON}")
     print(f"  blender: {BLENDER}")
     print("=" * 60)
 
-    # Env files are REQUIRED inputs (camera/road/sun/vehicle anchors). Validate
-    # them up front, unconditionally — NOT skippable via --skip-asset-check.
-    print("\n[0/5] Env file validation (required)")
     ENV.validate_all_envs(ROOT)
+    print("[0/5] Env files OK")
 
     if not args.skip_asset_check:
         print("\n[1/5] Asset validation")
         step_assets_validate()
 
     print("\n[2/5] Scenario generation")
-    scn = step_scenario(args.seed, args.num_vehicles, duration, out_dir, fps=fps)
+    scn = step_scenario(args.seed, args.num_vehicles, seconds, out_dir, fps=fps,
+                        signal=args.signal)
 
     print("\n[3/5] Plate pre-generation")
     step_plates(scn, out_dir)

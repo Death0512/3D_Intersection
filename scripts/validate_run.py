@@ -75,7 +75,8 @@ def main():
     # per-vehicle timing + identity
     for v in meta["vehicles"]:
         # delta_t matches
-        expected_dt = G.delta_t_frames(G.Turn(v["turn"]), v["speed_ms"], meta["fps"])
+        expected_dt = G.delta_t_frames(G.Turn(v["turn"]), v["speed_ms"], meta["fps"],
+                                       lane_index=v["lane"])
         ok &= check(f"{v['id']} delta_t matches",
                     v["delta_t_frames"] == expected_dt,
                     f"meta={v['delta_t_frames']} expected={expected_dt}")

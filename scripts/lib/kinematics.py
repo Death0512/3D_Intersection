@@ -15,6 +15,30 @@ except ImportError:  # imported as a top-level module (scripts/lib on sys.path)
     import geometry as G
 
 
+TIME_HEADWAY_S = 2.0
+FRICTION_MU = 0.7
+GRAVITY = 9.81
+
+
+def safe_gap_m(speed_ms: float, vehicle_length: float,
+               safety_gap: float = 2.0,
+               time_headway_s: float = TIME_HEADWAY_S,
+               friction_mu: float = FRICTION_MU) -> float:
+    """Speed-dependent following distance.
+
+    Uses the max of:
+      * standstill clearance: vehicle length + fixed gap
+      * time headway: vehicle length + T * speed
+      * braking distance: vehicle length + v^2/(2 μ g)
+    """
+    if speed_ms < 0:
+        raise ValueError("speed must be >= 0")
+    standstill = vehicle_length + safety_gap
+    time_rule = vehicle_length + time_headway_s * speed_ms
+    braking = vehicle_length + (speed_ms * speed_ms) / (2.0 * friction_mu * GRAVITY)
+    return max(standstill, time_rule, braking)
+
+
 def frames_to_travel(distance_m: float, speed_ms: float, fps: int = G.FPS) -> int:
     if speed_ms <= 0:
         raise ValueError("speed must be > 0")
@@ -23,22 +47,26 @@ def frames_to_travel(distance_m: float, speed_ms: float, fps: int = G.FPS) -> in
 
 def min_headway_frames(vehicle_length: float, speed_ms: float,
                        safety_gap: float = 2.0, fps: int = G.FPS) -> int:
-    """Minimum frame gap between two vehicles in the SAME lane so they never
-    overlap: gap = (length + safety_gap) / speed, in frames."""
-    return frames_to_travel(vehicle_length + safety_gap, speed_ms, fps)
+    """Minimum frame gap between two vehicles in the SAME lane using a
+    speed-dependent safe following distance."""
+    return frames_to_travel(safe_gap_m(speed_ms, vehicle_length, safety_gap),
+                            speed_ms, fps)
 
 
 def plan_motion(vehicle_id: str, approach, lane, turn, speed_ms, depart_frame,
                 approach_visible_length=40.0, exit_visible_length=40.0,
                 fps=G.FPS,
                 appear_anchor=None, reappear_anchor=None,
-                road_meta=None) -> G.VehicleMotion:
+                road_meta=None,
+                stop_frame=None, release_frame=None) -> G.VehicleMotion:
     return G.compute_motion(vehicle_id, approach, lane, turn, speed_ms,
                             depart_frame, approach_visible_length,
                             exit_visible_length, fps,
                             appear_anchor=appear_anchor,
                             reappear_anchor=reappear_anchor,
-                            road_meta=road_meta)
+                            road_meta=road_meta,
+                            stop_frame=stop_frame,
+                            release_frame=release_frame)
 
 
 def conflict_free(departures: List[Tuple[int, float, float]],
@@ -85,7 +113,8 @@ def catchup_safe(lead_depart_frame: int, lead_speed: float, lead_length: float,
     # leader disappears (or the follower catches up, whichever first)
     rel_speed = follow_speed - lead_speed
     min_gap = lead_ahead - rel_speed * lead_remaining_s
-    return min_gap >= (lead_length + safety_gap)
+    required_gap = safe_gap_m(follow_speed, lead_length, safety_gap)
+    return min_gap >= required_gap
 
 
 def min_follow_depart_frame(lead_depart_frame: int, lead_speed: float,
@@ -108,8 +137,8 @@ def min_follow_depart_frame(lead_depart_frame: int, lead_speed: float,
     #   follow_speed*h >= (lead_length+safety_gap) + (follow-lead)*L/lead
     #   h >= [ (lead_length+safety_gap) + (follow-lead)*L/lead ] / follow_speed
     L = approach_visible_length
-    needed_h = ((lead_length + safety_gap)
-                + (follow_speed - lead_speed) * L / lead_speed) / follow_speed
+    required_gap = safe_gap_m(follow_speed, lead_length, safety_gap)
+    needed_h = (required_gap + (follow_speed - lead_speed) * L / lead_speed) / follow_speed
     return lead_depart_frame + int(math.ceil(needed_h * fps))
 
 

@@ -11,15 +11,15 @@
 #
 # Options:
 #   --seed N            RNG seed (default: 42)
-#   --num-vehicles N    Number of vehicles (default: 10)
+#   --num-vehicles N    Number of vehicles (default: 120)
 #   --fps N             Frames per second (default: 30)
-#   --seconds F         Video length in seconds (overrides --duration)
-#   --duration N        Duration in frames (default: 300; ignored if --seconds given)
-#   --out DIR           Output directory (default: output/run1)
+#   --seconds F         Minimum video length in seconds (default: 12).
+#                       The actual duration auto-extends to fit all vehicles.
+#   --out DIR           Output directory (default: output/run_car)
 #   --only CAM          Render only this camera e.g. in_N (debug)
 #   --skip-asset-check  Skip blender asset validation step
 #   --blender PATH      Path to blender binary (default: auto-detect)
-#   --python PATH       Path to python binary (default: DOAN_PYTHON env or conda env)
+#   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
 #   -h, --help          Show this help
 
 set -euo pipefail
@@ -30,8 +30,7 @@ set -euo pipefail
 SEED=42
 NUM_VEHICLES=120
 FPS=30
-SECONDS_VAL=5
-DURATION=300
+SECONDS_VAL=12
 OUT_DIR="output/run_car"
 ONLY=""
 SKIP_ASSET_CHECK=0
@@ -52,7 +51,6 @@ while [[ $# -gt 0 ]]; do
         --num-vehicles)   NUM_VEHICLES="$2";  shift 2 ;;
         --fps)            FPS="$2";           shift 2 ;;
         --seconds)        SECONDS_VAL="$2";   shift 2 ;;
-        --duration)       DURATION="$2";      shift 2 ;;
         --out)            OUT_DIR="$2";       shift 2 ;;
         --only)           ONLY="$2";          shift 2 ;;
         --skip-asset-check) SKIP_ASSET_CHECK=1; shift ;;
@@ -69,45 +67,41 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Auto-source the installer-written env.sh if it exists (sets DOAN_PYTHON, puts
+# blender on PATH). User-supplied --blender / --python still take priority.
+_ENV_SH="$SCRIPT_DIR/env.sh"
+if [[ -f "$_ENV_SH" ]]; then
+    source "$_ENV_SH"
+fi
+
 if [[ -z "$OUT_DIR" ]]; then
     OUT_DIR="$ROOT_DIR/output/run1"
 fi
 OUT_DIR="$(mkdir -p "$OUT_DIR" && cd "$OUT_DIR" && pwd)"
 
-# Python interpreter: --python flag > DOAN_PYTHON env > conda env > sys.executable
+# Python interpreter: --python flag > DOAN_PYTHON env > sys.executable
 if [[ -z "$PYTHON_BIN" ]]; then
     if [[ -n "${DOAN_PYTHON:-}" && -x "${DOAN_PYTHON}" ]]; then
         PYTHON_BIN="$DOAN_PYTHON"
-    elif [[ -x "$HOME/miniconda3/envs/DoAn/bin/python" ]]; then
-        PYTHON_BIN="$HOME/miniconda3/envs/DoAn/bin/python"
     else
         PYTHON_BIN="$(command -v python3 || command -v python)"
     fi
 fi
 
-# Blender binary
+# Blender binary: --blender flag > PATH (which env.sh may have prepended)
 if [[ -z "$BLENDER_BIN" ]]; then
     BLENDER_BIN="$(command -v blender 2>/dev/null || true)"
     if [[ -z "$BLENDER_BIN" ]]; then
-        echo "ERROR: blender not found on PATH. Use --blender /path/to/blender" >&2
+        echo "ERROR: blender not found on PATH. Run scripts/install.sh first or use --blender /path/to/blender" >&2
         exit 1
     fi
-fi
-
-# ---------------------------------------------------------------------------
-# Compute duration_frames from --seconds if given
-# ---------------------------------------------------------------------------
-if [[ -n "$SECONDS_VAL" ]]; then
-    # Use awk for float arithmetic (bash doesn't do floats)
-    DURATION=$(awk "BEGIN { printf \"%d\", int($SECONDS_VAL * $FPS + 0.5) }")
-    echo "  --seconds $SECONDS_VAL x --fps $FPS -> --duration $DURATION frames"
 fi
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "============================================================"
-echo "PIPELINE  seed=$SEED  n=$NUM_VEHICLES  ${DURATION}f @ ${FPS}fps  out=$OUT_DIR"
+echo "PIPELINE  seed=$SEED  n=$NUM_VEHICLES  min=${SECONDS_VAL}s @ ${FPS}fps  out=$OUT_DIR"
 echo "  python : $PYTHON_BIN"
 echo "  blender: $BLENDER_BIN"
 [[ -n "$ONLY" ]] && echo "  only   : $ONLY"
@@ -120,7 +114,7 @@ PIPELINE_ARGS=(
     --seed "$SEED"
     --num-vehicles "$NUM_VEHICLES"
     --fps "$FPS"
-    --duration "$DURATION"
+    --seconds "$SECONDS_VAL"
     --out "$OUT_DIR"
 )
 [[ -n "$ONLY" ]]             && PIPELINE_ARGS+=(--only "$ONLY")

@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 # ---- locked constants -------------------------------------------------------
@@ -59,6 +59,9 @@ SENSOR_MM = 36.0       # full-frame sensor width (set on the Blender camera too)
 RES_X = 1920
 RES_Y = 1080
 
+TURN_FRICTION_MU = 0.7
+TURN_ACCEL_MS2 = 2.5
+
 
 class Direction(str, Enum):
     N = "N"; E = "E"; S = "S"; W = "W"
@@ -82,6 +85,22 @@ class Direction(str, Enum):
 
 class Turn(str, Enum):
     LEFT = "left"; STRAIGHT = "straight"; RIGHT = "right"
+
+
+# Strict lane-use control matrix. Lane 0 is median-side; lane NUM_LANES-1 is
+# curb-side. Middle lanes are through-only.
+LANE_TURN_RESTRICTIONS: Dict[int, Set[Turn]] = {
+    0: {Turn.LEFT, Turn.STRAIGHT},
+    1: {Turn.STRAIGHT},
+    2: {Turn.STRAIGHT},
+    3: {Turn.STRAIGHT, Turn.RIGHT},
+}
+
+
+def allowed_turns(lane_index: int) -> Set[Turn]:
+    if lane_index not in LANE_TURN_RESTRICTIONS:
+        raise ValueError(f"invalid lane index: {lane_index}")
+    return set(LANE_TURN_RESTRICTIONS[lane_index])
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +312,7 @@ def build_routing_table() -> List[Movement]:
     table = []
     for approach in Direction:
         for lane in range(NUM_LANES):
-            for turn in Turn:
+            for turn in allowed_turns(lane):
                 ex_dir, ex_lane = exit_lane_for_movement(approach, lane, turn)
                 table.append(Movement(
                     approach=approach, lane=lane, turn=turn,
@@ -320,36 +339,65 @@ def camera_names() -> List[str]:
 # Path length through the intersection (for Delta t)
 # ---------------------------------------------------------------------------
 
-def intersection_path_length(turn: Turn) -> float:
-    """Distance travelled inside the 30x30 box for a given turn.
+def turn_radius(turn: Turn, lane_index: Optional[int] = None) -> Optional[float]:
+    """Approximate lane-dependent turn radius inside the black box.
 
-      straight: BOX_SIZE (30 m)
-      right:    quarter-circle of radius = lane offset from corner
-      left:     quarter-circle of larger radius
+    ``None`` means straight/no arc. Lane 0 is median-side, lane 3 curb-side.
+    Legal strict usage gives lane0-left and lane3-right, but the formula also
+    behaves sensibly for permissive/test calls.
+    """
+    if turn == Turn.STRAIGHT:
+        return None
+    lane = 0 if lane_index is None else lane_index
+    if turn == Turn.RIGHT:
+        return 6.0 + (NUM_LANES - 1 - lane) * LANE_WIDTH
+    if turn == Turn.LEFT:
+        return 12.0 + lane * LANE_WIDTH
 
-    For simplicity and deterministic timing we use a fixed geometric model:
-      straight = 30
-      right    = (pi/2) * R_right    with R_right = 6.0  (curb radius)
-      left     = (pi/2) * R_left     with R_left  = 12.0 (wider arc)
+
+def intersection_path_length(turn: Turn, lane_index: Optional[int] = None) -> float:
+    """Distance travelled inside the 30x30 box.
+
+    Legacy fallback (lane_index is None) preserves the original fixed radii.
+    When lane_index is supplied, turn radii depend on the entry lane.
     """
     if turn == Turn.STRAIGHT:
         return BOX_SIZE
-    if turn == Turn.RIGHT:
-        return (math.pi / 2) * 6.0
-    if turn == Turn.LEFT:
-        return (math.pi / 2) * 12.0
+    if lane_index is None:
+        if turn == Turn.RIGHT:
+            return (math.pi / 2) * 6.0
+        if turn == Turn.LEFT:
+            return (math.pi / 2) * 12.0
+    radius = turn_radius(turn, lane_index)
+    return (math.pi / 2) * radius
 
 
-def delta_t_seconds(turn: Turn, speed_ms: float) -> float:
-    """Blind-zone delay time (s) = path length / speed."""
+def delta_t_seconds(turn: Turn, speed_ms: float,
+                    lane_index: Optional[int] = None) -> float:
+    """Blind-zone delay time (s).
+
+    Straight movement uses constant speed. Turning movement with lane_index
+    supplied slows to a friction-limited curve speed and includes simple
+    decel/accel time; lane_index=None preserves the legacy fixed-speed model.
+    """
     if speed_ms <= 0:
         raise ValueError("speed must be > 0")
-    return intersection_path_length(turn) / speed_ms
+    path = intersection_path_length(turn, lane_index)
+    if turn == Turn.STRAIGHT or lane_index is None:
+        return path / speed_ms
+    radius = turn_radius(turn, lane_index)
+    curve_speed = min(speed_ms, math.sqrt(TURN_FRICTION_MU * 9.81 * radius))
+    if curve_speed >= speed_ms:
+        return path / speed_ms
+    decel_time = (speed_ms - curve_speed) / TURN_ACCEL_MS2
+    accel_time = decel_time
+    return (path / curve_speed) + decel_time + accel_time
 
 
-def delta_t_frames(turn: Turn, speed_ms: float, fps: int = FPS) -> int:
+def delta_t_frames(turn: Turn, speed_ms: float, fps: int = FPS,
+                   lane_index: Optional[int] = None) -> int:
     """Integer frame count of invisibility (rounded)."""
-    return int(round(delta_t_seconds(turn, speed_ms) * fps))
+    return int(round(delta_t_seconds(turn, speed_ms, lane_index) * fps))
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +426,63 @@ class VehicleMotion:
     exit_direction: Direction = Direction.N
     exit_lane: int = 0
 
+    # Per-segment keyframe tracks (for multi-state motion like queue/platoon).
+    # Legacy (no road_meta) → each track has 2 LINEAR points matching the
+    # scalar fields above.
+    track_in: list = field(default_factory=list)   # List[TrackPoint]
+    track_out: list = field(default_factory=list)  # List[TrackPoint]
+
+
+@dataclass
+class TrackPoint:
+    """A single point in a vehicle's visible-segment keyframe track.
+
+    ``interp`` is "LINEAR" or "BEZIER" for the segment FROM this point to the
+    next.  For BEZIER segments ``cp1`` and ``cp2`` are the two explicit cubic
+    Bézier control points (in world coordinates) used by both the Blender
+    keyframer and the Python metadata interpolator, guaranteeing
+    render==metadata.
+    """
+    frame: int
+    x: float
+    y: float
+    visible: bool = True
+    interp: str = "LINEAR"
+    cp1: Optional[Tuple[float, float]] = None   # handle near current point
+    cp2: Optional[Tuple[float, float]] = None   # handle near next point
+
+
+def bezier_point(t: float, p0: Tuple[float, float],
+                 p1: Tuple[float, float], p2: Tuple[float, float],
+                 p3: Tuple[float, float]) -> Tuple[float, float]:
+    """Evaluate a cubic Bézier curve B(t) for 0 ≤ t ≤ 1."""
+    u = 1.0 - t
+    x = u*u*u*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t*t*t*p3[0]
+    y = u*u*u*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t*t*t*p3[1]
+    return (x, y)
+
+
+def sample_track(track: List[TrackPoint], frame: int) -> Optional[Tuple[float, float]]:
+    """Interpolate the track at ``frame`` using the per-segment interpolation mode.
+
+    Returns (x, y) or None if frame is outside the track's frame range.
+    """
+    if not track or frame < track[0].frame or frame > track[-1].frame:
+        return None
+    for i in range(len(track) - 1):
+        if track[i].frame <= frame <= track[i + 1].frame:
+            t0 = track[i]
+            t1 = track[i + 1]
+            span = t1.frame - t0.frame
+            if span == 0:
+                return (t0.x, t0.y)
+            t = (frame - t0.frame) / span
+            if t0.interp == "BEZIER" and t0.cp1 is not None:
+                return bezier_point(t, (t0.x, t0.y), t0.cp1, t0.cp2, (t1.x, t1.y))
+            else:
+                return (t0.x + (t1.x - t0.x) * t, t0.y + (t1.y - t0.y) * t)
+    return None
+
 
 def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
                    speed_ms: float, depart_frame: int,
@@ -386,7 +491,9 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
                    fps: int = FPS,
                    appear_anchor: Optional[Tuple[float, float]] = None,
                    reappear_anchor: Optional[Tuple[float, float]] = None,
-                   road_meta: Optional[dict] = None) -> VehicleMotion:
+                   road_meta: Optional[dict] = None,
+                   stop_frame: Optional[int] = None,
+                   release_frame: Optional[int] = None) -> VehicleMotion:
     """Compute the frame numbers and world positions for a vehicle's full
     In -> Black-Box -> Out trajectory.
 
@@ -407,6 +514,12 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
         in-segment (appear) and out-segment (reappear). When given and
         ``road_meta`` is also provided the vehicle traverses the full road;
         when ``road_meta`` is absent the fixed-length defaults are used.
+
+    stop_frame / release_frame: for queued vehicles. stop_frame is when the
+        vehicle reaches the stop line (box near edge). release_frame is when
+        it enters the box after waiting. When both are provided and
+        release_frame > stop_frame, a multi-point IN track with idle segment
+        is built.
     """
     # ---- effective visible lengths -------------------------------------------
     _avl = approach_visible_length
@@ -423,10 +536,20 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
     # ---- frame timing --------------------------------------------------------
     dt_approach = _avl / speed_ms
     dt_exit = _evl / speed_ms
-    dt_box_frames = delta_t_frames(turn, speed_ms, fps)
+    dt_box_frames = delta_t_frames(
+        turn, speed_ms, fps,
+        lane_index=lane if road_meta is not None else None)
 
     appear_frame = depart_frame
-    disappear_frame = depart_frame + int(round(dt_approach * fps))
+    free_disappear_frame = depart_frame + int(round(dt_approach * fps))
+
+    is_queued = (stop_frame is not None and release_frame is not None
+                 and release_frame > stop_frame)
+    if is_queued:
+        disappear_frame = release_frame
+    else:
+        disappear_frame = free_disappear_frame
+
     reappear_frame = disappear_frame + dt_box_frames
     leave_frame = reappear_frame + int(round(dt_exit * fps))
 
@@ -456,6 +579,20 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
         leave_pos = (reappear_pos[0] + ofx * _evl,
                      reappear_pos[1] + ofy * _evl)
 
+    # ---- build keyframe tracks ------------------------------------------------
+    if is_queued and road_meta is not None:
+        track_in = _build_queue_track(
+            appear_frame, stop_frame, release_frame,
+            appear_pos, disappear_pos)
+    else:
+        track_in = _build_segment_track(
+            appear_frame, disappear_frame, appear_pos, disappear_pos,
+            turn, road_meta, is_out=False)
+
+    track_out = _build_segment_track(
+        reappear_frame, leave_frame, reappear_pos, leave_pos,
+        turn, road_meta, is_out=True, queued=is_queued)
+
     return VehicleMotion(
         vehicle_id=vehicle_id, approach=approach, lane=lane, turn=turn,
         speed_ms=speed_ms, depart_frame=depart_frame, fps=fps,
@@ -464,7 +601,60 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
         appear_pos=appear_pos, disappear_pos=disappear_pos,
         reappear_pos=reappear_pos, leave_pos=leave_pos,
         exit_direction=outbound, exit_lane=ex_lane,
+        track_in=track_in, track_out=track_out,
     )
+
+
+def _build_segment_track(start_frame: int, end_frame: int,
+                         start_pos: Tuple, end_pos: Tuple,
+                         turn: Turn, road_meta: Optional[dict],
+                         is_out: bool, queued: bool = False) -> List[TrackPoint]:
+    """Build a 2-point keyframe track for one visible segment.
+
+    When this is an OUT segment of a turning vehicle with road_meta present,
+    use BEZIER interpolation (ease-out = acceleration out of the turn).
+    Queued straight vehicles also get ease-out (accelerating from stop).
+    """
+    use_bezier = (is_out and road_meta is not None
+                  and (turn != Turn.STRAIGHT or queued))
+    if use_bezier:
+        # Ease-out handles: slow at start (just exited box), fast at end.
+        p0 = start_pos
+        p3 = end_pos
+        cp1 = (p0[0] + (p3[0] - p0[0]) * 0.03, p0[1] + (p3[1] - p0[1]) * 0.03)
+        cp2 = (p3[0] - (p3[0] - p0[0]) * 0.15, p3[1] - (p3[1] - p0[1]) * 0.15)
+    else:
+        cp1 = cp2 = None
+
+    return [
+        TrackPoint(frame=start_frame, x=start_pos[0], y=start_pos[1],
+                   visible=True,
+                   interp="LINEAR" if not use_bezier else "BEZIER",
+                   cp1=cp1, cp2=cp2),
+        TrackPoint(frame=end_frame, x=end_pos[0], y=end_pos[1],
+                   visible=True, interp="LINEAR"),
+    ]
+
+
+def _build_queue_track(start_frame: int, stop_frame: int, release_frame: int,
+                       start_pos: Tuple, stop_pos: Tuple) -> List[TrackPoint]:
+    """Build a 3-point keyframe track for a queued IN segment.
+
+    Point 0: vehicle appears at env anchor (free-flow approach).
+    Point 1: vehicle reaches stop line (stop_frame) — arrives at box edge.
+    Point 2: vehicle idles at stop line until release (enters box).
+
+    The middle segment (Point 1 → Point 2) uses LINEAR with identical
+    positions — the vehicle is stationary during the idle period.
+    """
+    return [
+        TrackPoint(frame=start_frame, x=start_pos[0], y=start_pos[1],
+                   visible=True, interp="LINEAR"),
+        TrackPoint(frame=stop_frame, x=stop_pos[0], y=stop_pos[1],
+                   visible=True, interp="LINEAR"),
+        TrackPoint(frame=release_frame, x=stop_pos[0], y=stop_pos[1],
+                   visible=True, interp="LINEAR"),
+    ]
 
 
 # ---------------------------------------------------------------------------

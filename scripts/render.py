@@ -82,28 +82,30 @@ def compute_metadata(scenario: dict, root: str) -> dict:
                                veh["speed_ms"], veh["depart_frame"], fps=fps,
                                appear_anchor=in_anchor[:2],
                                reappear_anchor=out_anchor[:2],
-                               road_meta=road_meta)
+                               road_meta=road_meta,
+                               stop_frame=veh.get("stop_frame"),
+                               release_frame=veh.get("release_frame"))
 
         frames = []
         # In segment — rot_z is the env anchor heading (true vehicle heading;
         # equals approach_rotation for an unedited file).
         for f in range(motion.appear_frame, min(motion.disappear_frame, duration) + 1):
-            t = (f - motion.appear_frame) / max(1, motion.disappear_frame - motion.appear_frame)
-            x = motion.appear_pos[0] + (motion.disappear_pos[0] - motion.appear_pos[0]) * t
-            y = motion.appear_pos[1] + (motion.disappear_pos[1] - motion.appear_pos[1]) * t
+            p = G.sample_track(motion.track_in, f)
+            if p is None:
+                continue
             frames.append({
                 "frame": f, "visible": True, "camera": in_cam_tag,
-                "pose": {"x": round(x, 3), "y": round(y, 3), "z": 0.0,
+                "pose": {"x": round(p[0], 3), "y": round(p[1], 3), "z": 0.0,
                          "rot_z": round(in_rot_z, 4)},
             })
         # Out segment — rot_z is the env anchor heading for the exit lane.
         for f in range(max(motion.reappear_frame, 0), min(motion.leave_frame, duration) + 1):
-            t = (f - motion.reappear_frame) / max(1, motion.leave_frame - motion.reappear_frame)
-            x = motion.reappear_pos[0] + (motion.leave_pos[0] - motion.reappear_pos[0]) * t
-            y = motion.reappear_pos[1] + (motion.leave_pos[1] - motion.reappear_pos[1]) * t
+            p = G.sample_track(motion.track_out, f)
+            if p is None:
+                continue
             frames.append({
                 "frame": f, "visible": True, "camera": out_cam_tag,
-                "pose": {"x": round(x, 3), "y": round(y, 3), "z": 0.0,
+                "pose": {"x": round(p[0], 3), "y": round(p[1], 3), "z": 0.0,
                          "rot_z": round(out_rot_z, 4)},
             })
         frames.sort(key=lambda d: d["frame"])

@@ -269,7 +269,9 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
         veh["speed_ms"], veh["depart_frame"], fps=FPS,
         appear_anchor=anchor_xy if is_in_camera else None,
         reappear_anchor=anchor_xy if not is_in_camera else None,
-        road_meta=road_meta)
+        road_meta=road_meta,
+        stop_frame=veh.get("stop_frame"),
+        release_frame=veh.get("release_frame"))
     fwd_off = meta.get("forward_offset_deg", 0.0)
 
     # Create the parent Empty at the WORLD ORIGIN with no rotation first, then
@@ -303,90 +305,132 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
 # Keyframing
 # ---------------------------------------------------------------------------
 
-def keyframe_motion(empty, motion: G.VehicleMotion, is_in_camera: bool):
-    """Keyframe location across the visible segment, hide outside it.
-    Rotation is also keyframed: the heading is the env-JSON anchor rotation
-    (stashed on the empty by make_vehicle_instance) plus the per-class
-    forward_offset_deg, so a sideways model stays corrected on both in and out
-    shots. The rotation change (entry->exit heading) happens while hidden.
+def keyframe_motion(empty, motion: G.VehicleMotion, is_in_camera: bool,
+                   frame_end: int = None):
+    """Keyframe location across the visible segment using the motion track.
 
-    The motion plan is already anchored at the env-JSON spawn point, so the
-    keyframed locations are the motion positions directly (no extra offset).
+    Each point in the track produces a keyframe. LINEAR interpolation for
+    straight segments; BEZIER with explicit handles for turning segments so
+    the easing matches metadata exactly (per-axis fcurves in the slotted-action
+    layout of Blender 5.x).
+
+    The motion track is already anchored at the env-JSON spawn point.
+
+    If ``frame_end`` is given and the segment ends after it (vehicle cannot
+    complete before the window), an extra ``hide_render=True`` keyframe is
+    inserted at ``frame_end + 1`` so the vehicle vanishes instead of freezing
+    mid-road.
     """
     obj = empty
     fwd_off = obj.get("forward_offset_deg", 0.0) if hasattr(obj, "get") else 0.0
     anchor_rot_z = float(obj.get("anchor_rot_z", 0.0)) if hasattr(obj, "get") else 0.0
-    if is_in_camera:
-        frame_start, frame_end = motion.appear_frame, motion.disappear_frame
-        pos_start, pos_end = motion.appear_pos, motion.disappear_pos
-    else:
-        frame_start, frame_end = motion.reappear_frame, motion.leave_frame
-        pos_start, pos_end = motion.reappear_pos, motion.leave_pos
+    track = motion.track_in if is_in_camera else motion.track_out
+
+    # Pass 1 — insert all location keyframes at LINEAR (per-axis post-pass
+    # upgrades BEZIER segments so handles are set per fcurve axis).
+    for i, pt in enumerate(track):
+        obj.location = (pt.x, pt.y, 0.0)
+        obj.keyframe_insert(data_path="location", frame=pt.frame)
+
+    # Gather which keyframe frames belong to BEZIER segments.  Everything else
+    # stays LINEAR (keyframe_insert defaults to BEZIER auto-handles — we force
+    # LINEAR on non-BEZIER keyframes next, then override BEZIER per axis).
+    coeff_per_segment = {}        # (frame_i, frame_i+1) -> (cp1[axis], cp2[axis])
+    bez_frames = set()
+    for i, pt in enumerate(track):
+        if i < len(track) - 1 and pt.interp == "BEZIER" and pt.cp1 is not None:
+            nxt = track[i + 1]
+            dt = nxt.frame - pt.frame
+            rh_frame = pt.frame + dt / 3.0
+            lh_frame = nxt.frame - dt / 3.0
+            coeff_per_segment[(pt.frame, nxt.frame)] = (pt.cp1, pt.cp2, rh_frame, lh_frame)
+            bez_frames.add(pt.frame)
+            bez_frames.add(nxt.frame)
+
+    loc_fcs = _fcurves_for(obj, "location")
+    # Force LINEAR on all keyframes first, then selectively override BEZIER ones.
+    for fc in loc_fcs:
+        for kp in fc.keyframe_points:
+            kp.interpolation = "LINEAR"
+
+    # Per-axis BEZIER override: set handles so Blender evaluates the cubic
+    # Bézier parametrised linearly in frame (frame handles at ±dt/3 and raw
+    # cp1/cp2 coordinate values).
+    for fc in loc_fcs:
+        axis = fc.array_index          # 0 = x,  1 = y,  2 = z
+        for kp in fc.keyframe_points:
+            f = kp.co[0]
+            for (f0, f1), (cp1, cp2, rh_f, lh_f) in coeff_per_segment.items():
+                if f == f0:
+                    kp.interpolation = "BEZIER"
+                    kp.handle_right_type = "FREE"
+                    kp.handle_left_type = "FREE"
+                    cv = cp1[axis] if axis < 2 else 0.0
+                    kp.handle_right = (rh_f, cv)
+                elif f == f1:
+                    kp.interpolation = "BEZIER"
+                    kp.handle_left_type = "FREE"
+                    kp.handle_right_type = "AUTO_CLAMPED"
+                    cv = cp2[axis] if axis < 2 else 0.0
+                    kp.handle_left = (lh_f, cv)
+
+    # rotation keyframes (constant across the visible segment, incl. fwd offset)
     heading = anchor_rot_z + math.radians(fwd_off)
-
-    obj.location = (pos_start[0], pos_start[1], 0.0)
-    obj.keyframe_insert(data_path="location", frame=frame_start)
-    obj.location = (pos_end[0], pos_end[1], 0.0)
-    obj.keyframe_insert(data_path="location", frame=frame_end)
-
-    # keyframe rotation (constant across the visible segment, incl. fwd offset)
+    start_frame = track[0].frame
+    end_frame = track[-1].frame
     obj.rotation_euler.z = heading
-    obj.keyframe_insert(data_path="rotation_euler", frame=frame_start)
-    obj.keyframe_insert(data_path="rotation_euler", frame=frame_end)
-
-    _set_linear_interpolation(obj)
+    obj.keyframe_insert(data_path="rotation_euler", frame=start_frame)
+    obj.keyframe_insert(data_path="rotation_euler", frame=end_frame)
 
     # hide outside visible window (stepped interpolation for visibility)
     obj.hide_render = True
     obj.keyframe_insert(data_path="hide_render", frame=0)
     obj.hide_render = False
-    obj.keyframe_insert(data_path="hide_render", frame=max(0, frame_start))
+    obj.keyframe_insert(data_path="hide_render", frame=max(0, start_frame))
+
+    hide_end = end_frame + 1
+    if frame_end is not None and end_frame > frame_end:
+        hide_end = frame_end + 1
     obj.hide_render = True
-    obj.keyframe_insert(data_path="hide_render", frame=frame_end + 1)
+    obj.keyframe_insert(data_path="hide_render", frame=hide_end)
     _set_step_interpolation(obj, "hide_render")
 
 
-def _set_linear_interpolation(obj):
+def _action_fcurves(obj):
+    """Return all ActionFCurves from the object's active slotted action.
+
+    Blender 5.x: actions are slot-based — fcurves live in the first layer/strip
+    channelbag keyed to slot 0. No legacy fallback (``Action.fcurves`` removed).
+    Returns an empty list if no animation is assigned.
+    """
     ad = obj.animation_data
     if not ad or not ad.action:
-        return
+        return []
     a = ad.action
-    try:
-        if getattr(a, "is_action_layered", False) and a.layers and a.slots:
-            strip = a.layers[0].strips[0]
-            cb = strip.channelbag(a.slots[0])
-            for fcu in cb.fcurves:
-                for kp in fcu.keyframe_points:
-                    kp.interpolation = "LINEAR"
-        elif hasattr(a, "fcurves"):
-            for fcu in a.fcurves:
-                for kp in fcu.keyframe_points:
-                    kp.interpolation = "LINEAR"
-    except Exception:
-        pass
+    if not (a.layers and a.slots):
+        return []
+    strip = a.layers[0].strips[0]
+    cb = strip.channelbag(a.slots[0])
+    return list(cb.fcurves) if cb else []
+
+
+def _fcurves_for(obj, data_path):
+    """Return the ActionFCurves matching *data_path* on *obj*."""
+    return [fc for fc in _action_fcurves(obj) if fc.data_path == data_path]
+
+
+def _set_linear_interpolation(obj):
+    """Set all keyframes on *obj* to LINEAR interpolation."""
+    for fc in _action_fcurves(obj):
+        for kp in fc.keyframe_points:
+            kp.interpolation = "LINEAR"
 
 
 def _set_step_interpolation(obj, data_path):
-    """Set interpolation to CONSTANT (step) for a given data_path (for hide flags)."""
-    ad = obj.animation_data
-    if not ad or not ad.action:
-        return
-    a = ad.action
-    try:
-        if getattr(a, "is_action_layered", False) and a.layers and a.slots:
-            strip = a.layers[0].strips[0]
-            cb = strip.channelbag(a.slots[0])
-            for fcu in cb.fcurves:
-                if fcu.data_path == data_path:
-                    for kp in fcu.keyframe_points:
-                        kp.interpolation = "CONSTANT"
-        elif hasattr(a, "fcurves"):
-            for fcu in a.fcurves:
-                if fcu.data_path == data_path:
-                    for kp in fcu.keyframe_points:
-                        kp.interpolation = "CONSTANT"
-    except Exception:
-        pass
+    """Set all keyframes of *data_path* on *obj* to CONSTANT (step)."""
+    for fc in _fcurves_for(obj, data_path):
+        for kp in fc.keyframe_points:
+            kp.interpolation = "CONSTANT"
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +608,7 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
     #    lane_defaults[lane] anchor, then drives forward by the kinematics.
     scene_objs = []
     motions = []
+    frame_end = scenario["duration_frames"]
     for veh in scenario["vehicles"]:
         if is_in:
             if veh["approach"] != approach.value:
@@ -580,7 +625,7 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
             veh, veh_manifest, plates_dir,
             anchor_loc=anchor_loc, anchor_rot_z=anchor_rot_z,
             is_in_camera=is_in, road_meta=road_meta)
-        keyframe_motion(empty, motion, is_in_camera=is_in)
+        keyframe_motion(empty, motion, is_in_camera=is_in, frame_end=frame_end)
         scene_objs.append(empty)
         motions.append((veh, motion))
 
