@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -38,6 +39,27 @@ except ImportError:
 import geometry as G
 import kinematics as K
 import envfile as ENV
+
+
+# ---------------------------------------------------------------------------
+# NVENC probe — use the T4's dedicated encoder ASIC when available so 8-way
+# parallel renders don't pile 8 software libx264 encodes onto ~4 vCPUs.
+# ---------------------------------------------------------------------------
+_NVENC = None
+
+
+def _nvenc_available():
+    """True if ffmpeg was built with h264_nvenc support. Cached after first call."""
+    global _NVENC
+    if _NVENC is None:
+        try:
+            out = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True, text=True, timeout=10)
+            _NVENC = "h264_nvenc" in out.stdout
+        except Exception:
+            _NVENC = False
+    return _NVENC
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +195,6 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
     ffmpeg (Blender's built-in FFMPEG container can be finicky across builds).
     """
     import shutil
-    import subprocess
     import build_scene as BS  # requires bpy (only available inside Blender)
 
     scene_blend = os.path.join(out_dir, f"scene_{camera_tag}.blend")
@@ -201,23 +222,29 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
 
     bpy.ops.render.render(animation=True)
 
-    # encode to mp4
+    # encode to mp4 — prefer NVENC (T4 ASIC, separate from Cycles GPU) so 8
+    # parallel renders don't oversubscribe ~4 vCPUs with libx264 software encodes.
     video_path = os.path.join(out_dir, f"video_{camera_tag}.mp4")
     fps = scenario["fps"]
+    if _nvenc_available():
+        encoder = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23",
+                   "-pix_fmt", "yuv420p"]
+        enc_name = "nvenc"
+    else:
+        encoder = ["-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p"]
+        enc_name = "libx264"
     cmd = [
         "ffmpeg", "-y", "-framerate", str(fps),
         # frames start at f_0000.png (scene.frame_start = 0); ffmpeg's %04d
         # glob defaults to -start_number 1, which would drop frame 0.
         "-start_number", "0",
         "-i", os.path.join(frames_dir, "f_%04d.png"),
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-crf", "20", video_path,
-    ]
+    ] + encoder + [video_path]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        print(f"  ffmpeg FAILED for {camera_tag}: {proc.stderr[-300:]}")
+        print(f"  ffmpeg [{enc_name}] FAILED for {camera_tag}: {proc.stderr[-300:]}")
     else:
-        print(f"  rendered: {video_path}")
+        print(f"  rendered [{enc_name}]: {video_path}")
     # optionally clean up frames dir to save space
     try:
         shutil.rmtree(frames_dir)
