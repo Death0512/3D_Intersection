@@ -254,6 +254,16 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
         os.path.join(HERE, "..", meta["blend"]),
         meta["collection"], new_name=veh_coll_name)
 
+    # The appended assets may carry absolute texture filepaths baked in on a
+    # different host (e.g. the dev machine). Remap every image-block to the
+    # project-local textures dir so rendering works on any checkout (Kaggle,
+    # CI, another machine) without re-running asset_prep.
+    tex_dir = os.path.join(HERE, "..", "models", cls, "textures")
+    if os.path.isdir(tex_dir):
+        _remapped = bu.remap_textures_to_local(tex_dir)
+        if _remapped:
+            print(f"  [tex] {veh['id']}: remapped {_remapped} textures to {tex_dir}")
+
     # Assign plate + color to this vehicle's (now local) materials.
     assign_plate_and_color(coll, veh["plate"], plates_dir, rgba=veh.get("color"))
 
@@ -558,10 +568,16 @@ def setup_render(env_lights: dict = None):
     scene.cycles.use_denoising = True
     # Denoiser follows the active compute backend so a CUDA-only device
     # (Kaggle T4-as-CUDA / P100) doesn't crash at render time trying to use
-    # the OptiX denoiser without an OptiX context.
+    # the OptiX denoiser without an OptiX context. Even on an OPTIX backend
+    # we prefer OIDN when the OptiX denoiser weights file is absent (common
+    # in stripped-down containers like Kaggle's, where /usr/share/nvidia/
+    # nvoptix.bin is missing) — the OptiX denoiser then fails to initialise
+    # at render time and aborts the whole frame.
     backend = bpy.context.preferences.addons["cycles"].preferences.compute_device_type
+    optix_weights_ok = os.path.exists("/usr/share/nvidia/nvoptix.bin")
+    want_denoiser = "OPTIX" if (backend == "OPTIX" and optix_weights_ok) else "OPENIMAGEDENOISE"
     try:
-        scene.cycles.denoiser = "OPTIX" if backend == "OPTIX" else "OPENIMAGEDENOISE"
+        scene.cycles.denoiser = want_denoiser
     except Exception:
         try:
             scene.cycles.denoiser = "OPENIMAGEDENOISE"
