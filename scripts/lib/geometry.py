@@ -62,6 +62,13 @@ RES_Y = 1080
 TURN_FRICTION_MU = 0.7
 TURN_ACCEL_MS2 = 2.5
 
+# Comfortable longitudinal accel/decel for visible-segment motion profiles
+# (Workstream A — believable stop/go imagery).  Chosen inside the envelope
+# of real-world passenger-car comfortable braking (~2.5 m/s^2) and
+# acceleration from a stop (~2.0 m/s^2), and well under emergency limits.
+ACCEL_MS2 = 2.0
+DECEL_MS2 = 2.5
+
 
 class Direction(str, Enum):
     N = "N"; E = "E"; S = "S"; W = "W"
@@ -583,15 +590,19 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
     if is_queued and road_meta is not None:
         track_in = _build_queue_track(
             appear_frame, stop_frame, release_frame,
-            appear_pos, disappear_pos)
+            appear_pos, disappear_pos, speed_ms=speed_ms, fps=fps)
     else:
         track_in = _build_segment_track(
             appear_frame, disappear_frame, appear_pos, disappear_pos,
             turn, road_meta, is_out=False)
 
+    # OUT track: queued vehicles launch from rest at the box edge (accel-from-
+    # stop ease-out) so the green-light launch is visible; turning vehicles
+    # also ease-out because they exit the curve at low speed.
     track_out = _build_segment_track(
         reappear_frame, leave_frame, reappear_pos, leave_pos,
-        turn, road_meta, is_out=True, queued=is_queued)
+        turn, road_meta, is_out=True, queued=is_queued,
+        accel_from_stop=is_queued)
 
     return VehicleMotion(
         vehicle_id=vehicle_id, approach=approach, lane=lane, turn=turn,
@@ -605,24 +616,67 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
     )
 
 
+def _bezier_ease_in(start_pos: Tuple, end_pos: Tuple,
+                    ease_in_frac: float = 0.25) -> Tuple[Optional[Tuple], Optional[Tuple]]:
+    """Cubic Bézier control points for an *ease-in* decel segment (fast→slow).
+
+    The curve leaves the start at near-full tangent (free-flow cruise) and
+    decelerates to a stop at ``end_pos``. ``ease_in_frac`` is the fraction of
+    the segment length reserved for the decel taper at the END. Returns
+    ``(cp1, cp2)`` in world coordinates.
+    """
+    dx = end_pos[0] - start_pos[0]
+    dy = end_pos[1] - start_pos[1]
+    # cp1 near start, almost at the start (cruise tangent preserved).
+    cp1 = (start_pos[0] + dx * (1.0 - ease_in_frac),
+           start_pos[1] + dy * (1.0 - ease_in_frac))
+    # cp2 hugs the end (tangent → 0 ⇒ decel to rest).
+    cp2 = (end_pos[0], end_pos[1])
+    return cp1, cp2
+
+
+def _bezier_ease_out(start_pos: Tuple, end_pos: Tuple,
+                     ease_out_frac: float = 0.25) -> Tuple[Optional[Tuple], Optional[Tuple]]:
+    """Cubic Bézier control points for an *ease-out* accel segment (slow→fast).
+
+    The vehicle starts from rest at ``start_pos``, accelerates, and reaches
+    full cruise speed by the end. ``ease_out_frac`` is the fraction of the
+    segment length spent ramping up (at the START).
+    """
+    # cp1 hugs the start (tangent 0 ⇒ start from rest).
+    cp1 = (start_pos[0], start_pos[1])
+    # cp2 near end, almost at the end (full cruise tangent restored).
+    cp2 = (start_pos[0] + (end_pos[0] - start_pos[0]) * ease_out_frac,
+           start_pos[1] + (end_pos[1] - start_pos[1]) * ease_out_frac)
+    return cp1, cp2
+
+
 def _build_segment_track(start_frame: int, end_frame: int,
                          start_pos: Tuple, end_pos: Tuple,
                          turn: Turn, road_meta: Optional[dict],
-                         is_out: bool, queued: bool = False) -> List[TrackPoint]:
+                         is_out: bool, queued: bool = False,
+                         accel_from_stop: bool = False) -> List[TrackPoint]:
     """Build a 2-point keyframe track for one visible segment.
 
-    When this is an OUT segment of a turning vehicle with road_meta present,
-    use BEZIER interpolation (ease-out = acceleration out of the turn).
-    Queued straight vehicles also get ease-out (accelerating from stop).
+    BEZIER ease-out (acceleration from rest at the box edge) is applied to
+    the OUT segment when the vehicle starts from rest — i.e. when it was
+    queued at a red light (``queued`` / ``accel_from_stop``) OR when it is a
+    turning movement (exits the curve at low speed and accelerates back to
+    cruise). This makes the launch visible on the out-camera instead of an
+    instant jump to full speed. Free-flow straight vehicles on green do not
+    ease-out (they reappear already at cruise).
     """
     use_bezier = (is_out and road_meta is not None
-                  and (turn != Turn.STRAIGHT or queued))
+                  and (turn != Turn.STRAIGHT or queued or accel_from_stop))
     if use_bezier:
-        # Ease-out handles: slow at start (just exited box), fast at end.
         p0 = start_pos
         p3 = end_pos
-        cp1 = (p0[0] + (p3[0] - p0[0]) * 0.03, p0[1] + (p3[1] - p0[1]) * 0.03)
-        cp2 = (p3[0] - (p3[0] - p0[0]) * 0.15, p3[1] - (p3[1] - p0[1]) * 0.15)
+        if accel_from_stop or queued:
+            cp1, cp2 = _bezier_ease_out(p0, p3, ease_out_frac=0.30)
+        else:
+            # turning vehicle: mild ease-out from curve-exit speed
+            cp1 = (p0[0] + (p3[0] - p0[0]) * 0.03, p0[1] + (p3[1] - p0[1]) * 0.03)
+            cp2 = (p3[0] - (p3[0] - p0[0]) * 0.15, p3[1] - (p3[1] - p0[1]) * 0.15)
     else:
         cp1 = cp2 = None
 
@@ -637,21 +691,107 @@ def _build_segment_track(start_frame: int, end_frame: int,
 
 
 def _build_queue_track(start_frame: int, stop_frame: int, release_frame: int,
-                       start_pos: Tuple, stop_pos: Tuple) -> List[TrackPoint]:
-    """Build a 3-point keyframe track for a queued IN segment.
+                       start_pos: Tuple, stop_pos: Tuple,
+                       speed_ms: float, fps: int = FPS) -> List[TrackPoint]:
+    """Build a 4-point keyframe track for a queued IN segment with realistic
+    deceleration into the stop line.
 
-    Point 0: vehicle appears at env anchor (free-flow approach).
-    Point 1: vehicle reaches stop line (stop_frame) — arrives at box edge.
-    Point 2: vehicle idles at stop line until release (enters box).
+    Profile: cruise (LINEAR) → BEZIER ease-in decel → idle (stationary at
+    stop line) until release.
 
-    The middle segment (Point 1 → Point 2) uses LINEAR with identical
-    positions — the vehicle is stationary during the idle period.
+    Points:
+      0. ``start_frame`` at ``start_pos`` — vehicle appears at the env anchor.
+      1. ``decel_end_frame`` at ``decel_end_pos`` — end of the cruise; the
+         vehicle has travelled the cruise portion of the approach at free-flow
+         speed and is about to brake. The segment from point 0 to here is LINEAR.
+      2. ``stop_frame`` at ``stop_pos`` — the vehicle is now stationary at the
+         stop line. The segment from point 1 to here is BEZIER ease-in (decel).
+      3. ``release_frame`` at ``stop_pos`` — the vehicle idles until release.
+         The segment from point 2 to here is LINEAR with identical positions.
+
+    Braking physics: the vehicle decelerates from ``speed_ms`` to 0 at
+    ``DECEL_MS2``; the braking distance is ``d_brake = v^2 / (2*DECEL)`` and
+    the braking time ``t_brake = v / DECEL``. The cruise covers the remaining
+    approach distance; its hold time is what adjusts to make the total
+    travel time land exactly on ``stop_frame``.
+
+    Fallback: the decel phase is only inserted when the approach is long
+    enough to fit a meaningful brake (>1 frame at the configured decel);
+    otherwise the legacy constant-speed-then-snap 3-point track is used.
     """
+    v = speed_ms
+    approach_dx = stop_pos[0] - start_pos[0]
+    approach_dy = stop_pos[1] - start_pos[1]
+    approach_len = math.sqrt(approach_dx * approach_dx + approach_dy * approach_dy)
+    available_time_s = max(0.0, (stop_frame - start_frame) / fps)
+
+    # Nominal brake: full-speed cruise then brake at DECEL_MS2 to a stop.
+    # If the brake time does not fit in the available approach time, fall back
+    # to a gentler single-ramp decel that spans the whole approach (the
+    # vehicle eases down from v to 0 over the entire visible segment). This
+    # keeps the stop landing exactly on stop_frame with no pre-appear braking.
+    t_brake_s = v / DECEL_MS2
+    d_brake = (v * v) / (2.0 * DECEL_MS2)
+    use_full_ramp = (t_brake_s >= available_time_s
+                     or d_brake >= approach_len * 0.95
+                     or available_time_s <= 0.0
+                     or approach_len <= 0.0)
+    if use_full_ramp:
+        # Whole approach is one BEZIER ease-in (decel from v to 0).
+        cp1, cp2 = _bezier_ease_in(start_pos, stop_pos, ease_in_frac=0.50)
+        return [
+            TrackPoint(frame=start_frame, x=start_pos[0], y=start_pos[1],
+                       visible=True, interp="BEZIER", cp1=cp1, cp2=cp2),
+            TrackPoint(frame=stop_frame, x=stop_pos[0], y=stop_pos[1],
+                       visible=True, interp="LINEAR"),
+            TrackPoint(frame=release_frame, x=stop_pos[0], y=stop_pos[1],
+                       visible=True, interp="LINEAR"),
+        ]
+
+    t_brake_frames = int(round(t_brake_s * fps))
+    if t_brake_frames < 2:
+        # Too few frames to render a decel — keep legacy 3-point snap track.
+        return [
+            TrackPoint(frame=start_frame, x=start_pos[0], y=start_pos[1],
+                       visible=True, interp="LINEAR"),
+            TrackPoint(frame=stop_frame, x=stop_pos[0], y=stop_pos[1],
+                       visible=True, interp="LINEAR"),
+            TrackPoint(frame=release_frame, x=stop_pos[0], y=stop_pos[1],
+                       visible=True, interp="LINEAR"),
+        ]
+
+    # Cruise covers (approach_len - d_brake) at speed v; brake covers d_brake
+    # in t_brake_frames. Both anchored so their sum lands on stop_frame.
+    cruise_dist = approach_len - d_brake
+    cruise_time_s = cruise_dist / v if v > 0 else 0.0
+    cruise_frames = int(round(cruise_time_s * fps))
+    cruise_end_frame = start_frame + cruise_frames
+    decel_end_frame = stop_frame - t_brake_frames
+    # Clamp monotonicity: never let cruise_end run past where the decel must
+    # begin (high-speed / short-approach boundary). A small overlap is OK —
+    # the BEZIER shape handles the transition; just keep frames ordered.
+    if cruise_end_frame > decel_end_frame:
+        cruise_end_frame = decel_end_frame
+    if cruise_end_frame < start_frame:
+        cruise_end_frame = start_frame
+
+    unit_x = approach_dx / approach_len if approach_len > 0 else 0.0
+    unit_y = approach_dy / approach_len if approach_len > 0 else 0.0
+    cruise_end_pos = (start_pos[0] + unit_x * cruise_dist,
+                      start_pos[1] + unit_y * cruise_dist)
+
+    cp1, cp2 = _bezier_ease_in(cruise_end_pos, stop_pos, ease_in_frac=0.30)
+
     return [
+        # 0 → 1 : cruise at free-flow speed (LINEAR).
         TrackPoint(frame=start_frame, x=start_pos[0], y=start_pos[1],
                    visible=True, interp="LINEAR"),
+        TrackPoint(frame=cruise_end_frame, x=cruise_end_pos[0], y=cruise_end_pos[1],
+                   visible=True, interp="BEZIER", cp1=cp1, cp2=cp2),
+        # 1 → 2 : decelerate to rest at the stop line (BEZIER ease-in).
         TrackPoint(frame=stop_frame, x=stop_pos[0], y=stop_pos[1],
                    visible=True, interp="LINEAR"),
+        # 2 → 3 : idle at the stop line until release (LINEAR, stationary).
         TrackPoint(frame=release_frame, x=stop_pos[0], y=stop_pos[1],
                    visible=True, interp="LINEAR"),
     ]

@@ -18,6 +18,15 @@
 #   --out DIR           Output directory (default: output/run_car)
 #   --only CAM          Render only this camera e.g. in_N (debug)
 #   --skip-asset-check  Skip blender asset validation step
+#   --signal             Enable traffic signal SPaT gating + queue
+#   --signal-mode MODE   Signal controller when --signal is set:
+#                        'fixed' (default, 70s cycle permissive-left) or
+#                        'adaptive' (NEMA 8-phase MaxPressure, closed-loop on
+#                        realised arrivals). Implies --signal.
+#   --demand SPEC        Demand model: path to a demand JSON (per-approach
+#                        flow veh/h + turning split), or 'none' for the legacy
+#                        uniform-random scheduler. Default: built-in demand
+#                        model (~400 veh/h/approach, straight-heavy split).
 #   --jobs N            Parallel render workers (default: auto-detect from free VRAM)
 #   --blender PATH      Path to blender binary (default: auto-detect)
 #   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
@@ -32,9 +41,12 @@ SEED=42
 NUM_VEHICLES=120
 FPS=30
 SECONDS_VAL=5
-OUT_DIR="output/run_car"
+OUT_DIR=""            # empty → auto-selected per host (see below)
 ONLY=""
-SKIP_ASSET_CHECK=0
+SKIP_ASSET_CHECK=0  
+SIGNAL=0
+SIGNAL_MODE="fixed"
+DEMAND=""
 BLENDER_BIN=""
 PYTHON_BIN=""
 JOBS=0   # 0 = auto-detect from free VRAM
@@ -56,6 +68,9 @@ while [[ $# -gt 0 ]]; do
         --out)            OUT_DIR="$2";       shift 2 ;;
         --only)           ONLY="$2";          shift 2 ;;
         --skip-asset-check) SKIP_ASSET_CHECK=1; shift ;;
+        --signal)         SIGNAL=1;           shift ;;
+        --signal-mode)    SIGNAL_MODE="$2";   shift 2 ;;
+        --demand)         DEMAND="$2";        shift 2 ;;
         --blender)        BLENDER_BIN="$2";   shift 2 ;;
         --python)         PYTHON_BIN="$2";    shift 2 ;;
         --jobs)           JOBS="$2";          shift 2 ;;
@@ -65,10 +80,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
-# Resolve paths
+# Resolve paths + detect host (Kaggle vs local Ubuntu)
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Host detection: Kaggle notebooks set KAGGLE_KERNEL_RUN_TYPE and create a
+# /kaggle tree. We use either signal to switch the default out dir and the
+# install hint below.
+if [[ -n "${KAGGLE_KERNEL_RUN_TYPE:-}" ]] || [[ -d /kaggle ]]; then
+    IS_KAGGLE=1
+else
+    IS_KAGGLE=0
+fi
 
 # Auto-source the installer-written env.sh if it exists (sets DOAN_PYTHON, puts
 # blender on PATH). User-supplied --blender / --python still take priority.
@@ -78,7 +102,11 @@ if [[ -f "$_ENV_SH" ]]; then
 fi
 
 if [[ -z "$OUT_DIR" ]]; then
-    OUT_DIR="$ROOT_DIR/output/run1"
+    if [[ "$IS_KAGGLE" -eq 1 ]]; then
+        OUT_DIR="/kaggle/working/run1"
+    else
+        OUT_DIR="$ROOT_DIR/output/run1"
+    fi
 fi
 OUT_DIR="$(mkdir -p "$OUT_DIR" && cd "$OUT_DIR" && pwd)"
 
@@ -96,18 +124,41 @@ if [[ -z "$BLENDER_BIN" ]]; then
     BLENDER_BIN="$(command -v blender 2>/dev/null || true)"
     if [[ -z "$BLENDER_BIN" ]]; then
         echo "ERROR: blender not found on PATH. Run scripts/install.sh first or use --blender /path/to/blender" >&2
+        if [[ "$IS_KAGGLE" -eq 1 ]]; then
+            echo "        (On Kaggle: bash scripts/install.sh --yes  — installs Blender 5.1.x under \$HOME/.local)" >&2
+        fi
         exit 1
     fi
+fi
+
+# Resolve --blender to an absolute path so later os.chdir() inside Blender/Python
+# processes can't break the relative PATH we export below.
+if [[ -n "$BLENDER_BIN" ]]; then
+    BLENDER_BIN="$(readlink -f "$BLENDER_BIN" 2>/dev/null || realpath "$BLENDER_BIN")"
 fi
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "============================================================"
-echo "PIPELINE  seed=$SEED  n=$NUM_VEHICLES  min=${SECONDS_VAL}s @ ${FPS}fps  out=$OUT_DIR"
+if [[ "$IS_KAGGLE" -eq 1 ]]; then
+    echo "PIPELINE [Kaggle]  seed=$SEED  n=$NUM_VEHICLES  min=${SECONDS_VAL}s @ ${FPS}fps  out=$OUT_DIR"
+else
+    echo "PIPELINE  seed=$SEED  n=$NUM_VEHICLES  min=${SECONDS_VAL}s @ ${FPS}fps  out=$OUT_DIR"
+fi
 echo "  python : $PYTHON_BIN"
 echo "  blender: $BLENDER_BIN"
 [[ -n "$ONLY" ]] && echo "  only   : $ONLY"
+if [[ "$SIGNAL" -eq 1 ]]; then
+    echo "  signal : on (mode=$SIGNAL_MODE)"
+else
+    echo "  signal : off"
+fi
+if [[ -n "$DEMAND" ]]; then
+    echo "  demand : $DEMAND"
+else
+    echo "  demand : default model"
+fi
 echo "============================================================"
 
 # ---------------------------------------------------------------------------
@@ -123,6 +174,9 @@ PIPELINE_ARGS=(
 [[ -n "$ONLY" ]]             && PIPELINE_ARGS+=(--only "$ONLY")
 [[ "$SKIP_ASSET_CHECK" -eq 1 ]] && PIPELINE_ARGS+=(--skip-asset-check)
 [[ "$JOBS" -gt 0 ]]         && PIPELINE_ARGS+=(--jobs "$JOBS")
+[[ "$SIGNAL" -eq 1 ]]        && PIPELINE_ARGS+=(--signal)
+[[ "$SIGNAL" -eq 1 ]]        && PIPELINE_ARGS+=(--signal-mode "$SIGNAL_MODE")
+[[ -n "$DEMAND" ]]           && PIPELINE_ARGS+=(--demand "$DEMAND")
 
 # Pass blender/python overrides to the pipeline via env so subprocesses pick
 # them up without needing extra flags on run_pipeline.py.

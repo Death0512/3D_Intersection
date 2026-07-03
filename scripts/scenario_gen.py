@@ -23,7 +23,7 @@ import os
 import random
 import sys
 import string
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -32,14 +32,115 @@ sys.path.insert(0, os.path.join(HERE, "lib"))
 import geometry as G
 import kinematics as K
 import envfile as ENV
+# Import the traffic signal module unambiguously.  Python's stdlib also
+# ships a top-level ``signal`` module (OS signals); plain ``import signal``
+# can resolve to stdlib under pytest/CI runs where ``scripts/lib`` isn't on
+# the path first.  Force-load our local module and register it under a
+# distinct name to guarantee never to import the stdlib one.
+import importlib.util as _ilu
+_sig_spec = _ilu.spec_from_file_location(
+    "traffic_signal_lib", os.path.join(HERE, "lib", "signal.py"))
+SG = _ilu.module_from_spec(_sig_spec)
+sys.modules["traffic_signal_lib"] = SG
+_sig_spec.loader.exec_module(SG)
 from gen_plate import random_plate
 
-try:
-    from lib import signal as SG
-except ImportError:
-    import signal as SG
-
 ROAD_JSON = os.path.join(HERE, "..", "assets", "road.json")
+
+
+# ---- demand model (real-world traffic volume) -------------------------------
+# A per-approach flow rate (veh/h) plus a turning-movement split. Drives
+# Poisson arrivals so platoons and gaps emerge naturally, matching real
+# urban intersection demand. Defaults reflect a moderate urban arterial
+# (~400 veh/h per approach, straight-dominant with realistic left/right
+# shares). Lane is chosen uniformly within the approach (lane choice does
+# not affect arrival rate; lanes share the approach's demand and the
+# headway filter keeps them conflict-free).
+DEFAULT_APPROACH_FLOW_VPH = 400.0
+# default turning split {turn: fraction}. Lane-turn restrictions still apply.
+DEFAULT_TURN_SPLIT = {"left": 0.15, "straight": 0.70, "right": 0.15}
+
+
+class DemandModel:
+    """Per-approach Poisson demand with a turning-movement split.
+
+    ``flows`` maps G.Direction -> veh/h. ``turn_split`` is shared across all
+    approaches (typical for a symmetric 4-way); per-approach splits can be
+    supplied via ``turn_splits``.  Falls back to uniform VPH for any approach
+    not listed in ``flows``.
+
+    Used by ``schedule_departures_poisson`` to draw exponential inter-arrival
+    times per approach (rate = flow_vph/3600 veh/s), and by ``make_vehicle`` to
+    draw the approach+turn from the demand distribution.
+    """
+
+    def __init__(self,
+                 flows: Optional[dict] = None,
+                 turn_split: Optional[dict] = None,
+                 turn_splits: Optional[dict] = None):
+        self.flows = dict(flows) if flows else {}
+        # per-approach turn split overrides turn_split when provided
+        self.turn_splits = turn_splits or {}
+        self.turn_split = dict(turn_split) if turn_split else dict(DEFAULT_TURN_SPLIT)
+
+    @classmethod
+    def default(cls) -> "DemandModel":
+        flows = {d: DEFAULT_APPROACH_FLOW_VPH for d in G.Direction}
+        return cls(flows=flows, turn_split=DEFAULT_TURN_SPLIT)
+
+    def flow_vph(self, approach: G.Direction) -> float:
+        return self.flows.get(approach, DEFAULT_APPROACH_FLOW_VPH)
+
+    def turn_fraction(self, approach: G.Direction, turn: G.Turn) -> float:
+        split = self.turn_splits.get(approach, self.turn_split)
+        return split.get(turn.value, 0.0)
+
+    def to_dict(self) -> dict:
+        return {
+            "flows": {d.value: v for d, v in self.flows.items()},
+            "turn_split": dict(self.turn_split),
+            "turn_splits": {d.value: s for d, s in self.turn_splits.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DemandModel":
+        flows = {G.Direction(k): float(v) for k, v in (d.get("flows") or {}).items()}
+        ts = d.get("turn_split")
+        tss = d.get("turn_splits")
+        turn_splits = None
+        if tss:
+            turn_splits = {G.Direction(k): {kk: float(vv) for kk, vv in s.items()}
+                           for k, s in tss.items()}
+        return cls(flows=flows, turn_split=ts, turn_splits=turn_splits)
+
+    @classmethod
+    def from_file(cls, path: str) -> "DemandModel":
+        with open(path) as f:
+            return cls.from_dict(json.load(f))
+
+
+def _approach_turn_from_demand(demand: DemandModel, rng: random.Random,
+                               lane: int) -> tuple:
+    """Pick an approach weighted by flow and a legal turn from the demand split.
+
+    The approach is drawn proportional to flow so higher-demand approaches
+    generate more vehicles.  The turn is drawn from the demand split filtered
+    by the lane's legal turns (restricted lanes still only see legal turns;
+    fractions renormalise over the legal subset).
+    """
+    approaches = list(G.Direction)
+    weights = [demand.flow_vph(a) for a in approaches]
+    approach = rng.choices(approaches, weights=weights, k=1)[0]
+    legal = [t for t in TURNS if t in G.allowed_turns(lane)]
+    fracs = [demand.turn_fraction(approach, t) for t in legal]
+    total = sum(fracs)
+    if total <= 0:
+        # all-zero split for this lane's legal turns — fall back to equal
+        weights_t = [1.0] * len(legal)
+    else:
+        weights_t = [f / total for f in fracs]
+    turn = rng.choices(legal, weights=weights_t, k=1)[0]
+    return approach, turn
 
 
 # ---- defaults ---------------------------------------------------------------
@@ -71,13 +172,17 @@ def choose_legal_turn(lane: int, rng: random.Random) -> G.Turn:
     return rng.choices(legal, weights=weights)[0]
 
 
-def make_vehicle(vid: str, rng: random.Random) -> dict:
+def make_vehicle(vid: str, rng: random.Random,
+                 demand: Optional[DemandModel] = None) -> dict:
     cls = rng.choices(VEHICLE_CLASSES, weights=[1])[0]
     rgba, color_name = rng.choice(COLOR_LIST)
     plate = random_plate(rng)
-    approach = rng.choice(list(G.Direction))
     lane = rng.randint(0, G.NUM_LANES - 1)
-    turn = choose_legal_turn(lane, rng)
+    if demand is not None:
+        approach, turn = _approach_turn_from_demand(demand, rng, lane)
+    else:
+        approach = rng.choice(list(G.Direction))
+        turn = choose_legal_turn(lane, rng)
     speed_kmh = rng.uniform(*SPEED_KMH_RANGE)
     speed_ms = K.speed_kmh_to_ms(speed_kmh)
     return {
@@ -100,7 +205,8 @@ def schedule_departures(vehicles: list, duration_frames: int, rng: random.Random
                         approach_visible_length: float = 40.0) -> list:
     """Assign a depart_frame to each vehicle so no two in the same
     (approach, lane) overlap, either at departure OR by catch-up on the
-    approach segment.
+    approach segment. Uniform-random target per vehicle (legacy behaviour
+    — used when no ``DemandModel`` is provided).
 
     Two checks per candidate frame against every existing vehicle in the lane:
       * start-gap headway (min_headway_frames) — no overlap at the depart instant
@@ -159,6 +265,115 @@ def schedule_departures(vehicles: list, duration_frames: int, rng: random.Random
     return vehicles
 
 
+def _enforce_lane_safety(vehicles: list, fps: int, safety_gap: float,
+                         approach_visible_length: float, rng: random.Random):
+    """Push-later-only feasibility pass ensuring no two vehicles in the same
+    (approach, lane) overlap at depart or by catch-up. Used by the Poisson
+    scheduler after raw arrivals are assigned so the headway / catch-up
+    invariants hold (same guarantees as ``schedule_departures``).
+
+    Vehicles are processed in depart_frame order within each lane; for each
+    vehicle the earliest safe frame >= its current frame is found by pushing it
+    later only.
+    """
+    lanes: dict = {}
+    for v in vehicles:
+        lanes.setdefault((v["approach"], v["lane"]), []).append(v)
+    for key, vs in lanes.items():
+        vs.sort(key=lambda x: x["depart_frame"])
+        placed: list = []
+        for v in vs:
+            frame = v["depart_frame"]
+            for _ in range(4000):
+                ok = True
+                for (ef, el, es) in placed:
+                    needed = K.min_headway_frames(max(v["length"], el),
+                                                  max(v["speed_ms"], es), safety_gap)
+                    if abs(frame - ef) < needed:
+                        ok = False
+                        break
+                    if frame >= ef:
+                        if not K.catchup_safe(ef, es, el, frame, v["speed_ms"],
+                                              approach_visible_length, safety_gap):
+                            ok = False
+                            break
+                    else:
+                        if not K.catchup_safe(frame, v["speed_ms"], v["length"],
+                                              ef, es, approach_visible_length, safety_gap):
+                            ok = False
+                            break
+                if ok:
+                    break
+                frame += 1
+            v["depart_frame"] = int(frame)
+            placed.append((frame, v["length"], v["speed_ms"]))
+
+
+def schedule_departures_poisson(vehicles: list, duration_frames: int,
+                                 fps: int, demand: DemandModel,
+                                 rng: random.Random,
+                                 safety_gap: float = 2.0,
+                                 approach_visible_length: float = 40.0) -> list:
+    """Assign depart_frame via a Poisson arrival process per approach.
+
+    For each approach, inter-arrival times are drawn exponential with rate
+    ``flow_vph / 3600`` veh/s. Vehicles are grouped by approach and assigned
+    arrival frames in the order the Poisson clock produces them; lane is
+    kept from ``make_vehicle`` (which already chose it) so per-lane headway
+    filtering applies.
+
+    After raw arrivals are assigned, the same headway / catch-up safety filter
+    as ``schedule_departures`` runs as a push-later-only feasibility pass: any
+    arrival that would violate same-lane headway or catch-up is pushed to the
+    earliest safe frame >= its Poisson arrival. This preserves all existing
+    safety invariants while letting platoons / gaps emerge from the demand.
+
+    Vehicles whose pushed-later frame exceeds ``duration_frames`` are kept
+    (the scenario duration auto-extends in ``generate`` to fit every vehicle).
+    """
+    fps_f = float(fps)
+    horizon_s = duration_frames / fps_f
+
+    # Generate per-approach arrival sequences from independent Poisson clocks.
+    arrivals_by_approach: dict = {}
+    for approach in G.Direction:
+        rate_ps = demand.flow_vph(approach) / 3600.0
+        if rate_ps <= 0:
+            arrivals_by_approach[approach] = []
+            continue
+        arrivals = []
+        t = 0.0
+        while t < horizon_s:
+            # exponential inter-arrival (Poisson process)
+            t += rng.expovariate(rate_ps)
+            if t < horizon_s:
+                arrivals.append(int(round(t * fps_f)))
+        arrivals_by_approach[approach] = arrivals
+
+    # Group vehicles by approach, assign arrival frames in Poisson order.
+    by_approach: dict = {}
+    for v in vehicles:
+        by_approach.setdefault(G.Direction(v["approach"]), []).append(v)
+    for ap, vs in by_approach.items():
+        vs.sort(key=lambda x: x.get("depart_frame", 0))
+        arrivals = arrivals_by_approach.get(ap, [])
+        n_to_assign = min(len(vs), len(arrivals))
+        for i in range(n_to_assign):
+            vs[i]["depart_frame"] = int(arrivals[i])
+        # leftover vehicles (more vehicles than arrivals in window) get frames
+        # just past the last arrival so they still appear in the run.
+        if n_to_assign < len(vs):
+            tail = (arrivals[-1] + 1) if arrivals else 0
+            for i in range(n_to_assign, len(vs)):
+                vs[i]["depart_frame"] = int(tail)
+                tail += 1
+
+    # Push-later-only feasibility pass (preserves all safety invariants).
+    _enforce_lane_safety(vehicles, fps, safety_gap,
+                         approach_visible_length, rng)
+    return vehicles
+
+
 def _compute_max_leave_frame(vehicles: list, road_meta: dict, fps: int) -> int:
     """Compute the maximum ``leave_frame`` across all vehicles using the
     identical env-anchor + plan_motion path as ``render.compute_metadata``.
@@ -186,11 +401,28 @@ def _compute_max_leave_frame(vehicles: list, road_meta: dict, fps: int) -> int:
 
 def generate(seed: int, num_vehicles: int, seconds: float,
              out_dir: str, fps: int = G.FPS,
-             signal_plan: Optional[SG.SignalPlan] = None) -> dict:
+             signal_plan: Optional[SG.SignalPlan] = None,
+             demand: Optional[DemandModel] = None,
+             signal_mode: str = "fixed") -> dict:
+    """Generate a scenario and write ``scenario.json``.
+
+    Args:
+        signal_plan: pre-built signal plan (overrides ``signal_mode``).
+            If None and ``signal_mode`` is ``"adaptive"`` / ``"fixed"``,
+            the appropriate plan is constructed here.
+        signal_mode: ``"fixed"`` (default fixed-cycle permissive-left
+            ``SignalPlan``) or ``"adaptive"`` (NEMA 8-phase MaxPressure
+            ``AdaptiveSignalPlan`` — closed-loop, rebuilds inside the
+            ``_resolve_all`` fixpoint from realised arrivals).  Ignored when
+            ``signal_plan`` is given explicitly.
+        demand: Poisson per-approach flow + turning-movement split.  None
+            falls back to the legacy uniform scheduler.
+    """
     min_duration_frames = int(round(seconds * fps))
 
     rng = random.Random(seed)
-    vehicles = [make_vehicle(f"V{i:03d}", rng) for i in range(num_vehicles)]
+    vehicles = [make_vehicle(f"V{i:03d}", rng, demand=demand)
+                for i in range(num_vehicles)]
 
     road_meta = {}
     approach_len = 40.0
@@ -199,9 +431,25 @@ def generate(seed: int, num_vehicles: int, seconds: float,
             road_meta = json.load(f)
             approach_len = road_meta.get("approach_length", 40.0)
 
-    vehicles = schedule_departures(
-        vehicles, min_duration_frames, rng,
-        approach_visible_length=approach_len)
+    if demand is not None:
+        vehicles = schedule_departures_poisson(
+            vehicles, min_duration_frames, fps, demand, rng,
+            approach_visible_length=approach_len)
+    else:
+        vehicles = schedule_departures(
+            vehicles, min_duration_frames, rng,
+            approach_visible_length=approach_len)
+
+    # Construct signal plan from mode if not supplied explicitly.
+    if signal_plan is None and signal_mode == "adaptive":
+        signal_plan = SG.AdaptiveSignalPlan(fps=fps)
+    elif signal_plan is None and signal_mode == "fixed":
+        signal_plan = None  # fixed mode is only active when explicitly built
+    # Preserve a requested fixed plan that was passed in.
+    if signal_mode == "adaptive" and signal_plan is not None and not isinstance(
+            signal_plan, SG.AdaptiveSignalPlan):
+        # User mixed the two: prefer the explicit plan, switch the mode label.
+        signal_mode = "fixed"
 
     _resolve_all(vehicles, approach_len, fps, signal_plan=signal_plan)
 
@@ -220,7 +468,27 @@ def generate(seed: int, num_vehicles: int, seconds: float,
         "vehicles": vehicles,
     }
     if signal_plan is not None:
+        scenario["signal_mode"] = signal_mode
         scenario["signal_cycle_frames"] = signal_plan.cycle_frames
+        # Emit a per-frame phase timeline for downstream vision/behaviour
+        # labels and for replay/debug.  For adaptive plans this is the
+        # interval list; for fixed plans it is the phase-name boundaries.
+        if isinstance(signal_plan, SG.AdaptiveSignalPlan):
+            scenario["signal_timeline"] = [
+                {"start": s, "end": e, "phases": list(combo)}
+                for (s, e, combo) in signal_plan.intervals
+            ]
+            scenario["signal_clearances"] = [
+                {"start": s, "end": e}
+                for (s, e) in signal_plan._clearances
+            ]
+        else:
+            scenario["signal_timeline"] = [
+                {"start": s, "phase": name}
+                for (s, name) in signal_plan._boundaries
+            ]
+    if demand is not None:
+        scenario["demand"] = demand.to_dict()
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "scenario.json")
     with open(out_path, "w") as f:
@@ -443,6 +711,31 @@ def _check_headway_fixpoint(vehicles, approach_visible_length, fps):
     return changed
 
 
+def _collect_stop_arrivals(vehicles: list, approach_visible_length: float,
+                           fps: int) -> Dict[Tuple[G.Direction, G.Turn], List[int]]:
+    """Compute the natural (un-gated) stop-line arrival frame for every
+    vehicle and group by movement.  This is the *demand* signal an adaptive
+    controller reacts to: arrival = depart_frame + travel_time at free-flow
+    speed, independent of any signal-induced wait.
+
+    Used to rebuild an ``AdaptiveSignalPlan`` from current arrivals inside the
+    ``_resolve_all`` fixpoint, closing the loop (signal reacts to arrivals,
+    release times shift, downstream arrivals change).  Feeding *natural*
+    arrivals (not gated ones) stabilises the fixpoint: the signal plan is a
+    function of demand only, not of itself.
+    """
+    arrivals: Dict[Tuple[G.Direction, G.Turn], List[int]] = {}
+    for v in vehicles:
+        ap = G.Direction(v["approach"])
+        turn = G.Turn(v["turn"])
+        travel_f = int(round(approach_visible_length / v["speed_ms"] * fps))
+        t = v["depart_frame"] + travel_f
+        arrivals.setdefault((ap, turn), []).append(t)
+    for key in arrivals:
+        arrivals[key].sort()
+    return arrivals
+
+
 def _resolve_all(vehicles, approach_visible_length, fps,
                  signal_plan=None, max_rounds=20):
     """Unified fixpoint: iterate headway → signal → exit until all
@@ -452,6 +745,15 @@ def _resolve_all(vehicles, approach_visible_length, fps,
     ``(depart_frame, stop_frame, release_frame, queue_slot, extra_stagger)``
     before and after each round.  Exit resolution and headway only push
     later (monotonic), so the loop converges.
+
+    If ``signal_plan`` is an ``AdaptiveSignalPlan`` the plan is *rebuilt*
+    from the current natural stop-line arrivals at the top of each round
+    (closed loop: signal reacts to demand).  The arrivals snapshot is taken
+    once on the first round and reused on subsequent rounds so the signal
+    plan is a function of *demand* only — feeding gated arrivals back in
+    would cause the plan to oscillate.  The plan stabilises when the arrival
+    snapshot is unchanged across rounds (a direct consequence of the
+    snapshot comparison already used for fixpoint detection).
     """
     def _snapshot(vs):
         return [
@@ -460,8 +762,22 @@ def _resolve_all(vehicles, approach_visible_length, fps,
             for v in vs
         ]
 
+    is_adaptive = SG.AdaptiveSignalPlan is not None and isinstance(
+        signal_plan, SG.AdaptiveSignalPlan)
+    arrivals_snapshot: Optional[Dict] = None
+    if is_adaptive:
+        arrivals_snapshot = _collect_stop_arrivals(
+            vehicles, approach_visible_length, fps)
+
     for _ in range(max_rounds):
         before = _snapshot(vehicles)
+
+        # 0. Closed-loop adaptive signal: rebuild plan from current arrivals.
+        if is_adaptive:
+            horizon = (
+                max((t for ts in arrivals_snapshot.values() for t in ts),
+                    default=0) + 20 * signal_plan.max_green_f)
+            signal_plan.rebuild(arrivals_snapshot, horizon_frames=horizon)
 
         # 1. Same-lane headway (re-check after exit shifts)
         _check_headway_fixpoint(vehicles, approach_visible_length, fps)
@@ -490,11 +806,36 @@ def main():
                          "the actual duration auto-extends to fit all vehicles")
     ap.add_argument("--signal", action="store_true",
                     help="enable traffic signal SPaT gating + queue")
+    ap.add_argument("--signal-mode", type=str, default="fixed",
+                    choices=["fixed", "adaptive"],
+                    help="signal controller type when --signal is set: "
+                         "'fixed' (default, 70s cycle permissive-left) or "
+                         "'adaptive' (NEMA 8-phase MaxPressure, closed-loop "
+                         "on realised arrivals)")
+    ap.add_argument("--demand", type=str, default=None,
+                    help="path to a demand JSON (per-approach flow veh/h + turning "
+                         "split). When omitted, the default demand model "
+                         f"({DEFAULT_APPROACH_FLOW_VPH:g} veh/h/approach) is used. "
+                         "Pass 'none' to disable demand and use the legacy "
+                         "uniform-random scheduler.")
     ap.add_argument("--out", type=str, default=os.path.join(HERE, "..", "output", "run1"))
     args = ap.parse_args()
-    signal_plan = SG.SignalPlan(fps=args.fps) if args.signal else None
+    if args.signal:
+        if args.signal_mode == "adaptive":
+            signal_plan = SG.AdaptiveSignalPlan(fps=args.fps)
+        else:
+            signal_plan = SG.SignalPlan(fps=args.fps)
+    else:
+        signal_plan = None
+    if args.demand and args.demand.lower() == "none":
+        demand = None
+    elif args.demand:
+        demand = DemandModel.from_file(args.demand)
+    else:
+        demand = DemandModel.default()
     generate(args.seed, args.num_vehicles, args.seconds, args.out, fps=args.fps,
-             signal_plan=signal_plan)
+             signal_plan=signal_plan, demand=demand,
+             signal_mode=args.signal_mode)
 
 
 if __name__ == "__main__":

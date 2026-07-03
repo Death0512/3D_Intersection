@@ -132,9 +132,16 @@ def compute_metadata(scenario: dict, root: str) -> dict:
             "exit_direction": motion.exit_direction.value,
             "exit_lane": motion.exit_lane,
             "delta_t_frames": motion.reappear_frame - motion.disappear_frame,
+            # Signal-stop ground truth (mirrors scenario_gen).  Present even
+            # for free-flow vehicles (wait_frames == 0) so downstream labels
+            # can rely on the keys always existing.
+            "stop_frame": veh.get("stop_frame"),
+            "release_frame": veh.get("release_frame"),
+            "wait_frames": veh.get("wait_frames", 0),
+            "queue_slot": veh.get("queue_slot", -1),
             "frames": frames,
         })
-    return {
+    meta = {
         "seed": scenario["seed"],
         "fps": fps,
         "duration_frames": duration,
@@ -142,6 +149,17 @@ def compute_metadata(scenario: dict, root: str) -> dict:
         "num_vehicles": len(vehicles_meta),
         "vehicles": vehicles_meta,
     }
+    # Emit the signal timeline + mode when the scenario carried signal info,
+    # so per-frame "why did this car stop" ground truth is available for
+    # downstream vision / behaviour labels.
+    if "signal_mode" in scenario or "signal_timeline" in scenario:
+        meta["signal"] = {
+            "mode": scenario.get("signal_mode", "fixed"),
+            "cycle_frames": scenario.get("signal_cycle_frames"),
+            "timeline": scenario.get("signal_timeline", []),
+            "clearances": scenario.get("signal_clearances", []),
+        }
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +206,9 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
     fps = scenario["fps"]
     cmd = [
         "ffmpeg", "-y", "-framerate", str(fps),
+        # frames start at f_0000.png (scene.frame_start = 0); ffmpeg's %04d
+        # glob defaults to -start_number 1, which would drop frame 0.
+        "-start_number", "0",
         "-i", os.path.join(frames_dir, "f_%04d.png"),
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-crf", "20", video_path,

@@ -66,7 +66,16 @@ def step_assets_validate():
     run([BLENDER, "-b", "--python", os.path.join(HERE, "validate_assets.py")])
 
 
-def step_scenario(seed, num_vehicles, seconds, out_dir, fps=None, signal=False):
+def step_scenario(seed, num_vehicles, seconds, out_dir, fps=None,
+                   signal=False, signal_mode="fixed", demand=None):
+    """Run scenario_gen.py.
+
+    ``signal_mode`` is forwarded only when ``signal`` is True (mirrors
+    scenario_gen.py, where --signal-mode is meaningful only together with
+    --signal).  ``demand`` is forwarded as-is: ``None`` → default demand
+    model, a path → custom JSON, the string ``"none"`` → legacy uniform
+    scheduler.
+    """
     cmd = [PYTHON, os.path.join(HERE, "scenario_gen.py"),
            "--seed", str(seed),
            "--num-vehicles", str(num_vehicles),
@@ -76,6 +85,9 @@ def step_scenario(seed, num_vehicles, seconds, out_dir, fps=None, signal=False):
         cmd += ["--fps", str(fps)]
     if signal:
         cmd += ["--signal"]
+        cmd += ["--signal-mode", str(signal_mode)]
+    if demand is not None:
+        cmd += ["--demand", str(demand)]
     run(cmd)
     return os.path.join(out_dir, "scenario.json")
 
@@ -232,6 +244,17 @@ def main():
     ap.add_argument("--skip-asset-check", action="store_true")
     ap.add_argument("--signal", action="store_true",
                     help="enable traffic signal SPaT gating + queue")
+    ap.add_argument("--signal-mode", type=str, default="fixed",
+                    choices=["fixed", "adaptive"],
+                    help="signal controller type when --signal is set: "
+                         "'fixed' (default, 70s cycle permissive-left) or "
+                         "'adaptive' (NEMA 8-phase MaxPressure, closed-loop "
+                         "on realised arrivals)")
+    ap.add_argument("--demand", type=str, default=None,
+                    help="path to a demand JSON (per-approach flow veh/h + "
+                         "turning split). When omitted, the default demand "
+                         "model is used. Pass 'none' to disable demand and "
+                         "use the legacy uniform-random scheduler.")
     args = ap.parse_args()
 
     fps = args.fps
@@ -255,7 +278,8 @@ def main():
 
     print("\n[2/5] Scenario generation")
     scn = step_scenario(args.seed, args.num_vehicles, seconds, out_dir, fps=fps,
-                        signal=args.signal)
+                        signal=args.signal, signal_mode=args.signal_mode,
+                        demand=args.demand)
 
     print("\n[3/5] Plate pre-generation")
     step_plates(scn, out_dir)

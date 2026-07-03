@@ -69,6 +69,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ---- host detection (Kaggle vs local) ---------------------------------------
+# Kaggle notebooks set KAGGLE_KERNEL_RUN_TYPE and create a /kaggle tree. When
+# detected we force non-interactive mode (no TTY prompts) and default the venv
+# to a writable location. Explicit flags above still win.
+if [[ -n "${KAGGLE_KERNEL_RUN_TYPE:-}" ]] || [[ -d /kaggle ]]; then
+  IS_KAGGLE=1
+  YES="-y"
+else
+  IS_KAGGLE=0
+fi
+
 # ---- helpers ----------------------------------------------------------------
 _sudo() {
   if command -v sudo &>/dev/null; then sudo "$@"; else "$@"; fi
@@ -85,6 +96,7 @@ echo "============================================================"
 echo "INSTALL  blender=${BLENDER_VERSION}  venv=${VENV_DIR}"
 echo "  project  : $ROOT_DIR"
 echo "  env-file : $ENV_FILE"
+[[ "$IS_KAGGLE" -eq 1 ]] && echo "  host     : Kaggle (non-interactive)"
 echo "============================================================"
 
 # ---- 1. System packages (apt) -----------------------------------------------

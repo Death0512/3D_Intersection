@@ -628,9 +628,16 @@ def test_signal_next_red_frame():
 # Queue track tests
 # -----------------------------------------------------------------------------
 
-def test_compute_motion_queue_track_has_three_points():
-    """A queued vehicle (stop_frame < release_frame) produces 3-point
-    IN track with an idle segment."""
+def test_compute_motion_queue_track_has_decel_phase():
+    """A queued vehicle (stop_frame < release_frame) produces a multi-point
+    IN track with a deceleration phase followed by an idle segment.
+
+    The track has 3 or 4 points depending on whether the approach fits a
+    cruise-then-brake profile (4 points) or must span the whole approach as
+    a single decel ramp (3 points). In both cases the LAST two points share
+    the stop-line position (idle) and the vehicle is stationary between
+    stop_frame and release_frame.
+    """
     v = K.speed_kmh_to_ms(45)
     appear_anchor = (-5.25, -75.0)
     road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
@@ -640,11 +647,18 @@ def test_compute_motion_queue_track_has_three_points():
                       appear_anchor=appear_anchor,
                       road_meta=road_meta,
                       stop_frame=stop_f, release_frame=release_f)
-    assert len(m.track_in) == 3
-    assert m.track_in[0].frame < m.track_in[1].frame < m.track_in[2].frame
-    # Point 1 and 2 have same position (idle at stop line)
-    assert m.track_in[1].x == m.track_in[2].x
-    assert m.track_in[1].y == m.track_in[2].y
+    assert len(m.track_in) in (3, 4)
+    # frames strictly increase
+    for a, b in zip(m.track_in, m.track_in[1:]):
+        assert a.frame < b.frame, (a.frame, b.frame)
+    # last two points are the idle segment (stationary at stop line)
+    assert m.track_in[-1].x == m.track_in[-2].x
+    assert m.track_in[-1].y == m.track_in[-2].y
+    assert m.track_in[-1].frame == release_f
+    assert m.track_in[-2].frame == stop_f
+    # at least one BEZIER (decel) segment exists before the idle point
+    has_bez = any(pt.interp == "BEZIER" for pt in m.track_in[:-1])
+    assert has_bez, "no decel (BEZIER) segment in queued IN track"
     # disappear_frame = release_frame
     assert m.disappear_frame == release_f
     # reappear_frame = release_frame + dt_box
@@ -665,15 +679,15 @@ def test_compute_motion_queue_track_vs_freeflow():
                             stop_frame=stop_f, release_frame=release_f)
     m_free = K.plan_motion("V0", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
                            appear_anchor=appear_anchor,
-                           road_meta=road_meta)
+                            road_meta=road_meta)
     # Free-flow has 2-point track
     assert len(m_free.track_in) == 2
-    # Queued has 3-point track
-    assert len(m_queue.track_in) == 3
+    # Queued has a multi-point decel track
+    assert len(m_queue.track_in) >= 3
     # Free-flow disappear = depart + travel time
     # Queued disappear = release_frame
     assert m_free.disappear_frame < m_queue.disappear_frame
-    # Same positions
+    # Same endpoint positions
     assert m_queue.appear_pos == m_free.appear_pos
     assert m_queue.disappear_pos == m_free.disappear_pos
 
@@ -696,6 +710,92 @@ def test_queue_track_idle_segment_stationary():
         assert p is not None
         assert abs(p[0] - m.disappear_pos[0]) < 1e-3
         assert abs(p[1] - m.disappear_pos[1]) < 1e-3
+
+
+def test_queue_track_decel_monotonic_and_stops_at_line():
+    """The decel phase: position advances monotonically toward the stop
+    line (no backtracking), and the vehicle is at (or within epsilon of)
+    the stop position at stop_frame."""
+    v = K.speed_kmh_to_ms(40)   # 11.11 m/s — brake fits in the 40 m approach
+    appear_anchor = (-5.25, -75.0)
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    # stop_frame chosen so the approach (54.751 m) is comfortably longer
+    # than the brake distance d_brake = v^2/(2*DECEL) = ~24.7 m, giving
+    # a real cruise-then-brake 4-point track.
+    stop_f = 200
+    release_f = 260
+    m = K.plan_motion("V0", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                      appear_anchor=appear_anchor,
+                      road_meta=road_meta,
+                      stop_frame=stop_f, release_frame=release_f)
+    # forward axis is +Y for N approach → monotonic IN y must increase
+    prev_y = -1e18
+    for f in range(m.track_in[0].frame, stop_f + 1):
+        p = G.sample_track(m.track_in, f)
+        assert p is not None
+        # y increases (the vehicle drives toward the box at +Y)
+        assert p[1] >= prev_y - 1e-6, f"non-monotonic y at frame {f}: {p[1]} < {prev_y}"
+        prev_y = p[1]
+    # at stop_frame the vehicle is at the stop line
+    p_stop = G.sample_track(m.track_in, stop_f)
+    assert abs(p_stop[0] - m.disappear_pos[0]) < 1e-3
+    assert abs(p_stop[1] - m.disappear_pos[1]) < 1e-3
+
+
+def test_queue_track_full_ramp_when_brake_does_not_fit():
+    """When the brake time exceeds the available approach time (short
+    approach / high speed), the whole segment becomes a single BEZIER
+    ease-in decel ramp with no cruise phase (3-point track)."""
+    v = K.speed_kmh_to_ms(80)   # 22.2 m/s — t_brake = v/DECEL = ~8.9 s
+    appear_anchor = (-5.25, -75.0)
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    # only 5 frames to stop → t_brake_s (~8.9s) >> available → full ramp
+    stop_f = 5
+    release_f = 100
+    m = K.plan_motion("V0", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                      appear_anchor=appear_anchor,
+                      road_meta=road_meta,
+                      stop_frame=stop_f, release_frame=release_f)
+    # 3-point track: appear (BEZIER) → stop (LINEAR) → release (LINEAR)
+    assert len(m.track_in) == 3
+    assert m.track_in[0].interp == "BEZIER"
+    assert m.track_in[1].frame == stop_f
+    assert m.track_in[2].frame == release_f
+    # vehicle still stationary during idle
+    for f in range(stop_f, release_f + 1):
+        p = G.sample_track(m.track_in, f)
+        assert abs(p[0] - m.disappear_pos[0]) < 1e-3
+        assert abs(p[1] - m.disappear_pos[1]) < 1e-3
+
+
+def test_out_track_accel_from_stop_when_queued():
+    """A queued vehicle's OUT track launches from rest at the box edge
+    (BEZIER ease-out), so the green-light launch is visible on the
+    out-camera. Free-flow straight vehicles do NOT ease-out (they reappear
+    already at cruise)."""
+    v = K.speed_kmh_to_ms(45)
+    appear_anchor = (-5.25, -75.0)
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    # Queued: stop at red, release on green
+    m_q = K.plan_motion("Vq", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                        appear_anchor=appear_anchor,
+                        reappear_anchor=(15.0, -5.25),
+                        road_meta=road_meta,
+                        stop_frame=100, release_frame=200)
+    assert m_q.track_out[0].interp == "BEZIER"
+    assert m_q.track_out[0].cp1 is not None
+    # Free-flow straight: no ease-out (LINEAR)
+    m_f = K.plan_motion("Vf", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                        appear_anchor=appear_anchor,
+                        reappear_anchor=(15.0, -5.25),
+                        road_meta=road_meta)
+    assert m_f.track_out[0].interp == "LINEAR"
+    # Turning vehicle always eases out (curve-exit speed is low)
+    m_t = K.plan_motion("Vt", G.Direction.N, 1, G.Turn.RIGHT, v, 0,
+                        appear_anchor=(1.75, -75.0),
+                        reappear_anchor=(20.0, -5.25),
+                        road_meta=road_meta)
+    assert m_t.track_out[0].interp == "BEZIER"
 
 
 # -----------------------------------------------------------------------------

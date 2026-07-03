@@ -491,7 +491,13 @@ CYCLES_SAMPLES = 48
 
 
 def configure_gpu():
-    """Enable Cycles GPU rendering via OPTIX. Hard-fails if no OPTIX device.
+    """Enable Cycles GPU rendering: OPTIX if available, else CUDA.
+
+    Tries OPTIX first (uses RT cores where present), then gracefully degrades
+    to CUDA. This keeps the pipeline working on GPUs / containers that expose
+    no OptiX device — e.g. a Kaggle Tesla P100 (Pascal, no RT cores) or a T4
+    whose headless container only surfaces the CUDA backend. Only hard-fails
+    when NEITHER OPTIX nor CUDA devices exist.
 
     Must be called after the Cycles addon is available (it is, by default).
     """
@@ -501,30 +507,31 @@ def configure_gpu():
     except KeyError:
         raise SystemExit("FAIL: Cycles addon not found — cannot use GPU rendering.")
 
-    # Try OPTIX first (uses RT cores on the 3050 Ti), then CUDA as a fallback
-    # within the GPU family; but per the chosen policy we HARD-FAIL if no
-    # OPTIX device is available.
-    prefs.compute_device_type = "OPTIX"
-    try:
-        prefs.refresh_devices()
-    except Exception:
-        pass
+    prefs.refresh_devices()
 
     optix_devs = [d for d in prefs.devices if d.type == "OPTIX"]
-    if not optix_devs:
-        raise SystemExit(
-            "FAIL: no OPTIX GPU device found. An NVIDIA GPU with driver + "
-            "OptiX support is required (headless Cycles cannot use EEVEE's "
-            "GL path). Found devices: "
-            + ", ".join(f"{d.name}({d.type})" for d in prefs.devices))
+    if optix_devs:
+        backend = "OPTIX"
+    else:
+        cuda_devs = [d for d in prefs.devices if d.type == "CUDA"]
+        if not cuda_devs:
+            raise SystemExit(
+                "FAIL: no OPTIX or CUDA GPU device found. An NVIDIA GPU with "
+                "driver + CUDA (OptiX preferred) is required (headless Cycles "
+                "cannot use EEVEE's GL path). Found devices: "
+                + ", ".join(f"{d.name}({d.type})" for d in prefs.devices))
+        backend = "CUDA"
 
-    # Enable only OPTIX devices; disable CPU to avoid VRAM contention on 4 GB.
+    prefs.compute_device_type = backend
+    # Enable only the chosen backend's devices; disable CPU to avoid VRAM
+    # contention and keep the whole render on the GPU.
     for d in prefs.devices:
-        d.use = (d.type == "OPTIX")
+        d.use = (d.type == backend)
 
-    names = ", ".join(d.name for d in optix_devs if d.use)
-    print(f"[GPU] Cycles OPTIX enabled: {names}")
-    return optix_devs
+    gpu_devs = [d for d in prefs.devices if d.type == backend]
+    names = ", ".join(d.name for d in gpu_devs if d.use)
+    print(f"[GPU] Cycles {backend} enabled: {names}")
+    return gpu_devs
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +539,13 @@ def configure_gpu():
 # ---------------------------------------------------------------------------
 
 def setup_render(env_lights: dict = None):
-    """Configure Cycles + OPTIX GPU rendering at 1080p, 30 fps, PNG sequence.
+    """Configure Cycles GPU rendering at 1080p, 30 fps, PNG sequence.
+
+    The denoiser follows the compute backend selected by ``configure_gpu``:
+    OPTIX denoiser when running on OPTIX (uses RT cores), OpenImageDenoise
+    (OIDN, GPU-accelerated) when on CUDA. This avoids a render-time crash on
+    CUDA-only devices (e.g. Kaggle T4-as-CUDA or P100) where the OptiX
+    denoiser enum assigns cleanly but has no OptiX context to execute in.
 
     If ``env_lights`` (the env file's ``lights`` block) is given, the Sun
     light's rotation/energy are overridden from it.
@@ -543,9 +556,12 @@ def setup_render(env_lights: dict = None):
     scene.cycles.device = "GPU"
     scene.cycles.samples = CYCLES_SAMPLES
     scene.cycles.use_denoising = True
-    # OptiX denoiser (uses RT cores); guard in case the enum populates late.
+    # Denoiser follows the active compute backend so a CUDA-only device
+    # (Kaggle T4-as-CUDA / P100) doesn't crash at render time trying to use
+    # the OptiX denoiser without an OptiX context.
+    backend = bpy.context.preferences.addons["cycles"].preferences.compute_device_type
     try:
-        scene.cycles.denoiser = "OPTIX"
+        scene.cycles.denoiser = "OPTIX" if backend == "OPTIX" else "OPENIMAGEDENOISE"
     except Exception:
         try:
             scene.cycles.denoiser = "OPENIMAGEDENOISE"
