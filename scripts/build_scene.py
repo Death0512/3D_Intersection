@@ -255,16 +255,12 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
         meta["collection"], new_name=veh_coll_name)
 
     # The appended assets may carry absolute texture filepaths baked in on a
-    # different host (e.g. the dev machine). Remap this vehicle's OWN images
-    # (not the whole .blend) to the project-local textures dir so rendering
-    # works on any checkout (Kaggle, CI, another machine) without re-running
-    # asset_prep. Scoping to just this collection's images avoids an O(n^2)
-    # rescan-and-reload of every accumulated image on every vehicle append,
-    # which made many-vehicle scenes take minutes just to build.
+    # different host (e.g. the dev machine). Remap every image-block to the
+    # project-local textures dir so rendering works on any checkout (Kaggle,
+    # CI, another machine) without re-running asset_prep.
     tex_dir = os.path.join(HERE, "..", "models", cls, "textures")
     if os.path.isdir(tex_dir):
-        own_images = bu.images_used_by_collection(coll)
-        _remapped = bu.remap_textures_to_local(tex_dir, images=own_images)
+        _remapped = bu.remap_textures_to_local(tex_dir)
         if _remapped:
             print(f"  [tex] {veh['id']}: remapped {_remapped} textures to {tex_dir}")
 

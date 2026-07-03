@@ -99,41 +99,8 @@ def set_origin_to_ground_center(objs: List[bpy.types.Object]) -> None:
 # Texture remapping
 # ---------------------------------------------------------------------------
 
-def images_used_by_collection(coll) -> list:
-    """Return the distinct Image data-blocks referenced by TEX_IMAGE nodes in
-    any material assigned to any mesh object in ``coll``.
-
-    Used to scope ``remap_textures_to_local`` to just one appended vehicle's
-    own images instead of rescanning every image in the .blend (which is
-    O(n^2) when called once per vehicle in a many-vehicle scene).
-    """
-    seen = set()
-    images = []
-    for obj in coll.objects:
-        if obj.type != "MESH":
-            continue
-        for slot in obj.material_slots:
-            mat = slot.material
-            if not mat or not mat.use_nodes or not mat.node_tree:
-                continue
-            for node in mat.node_tree.nodes:
-                if node.type == "TEX_IMAGE" and node.image is not None:
-                    img = node.image
-                    if img.name not in seen:
-                        seen.add(img.name)
-                        images.append(img)
-    return images
-
-
-def remap_textures_to_local(tex_dir: str, missing_log: Optional[List[str]] = None,
-                            images=None) -> int:
-    """Remap image-block filepaths to files inside tex_dir.
-
-    By default scans every image in the .blend (``bpy.data.images``) — fine
-    for a one-time whole-file pass (e.g. asset_prep). Pass an explicit
-    ``images`` iterable (e.g. just one vehicle's own images) to remap only
-    those, which avoids O(n^2) rescans when called once per appended vehicle
-    in a scene with many vehicles.
+def remap_textures_to_local(tex_dir: str, missing_log: Optional[List[str]] = None) -> int:
+    """Remap every image-block's filepath to a file inside tex_dir.
 
     Matching is extension-insensitive on the base name. Returns the number of
     images successfully remapped. Unresolved paths are appended to missing_log.
@@ -151,7 +118,7 @@ def remap_textures_to_local(tex_dir: str, missing_log: Optional[List[str]] = Non
         local.setdefault(key, []).append(os.path.join(tex_dir, fn))
 
     remapped = 0
-    for img in (images if images is not None else bpy.data.images):
+    for img in bpy.data.images:
         if img.name == "Render Result":
             continue
         filepath = bpy.path.abspath(img.filepath)
