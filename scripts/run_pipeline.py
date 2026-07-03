@@ -168,22 +168,37 @@ def _detect_jobs(camera_count: int, explicit: int = 0):
         print("[GPU] nvidia-smi unavailable — defaulting to --jobs 1")
         return 1, [0]
 
-    # Multi-GPU: one worker per GPU, capped by camera count.
+    # Multi-GPU: pack multiple workers per GPU (VRAM-limited, no fixed cap),
+    # interleaved so capping by camera_count spreads load evenly across GPUs.
     if n_gpu >= 2:
-        # Safety: confirm each GPU has ≥ MIN_FREE_VRAM_MIB.
         info = _gpu_info()
-        usable = sum(1 for _, free in info if free >= MIN_FREE_VRAM_MIB)
-        n = min(usable, camera_count)
-        if n < 2:
-            print(f"[GPU] {len(info)} GPU(s) detected but only {n} meet "
-                  f"the {MIN_FREE_VRAM_MIB} MiB VRAM floor → serial render")
-        for i in range(n):
-            assignment.append(info[i][0] if i < len(info) else 0)
-        hdr = "×".join(
-            f"GPU{gid}({info[i][1] if i<len(info) else '?'} MiB)"
-            for i, gid in enumerate(assignment)
-        )
-        print(f"[GPU] {n_gpu} GPU(s) detected → {n} parallel "
+        # Per-GPU worker slots based on VRAM budget.
+        per_gpu_slots: list[tuple[int, int]] = []  # (gpu_id, n_slots)
+        for gid, free in info:
+            if free < MIN_FREE_VRAM_MIB:
+                continue
+            w = max(1, free // VRAM_PER_JOB_MIB)
+            per_gpu_slots.append((gid, int(w)))
+        if len(per_gpu_slots) < 2:
+            print(f"[GPU] {len(info)} GPU(s) detected but only "
+                  f"{len(per_gpu_slots)} meet the {MIN_FREE_VRAM_MIB} MiB "
+                  f"VRAM floor → serial render")
+            return 1, [0]
+        # Interleave slots across GPUs: [g0, g1, g0, g1, ...] so truncating
+        # to camera_count keeps both GPUs busy rather than stacking on GPU 0.
+        max_slots = max(s for _, s in per_gpu_slots)
+        interleaved: list[int] = []
+        for slot in range(max_slots):
+            for gid, n_slots in per_gpu_slots:
+                if slot < n_slots:
+                    interleaved.append(gid)
+        n = min(len(interleaved), camera_count)
+        assignment = interleaved[:n]
+        # Banner summarising per-GPU worker counts.
+        from collections import Counter
+        per_gpu = Counter(assignment)
+        hdr = " ".join(f"GPU{g}×{per_gpu.get(g, 0)}" for g, _ in per_gpu_slots)
+        print(f"[GPU] {n_gpu} GPU(s), VRAM-limited → {n} parallel "
               f"render worker{'' if n==1 else 's'} ({hdr})")
         return n, assignment
 
@@ -263,8 +278,11 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
     n_cams = len(camera_tags)
     n_gpus = len(gpu_assignment) if gpu_assignment else 0
 
+    # gpu_assignment is the exact per-worker GPU id list (length == jobs);
+    # pair each camera tag with its GPU id in order. If we have more cameras
+    # than assignments, fall back to GPU 0 for the overflow.
     tasks = [(scenario_path, out_dir, tag,
-              gpu_assignment[i % n_gpus] if n_gpus else 0)
+              gpu_assignment[i] if i < n_gpus else 0)
              for i, tag in enumerate(camera_tags)]
     results = {}
 
