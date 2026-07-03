@@ -176,19 +176,33 @@ fi
 
 PY_VERSION="$("$PYTHON3_BASE" --version 2>&1)"
 echo "  base python: $PY_VERSION"
-echo "  venv        : $VENV_DIR"
 
-if [[ -d "$VENV_DIR" ]] && [[ -x "$VENV_DIR/bin/python" ]]; then
-  echo "  venv already exists, updating Pillow ..."
+# On Kaggle the venv ensurepip step is stripped/broken, and the container is
+# ephemeral anyway, so skip the venv and use the system Python directly
+# (pip + Pillow are already available, or we install them with --user).
+if [[ "$IS_KAGGLE" -eq 1 ]]; then
+  echo "  host     : Kaggle — skipping venv (using system python)"
+  VENV_PYTHON="$PYTHON3_BASE"
+  VENV_DIR=""
+  # Ensure pip is usable; Kaggle ships it but make --user installs safe.
+  "$VENV_PYTHON" -m pip install -q --upgrade pip --user 2>/dev/null || true
+  if ! "$VENV_PYTHON" -c "import PIL" 2>/dev/null; then
+    "$VENV_PYTHON" -m pip install -q --user Pillow
+  fi
+  echo "  pip: Pillow $("$VENV_PYTHON" -c "import PIL; print(PIL.__version__)" 2>&1)"
 else
-  "$PYTHON3_BASE" -m venv "$VENV_DIR" --clear
+  echo "  venv        : $VENV_DIR"
+  if [[ -d "$VENV_DIR" ]] && [[ -x "$VENV_DIR/bin/python" ]]; then
+    echo "  venv already exists, updating Pillow ..."
+  else
+    "$PYTHON3_BASE" -m venv "$VENV_DIR" --clear
+  fi
+
+  "$VENV_DIR/bin/pip" install --upgrade -q pip setuptools wheel
+  "$VENV_DIR/bin/pip" install -q Pillow
+  echo "  pip: Pillow $("$VENV_DIR/bin/python" -c "import PIL; print(PIL.__version__)" 2>&1)"
+  VENV_PYTHON="$VENV_DIR/bin/python"
 fi
-
-"$VENV_DIR/bin/pip" install --upgrade -q pip setuptools wheel
-"$VENV_DIR/bin/pip" install -q Pillow
-echo "  pip: Pillow $("$VENV_DIR/bin/python" -c "import PIL; print(PIL.__version__)" 2>&1)"
-
-VENV_PYTHON="$VENV_DIR/bin/python"
 
 # ---- font check (for gen_plate) ---------------------------------------------
 FONT_FOUND=0
@@ -216,7 +230,7 @@ cat > "$ENV_FILE" <<EOF
 #
 # After sourcing:
 #   - blender  →  $BLENDER_INSTALLED_BIN  (Blender 5.1.x)
-#   - python3  →  $VENV_PYTHON  (venv with Pillow)
+#   - python3  →  $VENV_PYTHON  $([[ "$IS_KAGGLE" -eq 1 ]] && echo "(system, with Pillow)" || echo "(venv with Pillow)")
 #   - \$DOAN_PYTHON is set  →  $VENV_PYTHON
 
 export DOAN_PYTHON="$VENV_PYTHON"
