@@ -108,13 +108,7 @@ def step_plates(scenario_path, out_dir):
 
 def _gpu_count():
     """Return the number of NVIDIA GPUs, or 0 if nvidia-smi is unavailable."""
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=count", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10)
-        return int(out.stdout.strip())
-    except Exception:
-        return 0
+    return len(_gpu_info())
 
 
 def _gpu_info():
