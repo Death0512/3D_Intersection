@@ -214,11 +214,20 @@ def main():
     ap.add_argument("--scenario", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--only", help="render only this camera tag (e.g. in_N)")
+    ap.add_argument("--no-metadata", action="store_true",
+                    help="skip metadata compute (used in parallel render workers)")
+    ap.add_argument("--metadata-only", action="store_true",
+                    help="write metadata.json from scenario + existing videos (no render)")
     ns = ap.parse_args(post)
 
     with open(ns.scenario) as f:
         scenario = json.load(f)
     os.makedirs(ns.out, exist_ok=True)
+
+    # --metadata-only mode: pure-python metadata pass (no bpy/render).
+    if ns.metadata_only:
+        _write_metadata(scenario, ns.out)
+        return
 
     # pre-generate plates (in conda python normally; here we try via bpy fallback)
     plates_dir = os.path.join(ns.out, "plates")
@@ -236,14 +245,22 @@ def main():
         except Exception as e:
             print(f"  FAILED {tag}: {e}")
 
-    # metadata
+    if not ns.no_metadata:
+        _write_metadata(scenario, ns.out)
+    print(f"Rendered {len(rendered)}/{len(cameras)} videos")
+
+
+def _write_metadata(scenario, out_dir):
+    """Write metadata.json — scans out_dir for existing video_*.mp4 files."""
+    import glob
+    videos = sorted(os.path.relpath(p, out_dir)
+                    for p in glob.glob(os.path.join(out_dir, "video_*.mp4")))
     meta = compute_metadata(scenario, ROOT)
-    meta["videos"] = rendered
-    meta_path = os.path.join(ns.out, "metadata.json")
+    meta["videos"] = videos
+    meta_path = os.path.join(out_dir, "metadata.json")
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     print(f"Wrote metadata: {meta_path}")
-    print(f"Rendered {len(rendered)}/{len(cameras)} videos")
 
 
 if __name__ == "__main__":

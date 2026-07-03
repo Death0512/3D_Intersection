@@ -16,6 +16,8 @@
 #   --env-file FILE     Path to write the activation env file (default: scripts/env.sh).
 #   --no-blender        Skip blender setup entirely (assume already on PATH, must be 5.x).
 #   --no-ffmpeg         Skip ffmpeg apt install (assume already present).
+#   --gpu-tune          (sudo) Enable GPU persistence mode + raise power limit to max.
+#                       Requires NVIDIA driver + sudo. Opt-in; does NOT run by default.
 #   -h, --help          Show this help.
 
 set -euo pipefail
@@ -33,6 +35,7 @@ VENV_DIR=""
 ENV_FILE=""
 NO_BLENDER=0
 NO_FFMPEG=0
+GPU_TUNE=0
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPTS_DIR/.." && pwd)"
@@ -60,6 +63,7 @@ while [[ $# -gt 0 ]]; do
     --env-file)    ENV_FILE="$2";               shift 2 ;;
     --no-blender)  NO_BLENDER=1;                shift   ;;
     --no-ffmpeg)   NO_FFMPEG=1;                 shift   ;;
+    --gpu-tune)    GPU_TUNE=1;                  shift   ;;
     -h|--help)     usage ;;
     *) echo "Unknown option: $1" >&2; usage ;;
   esac
@@ -231,6 +235,45 @@ echo ""
 echo "Or run the full pipeline:"
 echo "  bash scripts/run_all.sh --num-vehicles 2 --seconds 5 --out output/test"
 echo ""
+
+# ---- GPU tuning (opt-in, --gpu-tune flag required) --------------------------
+if [[ "$GPU_TUNE" -eq 1 ]]; then
+  echo ""
+  echo "--- GPU tuning ---"
+  if ! command -v nvidia-smi &>/dev/null; then
+    echo "  SKIP: nvidia-smi not found — no NVIDIA GPU detected."
+  else
+    echo "  NVIDIA GPU detected.  Optional performance tuning:"
+    echo ""
+    echo "  (1) Persistence mode — keeps GPU driver loaded across process starts,"
+    echo "      reducing clock-ramp latency between parallel render workers."
+    echo "  (2) Power limit → max — allows the GPU to draw its full rated power"
+    echo "      (default is usually 80 W; max on this card is 95 W)."
+    echo ""
+    echo "  Both are session/boot-scoped and not permanently saved."
+    echo ""
+    # Persistence mode
+    if _sudo nvidia-smi -pm 1 2>/dev/null; then
+      echo "  persistence mode: ON"
+    else
+      echo "  persistence mode: SKIP (sudo may have failed)"
+    fi
+    # Max power limit
+    MAX_PL=$(nvidia-smi -q -d POWER 2>/dev/null | awk '/Max Power Limit/{gsub(/[^0-9.]/,"",$0); if(int($0+0)>0) print int($0+0)}' | tail -1)
+    if [[ -n "$MAX_PL" ]] && [[ "$MAX_PL" -gt 0 ]]; then
+      if _sudo nvidia-smi -pl "$MAX_PL" 2>/dev/null; then
+        echo "  power limit   : raised to ${MAX_PL} W"
+      else
+        echo "  power limit   : SKIP (sudo may have failed, or card rejected -pl)"
+      fi
+    else
+      echo "  power limit   : SKIP (could not query max)"
+    fi
+    echo ""
+    echo "  GPU tuning complete.  Run the pipeline with:"
+    echo "    bash scripts/run_all.sh --num-vehicles 80 --seconds 60"
+  fi
+fi
 
 # ---- smoke tests (quick, with timeouts) ------------------------------------
 echo ""

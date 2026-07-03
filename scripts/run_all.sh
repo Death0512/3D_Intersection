@@ -18,6 +18,7 @@
 #   --out DIR           Output directory (default: output/run_car)
 #   --only CAM          Render only this camera e.g. in_N (debug)
 #   --skip-asset-check  Skip blender asset validation step
+#   --jobs N            Parallel render workers (default: auto-detect from free VRAM)
 #   --blender PATH      Path to blender binary (default: auto-detect)
 #   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
 #   -h, --help          Show this help
@@ -30,12 +31,13 @@ set -euo pipefail
 SEED=42
 NUM_VEHICLES=120
 FPS=30
-SECONDS_VAL=12
+SECONDS_VAL=5
 OUT_DIR="output/run_car"
 ONLY=""
 SKIP_ASSET_CHECK=0
 BLENDER_BIN=""
 PYTHON_BIN=""
+JOBS=0   # 0 = auto-detect from free VRAM
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -56,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         --skip-asset-check) SKIP_ASSET_CHECK=1; shift ;;
         --blender)        BLENDER_BIN="$2";   shift 2 ;;
         --python)         PYTHON_BIN="$2";    shift 2 ;;
+        --jobs)           JOBS="$2";          shift 2 ;;
         -h|--help)        usage ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -119,6 +122,7 @@ PIPELINE_ARGS=(
 )
 [[ -n "$ONLY" ]]             && PIPELINE_ARGS+=(--only "$ONLY")
 [[ "$SKIP_ASSET_CHECK" -eq 1 ]] && PIPELINE_ARGS+=(--skip-asset-check)
+[[ "$JOBS" -gt 0 ]]         && PIPELINE_ARGS+=(--jobs "$JOBS")
 
 # Pass blender/python overrides to the pipeline via env so subprocesses pick
 # them up without needing extra flags on run_pipeline.py.
