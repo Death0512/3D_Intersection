@@ -148,6 +148,20 @@ def compute_metadata(scenario: dict, root: str) -> dict:
         "box_size": G.BOX_SIZE,
         "num_vehicles": len(vehicles_meta),
         "vehicles": vehicles_meta,
+        # Resolved camera spec per tag — the EXACT values build_scene.place_camera
+        # applies (env override of geometry default, via envfile.resolve_camera).
+        # Lets any consumer project world poses (above) into 2D pixels without
+        # needing Blender: pinhole with lens_mm/sensor_mm/sensor_fit="HORIZONTAL",
+        # extrinsic derived from location + look_at (rotation_euler null) or the
+        # explicit rotation_euler.  Resolution matches setup_render's RES_X/RES_Y.
+        "cameras": {
+            tag: {
+                **ENV.resolve_camera(envs[tag], road_meta),
+                "sensor_fit": "HORIZONTAL",
+                "resolution": [G.RES_X, G.RES_Y],
+            }
+            for tag in G.camera_names()
+        },
     }
     # Emit the signal timeline + mode when the scenario carried signal info,
     # so per-frame "why did this car stop" ground truth is available for
@@ -160,6 +174,75 @@ def compute_metadata(scenario: dict, root: str) -> dict:
             "clearances": scenario.get("signal_clearances", []),
         }
     return meta
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg encoding — GPU (NVENC) with CPU (libx264) fallback
+# ---------------------------------------------------------------------------
+_NVENC_AVAILABLE = None  # cached probe result (None = not yet probed)
+
+
+def _nvenc_available() -> bool:
+    """Probe once per process whether ffmpeg can actually use h264_nvenc.
+
+    Checks both that the encoder is compiled in AND that it can init on this
+    GPU (e.g. missing NVENC driver bits would fail at encode time, not at
+    -encoders listing time).
+    """
+    global _NVENC_AVAILABLE
+    if _NVENC_AVAILABLE is not None:
+        return _NVENC_AVAILABLE
+    import subprocess
+    try:
+        probe = subprocess.run(
+            # NVENC requires at least ~145x49 (varies by GPU); use 256x256 to
+            # stay safely above the minimum on all supported hardware.
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+             "-c:v", "h264_nvenc", "-frames:v", "1", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=15,
+        )
+        _NVENC_AVAILABLE = probe.returncode == 0
+    except Exception:
+        _NVENC_AVAILABLE = False
+    return _NVENC_AVAILABLE
+
+
+def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float) -> bool:
+    """Encode the PNG frame sequence to mp4. Prefers GPU NVENC (frees the CPU
+    for other parallel render workers); falls back to CPU libx264 if NVENC
+    is unavailable or fails at runtime. Inherits CUDA_VISIBLE_DEVICES from
+    the parent process environment (set per-worker by run_pipeline.py), so
+    NVENC binds to the same GPU this Blender instance rendered on.
+    """
+    import subprocess
+    import os as _os
+
+    base = [
+        "ffmpeg", "-y", "-framerate", str(fps),
+        # frames start at f_0000.png (scene.frame_start = 0); ffmpeg's %04d
+        # glob defaults to -start_number 1, which would drop frame 0.
+        "-start_number", "0",
+        "-i", _os.path.join(frames_dir, "f_%04d.png"),
+    ]
+
+    if _nvenc_available():
+        cmd = base + [
+            "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p",
+            "-cq", "20", video_path,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode == 0:
+            return True
+        print(f"  [ffmpeg] NVENC encode failed, falling back to CPU: "
+              f"{proc.stderr[-200:]}")
+
+    cmd = base + [
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-crf", "20", video_path,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode == 0
 
 
 # ---------------------------------------------------------------------------
@@ -201,23 +284,16 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
 
     bpy.ops.render.render(animation=True)
 
-    # encode to mp4
+    # encode to mp4 (GPU NVENC when available, else CPU libx264 fallback —
+    # keeps encoding off the CPU so it doesn't bottleneck/contend with
+    # parallel Blender-GPU render workers).
     video_path = os.path.join(out_dir, f"video_{camera_tag}.mp4")
     fps = scenario["fps"]
-    cmd = [
-        "ffmpeg", "-y", "-framerate", str(fps),
-        # frames start at f_0000.png (scene.frame_start = 0); ffmpeg's %04d
-        # glob defaults to -start_number 1, which would drop frame 0.
-        "-start_number", "0",
-        "-i", os.path.join(frames_dir, "f_%04d.png"),
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-crf", "20", video_path,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        print(f"  ffmpeg FAILED for {camera_tag}: {proc.stderr[-300:]}")
-    else:
+    ok = _ffmpeg_encode(frames_dir, video_path, fps)
+    if ok:
         print(f"  rendered: {video_path}")
+    else:
+        print(f"  ffmpeg FAILED for {camera_tag}")
     # optionally clean up frames dir to save space
     try:
         shutil.rmtree(frames_dir)

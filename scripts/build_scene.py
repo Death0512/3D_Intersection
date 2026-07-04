@@ -448,7 +448,7 @@ def _set_step_interpolation(obj, data_path):
 # ---------------------------------------------------------------------------
 
 def place_camera(approach: G.Direction, is_in: bool, road_meta: dict,
-                 env_camera: dict = None):
+                 env_camera: dict = None, env: dict = None):
     """Place a telephoto CCTV camera that films the REAR license plate.
 
     The camera sits at the NEAR end of the road arm (the end closest to the
@@ -456,32 +456,38 @@ def place_camera(approach: G.Direction, is_in: bool, road_meta: dict,
     elevated CAM_HEIGHT metres, looking down the road in the direction cars
     drive away.  Cars always drive away from the camera → rear plate is filmed.
 
-    The default camera/look-at positions come from G.camera_pose (single source
-    of truth shared with the per-frame pose ground truth in render.compute_metadata).
-    If ``env_camera`` (the env file's ``camera`` block) is given, its ``location``
-    and ``look_at`` OVERRIDE the computed values (override layer). When
+    The resolved camera spec comes from ``ENV.resolve_camera`` (single source
+    of truth shared with the per-frame pose ground truth in render.compute_metadata):
+    env ``camera`` overrides the geometry default if present.  When
     ``rotation_euler`` is non-null in the env it is applied directly; otherwise
-    the rotation is derived from look_at via the track-quat (same as default).
+    the rotation is derived from look_at via the track-quat (same as before).
+
+    Accepts either the legacy ``env_camera`` (the env ``camera`` block alone,
+    kept for backward compat with direct callers) or the full ``env`` dict
+    (preferred — lets us reuse the resolver verbatim).
     """
-    cam_loc, look_ground = G.camera_pose(approach, is_in, road_meta,
-                                         cam_height=CAM_HEIGHT,
-                                         cam_back_dist=CAM_BACK_DIST)
-    if env_camera is not None:
-        if env_camera.get("location") is not None:
-            cam_loc = tuple(env_camera["location"])
-        if env_camera.get("look_at") is not None:
-            look_ground = tuple(env_camera["look_at"])
+    # Build the resolved spec via the shared resolver. We accept a minimal env
+    # constructed from env_camera for legacy callers, or a full env dict.
+    if env is None:
+        tag = f"{'in' if is_in else 'out'}_{approach.value}"
+        env = {"camera_tag": tag, "camera": env_camera or {}}
+    resolved = ENV.resolve_camera(env, road_meta)
+    cam_loc = tuple(resolved["location"])
+    look_ground = tuple(resolved["look_at"])
+    lens_mm = resolved["lens_mm"]
+    sensor_mm = resolved["sensor_mm"]
+    rot_override = resolved["rotation_euler"]
+
     label = "in" if is_in else "out"
     cam_data = bpy.data.cameras.new(f"CamData_{approach.value}_{label}")
-    cam_data.lens = (env_camera or {}).get("lens_mm", LENS_MM)
+    cam_data.lens = lens_mm
     # Sensor fit must match the metadata convention (SENSOR_MM width, horizontal fit)
     cam_data.sensor_fit = "HORIZONTAL"
-    cam_data.sensor_width = (env_camera or {}).get("sensor_mm", G.SENSOR_MM)
+    cam_data.sensor_width = sensor_mm
     cam_obj = bpy.data.objects.new(f"Camera_{approach.value}_{label}", cam_data)
     bpy.context.scene.collection.objects.link(cam_obj)
     cam_obj.location = cam_loc
 
-    rot_override = (env_camera or {}).get("rotation_euler")
     if rot_override is not None:
         cam_obj.rotation_euler = tuple(rot_override)
     else:
@@ -662,12 +668,14 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
         motions.append((veh, motion))
 
     # 3. Camera + render setup (GPU: Cycles + OPTIX)
-    place_camera(approach, is_in, road_meta, env_camera=env.get("camera"))
-    # Warn if the env camera diverges from the geometry-derived one — metadata
-    # is always geometry-derived, so a drift means render != metadata.
+    place_camera(approach, is_in, road_meta, env=env)
+    # Note when the env camera overrides the geometry default — this is the
+    # intended override layer for framing, NOT an inconsistency: metadata.json
+    # records the SAME resolved camera (envfile.resolve_camera), so render and
+    # metadata agree by construction. The note is informational only.
     drift = ENV.camera_drift(env, scenario, camera_tag, road_meta)
     if drift:
-        print(f"  [env] WARNING camera drift: {drift} — render will not match metadata.json")
+        print(f"  [env] camera override active for {camera_tag} ({drift})")
     configure_gpu()
     setup_render(env_lights=env.get("lights"))
     bpy.context.scene.frame_start = 0

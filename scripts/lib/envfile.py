@@ -250,6 +250,51 @@ def lane_default_anchor(env: dict, lane: int) -> Tuple[Tuple[float, float, float
 
 
 # ---------------------------------------------------------------------------
+# Camera resolution — the single source of truth for the camera pose used by
+# both build_scene.place_camera (Blender) and render.compute_metadata (pure
+# python).  Applies the env-override-else-geometry precedence in one place so
+# the Blender pixels and the metadata ground-truth agree exactly.
+# ---------------------------------------------------------------------------
+
+def resolve_camera(env: dict, road_meta: dict) -> dict:
+    """Return the resolved camera spec for the env's tag.
+
+    Mirrors ``build_scene.place_camera`` precedence exactly:
+      * ``location`` / ``look_at`` — env ``camera`` block if non-null, else
+        ``geometry.camera_pose`` (the geometry default for this tag).
+      * ``lens_mm`` / ``sensor_mm`` — env value if present, else
+        ``G.LENS_MM`` / ``G.SENSOR_MM``.
+      * ``rotation_euler`` — passthrough of the env value (may be ``None``,
+        meaning "derive from look_at via the track-quat in Blender").  Pure-
+        python consumers (metadata) record it as-is; the Blender side derives
+        the actual object rotation from look_at when it is null.
+
+    The returned dict is the complete, self-contained camera descriptor that
+    ``compute_metadata`` writes verbatim into ``metadata.json["cameras"][tag]``
+    and that ``place_camera`` applies to the Blender camera object — so the
+    render and the metadata share one resolved value per tag.
+    """
+    approach, is_in = parse_tag(env["camera_tag"])
+    cam_loc, look_at = G.camera_pose(approach, is_in, road_meta)
+    ec = env.get("camera") or {}
+    location = ec.get("location")
+    if location is None:
+        location = [round(cam_loc[0], 6), round(cam_loc[1], 6),
+                    round(cam_loc[2], 6)]
+    look = ec.get("look_at")
+    if look is None:
+        look = [round(look_at[0], 6), round(look_at[1], 6),
+                round(look_at[2], 6)]
+    return {
+        "location": list(location),
+        "look_at": list(look),
+        "rotation_euler": ec.get("rotation_euler"),  # None => derive in Blender
+        "lens_mm": ec.get("lens_mm", G.LENS_MM),
+        "sensor_mm": ec.get("sensor_mm", G.SENSOR_MM),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Drift check (non-fatal warning: env camera vs geometry-derived camera)
 # ---------------------------------------------------------------------------
 

@@ -103,6 +103,70 @@ def test_schema_version_is_two():
 
 
 # ---------------------------------------------------------------------------
+# resolve_camera (single source of truth for Blender + metadata)
+# ---------------------------------------------------------------------------
+
+def test_resolve_camera_matches_geometry_when_unedited():
+    # A freshly compute_env'd file (no hand-edit) resolves to geometry defaults.
+    for d in G.Direction:
+        for is_in in (True, False):
+            tag = ("in" if is_in else "out") + f"_{d.value}"
+            env = ENV.compute_env(tag, ROAD_META)
+            resolved = ENV.resolve_camera(env, ROAD_META)
+            cam_loc, look = G.camera_pose(d, is_in, ROAD_META)
+            for i in range(3):
+                assert abs(resolved["location"][i] - cam_loc[i]) < 1e-6, f"{tag} loc {i}"
+                assert abs(resolved["look_at"][i] - look[i]) < 1e-6, f"{tag} look {i}"
+            assert resolved["lens_mm"] == G.LENS_MM
+            assert resolved["sensor_mm"] == G.SENSOR_MM
+            # rotation_euler is None in an unedited file => "derive from look_at"
+            assert resolved["rotation_euler"] is None
+
+
+def test_resolve_camera_honors_override():
+    # A hand-edited env camera overrides geometry for location/look_at/lens.
+    env = ENV.compute_env("in_N", ROAD_META)
+    env["camera"]["location"] = [1.0, 2.0, 3.0]
+    env["camera"]["look_at"] = [4.0, 5.0, 6.0]
+    env["camera"]["lens_mm"] = 35.0
+    env["camera"]["sensor_mm"] = 24.0
+    env["camera"]["rotation_euler"] = [0.1, 0.2, 0.3]
+    resolved = ENV.resolve_camera(env, ROAD_META)
+    assert resolved["location"] == [1.0, 2.0, 3.0]
+    assert resolved["look_at"] == [4.0, 5.0, 6.0]
+    assert resolved["lens_mm"] == 35.0
+    assert resolved["sensor_mm"] == 24.0
+    assert resolved["rotation_euler"] == [0.1, 0.2, 0.3]
+
+
+def test_resolve_camera_partial_override_falls_back_to_geometry():
+    # If only location is overridden, look_at + lens fall back to defaults.
+    env = ENV.compute_env("in_N", ROAD_META)
+    env["camera"]["location"] = [10.0, 20.0, 30.0]
+    # look_at, lens_mm, sensor_mm left at compute_env defaults (== geometry)
+    resolved = ENV.resolve_camera(env, ROAD_META)
+    assert resolved["location"] == [10.0, 20.0, 30.0]
+    cam_loc, look = G.camera_pose(G.Direction.N, True, ROAD_META)
+    for i in range(3):
+        assert abs(resolved["look_at"][i] - look[i]) < 1e-6
+    assert resolved["lens_mm"] == G.LENS_MM
+
+
+def test_resolve_camera_real_envs_have_valid_spec():
+    # The 8 committed env files must each yield a usable resolved camera.
+    for d in G.Direction:
+        for is_in in (True, False):
+            tag = ("in" if is_in else "out") + f"_{d.value}"
+            env = ENV.load_env(tag, ROOT)
+            resolved = ENV.resolve_camera(env, {"crosswalk_y": 27.846,
+                                                "approach_length": 54.751})
+            assert len(resolved["location"]) == 3
+            assert len(resolved["look_at"]) == 3
+            assert resolved["lens_mm"] > 0
+            assert resolved["sensor_mm"] > 0
+
+
+# ---------------------------------------------------------------------------
 # require_env_fields
 # ---------------------------------------------------------------------------
 
@@ -252,6 +316,58 @@ def test_real_env_files_valid_and_structure_correct():
                 ld = real["vehicles"]["lane_defaults"][str(lane)]
                 assert "location" in ld and len(ld["location"]) == 3
                 assert "rotation_euler" in ld and len(ld["rotation_euler"]) == 3
+
+
+def test_metadata_emits_camera_block_for_all_8():
+    """compute_metadata must emit a `cameras` entry per tag whose values equal
+    envfile.resolve_camera (the same spec build_scene.place_camera applies),
+    so metadata is projection-complete and render==metadata for the camera too.
+    """
+    import render
+    v = K.speed_kmh_to_ms(45)
+    scn = {"seed": 1, "fps": 30, "duration_frames": 400, "box_size": G.BOX_SIZE,
+           "vehicles": [{"id": "V0", "class": "car", "color": [0.1, 0.2, 0.8, 1.0],
+                         "color_name": "blue", "plate": "59X-1234", "approach": "N",
+                         "lane": 3, "turn": "right", "speed_ms": v, "speed_kmh": 45,
+                         "length": 4.47, "depart_frame": 5}]}
+    meta = render.compute_metadata(scn, ROOT)
+    assert "cameras" in meta
+    cams = meta["cameras"]
+    assert len(cams) == 8
+    for d in G.Direction:
+        for is_in in (True, False):
+            tag = ("in" if is_in else "out") + f"_{d.value}"
+            assert tag in cams, f"missing {tag}"
+            entry = cams[tag]
+            env = ENV.load_env(tag, ROOT)
+            resolved = ENV.resolve_camera(env, {"crosswalk_y": 27.846,
+                                                "approach_length": 54.751})
+            for k in ("location", "look_at", "rotation_euler", "lens_mm", "sensor_mm"):
+                assert entry[k] == resolved[k], f"{tag}.{k} mismatch"
+            assert entry["sensor_fit"] == "HORIZONTAL"
+            assert entry["resolution"] == [G.RES_X, G.RES_Y]
+
+
+def test_metadata_camera_block_reflects_override():
+    """The metadata camera block must reflect the env override (not geometry)
+    when the env file has been hand-edited — proving the override layer is
+    respected by metadata, matching what place_camera renders."""
+    import render
+    # in_N.json committed file has location (0,-90,10) vs geometry (0,-69.751,7).
+    v = K.speed_kmh_to_ms(45)
+    scn = {"seed": 1, "fps": 30, "duration_frames": 400, "box_size": G.BOX_SIZE,
+           "vehicles": [{"id": "V0", "class": "car", "color": [0.1, 0.2, 0.8, 1.0],
+                         "color_name": "blue", "plate": "59X-1234", "approach": "N",
+                         "lane": 3, "turn": "right", "speed_ms": v, "speed_kmh": 45,
+                         "length": 4.47, "depart_frame": 5}]}
+    meta = render.compute_metadata(scn, ROOT)
+    in_n = meta["cameras"]["in_N"]
+    # Must be the overridden env value, not the geometry default.
+    assert in_n["location"][1] == -90.0
+    assert in_n["location"][2] == 10.0
+    # And not the geometry default (which is y=-69.751, z=7)
+    assert in_n["location"][1] != -69.751
+    assert in_n["location"][2] != 7.0
 
 
 def _run_all():
