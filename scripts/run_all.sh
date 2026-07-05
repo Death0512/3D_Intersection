@@ -30,7 +30,14 @@
 #   --jobs N            Parallel render workers (default: auto-detect from free VRAM)
 #   --blender PATH      Path to blender binary (default: auto-detect)
 #   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
+#   --samples N         Cycles render samples per frame (default: 48; 16-24
+#                       for quick test runs, 48 for production)
+#   --silence-timeout S Render watchdog silence threshold in seconds (default 600)
 #   -h, --help          Show this help
+#
+# Logging: all output (stdout+stderr) is tee'd to <out>/run_<timestamp>.log
+# and a stable <out>/latest.log symlink. The log captures the command, host,
+# timestamps, and the pipeline's exit code for post-mortem.
 
 set -euo pipefail
 
@@ -197,11 +204,58 @@ export DOAN_PYTHON="$PYTHON_BIN"
 BLENDER_DIR="$(dirname "$BLENDER_BIN")"
 export PATH="$BLENDER_DIR:$PATH"
 
+# ---------------------------------------------------------------------------
+# Logging: tee all output (stdout+stderr) to a timestamped log file inside the
+# output dir, plus a stable `latest.log` symlink. Keeps the terminal live while
+# producing a persistent record for post-mortem (watchdog aborts, per-frame
+# progress, ffmpeg stderr, [WARN] lines). The log captures the exact command,
+# start/end timestamps, and the pipeline's exit code.
+# ---------------------------------------------------------------------------
+LOG_TS="$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="$OUT_DIR/run_${LOG_TS}.log"
+LATEST_LINK="$OUT_DIR/latest.log"
+# Header written only to the log (the terminal already has the summary box).
+{
+    echo "run_all.sh log — started $(date -Iseconds)"
+    echo "host: $(hostname)  user: ${USER:-?}  kaggle: $IS_KAGGLE"
+    echo "python : $PYTHON_BIN"
+    echo "blender: $BLENDER_BIN"
+    echo "args   : $*"
+    echo "out    : $OUT_DIR"
+    echo "============================================================"
+} > "$LOG_FILE"
+
 echo ""
 echo "$ $PYTHON_BIN $SCRIPT_DIR/run_pipeline.py ${PIPELINE_ARGS[*]}"
-"$PYTHON_BIN" "$SCRIPT_DIR/run_pipeline.py" "${PIPELINE_ARGS[@]}"
+# 2>&1 merges stderr into the stream so [WARN]/tracebacks land in the log too.
+# `tee -a` appends (the header above already opened the file); the pipeline's
+# own stdout/stderr pass through to the terminal unchanged.
+# PIPESTATUS[0] captures the pipeline's real exit code (tee at PIPESTATUS[1]
+# would otherwise mask a non-zero rc as 0). pipefail (set at line 35) also
+# propagates the failing rc out of the pipe, but we record PIPESTATUS in the
+# log regardless so the exact pipeline rc (not tee's) is preserved.
+set +e
+"$PYTHON_BIN" "$SCRIPT_DIR/run_pipeline.py" "${PIPELINE_ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+PIPELINE_RC=${PIPESTATUS[0]}
+set -e
+{
+    echo "============================================================"
+    echo "run_all.sh log — ended $(date -Iseconds) (pipeline exit $PIPELINE_RC)"
+} >> "$LOG_FILE"
+# Refresh the latest.log symlink to point at this run's log (atomic replace).
+ln -sfn "$(basename "$LOG_FILE")" "$LATEST_LINK"
+echo ""
+echo "log: $LOG_FILE  (latest: $LATEST_LINK)"
 
 echo ""
 echo "============================================================"
-echo "DONE.  Output: $OUT_DIR"
-echo "============================================================"
+if [[ "$PIPELINE_RC" -eq 0 ]]; then
+    echo "DONE.  Output: $OUT_DIR"
+    echo "  log: $LOG_FILE"
+    echo "============================================================"
+else
+    echo "FAILED (exit $PIPELINE_RC).  Output: $OUT_DIR"
+    echo "  log: $LOG_FILE  (see latest: $LATEST_LINK)"
+    echo "============================================================"
+    exit "$PIPELINE_RC"
+fi
