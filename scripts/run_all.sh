@@ -13,8 +13,11 @@
 #   --seed N            RNG seed (default: 42)
 #   --num-vehicles N    Number of vehicles (default: 120)
 #   --fps N             Frames per second (default: 30)
-#   --seconds F         Minimum video length in seconds (default: 12).
-#                       The actual duration auto-extends to fit all vehicles.
+#   --seconds F         MINIMUM video length in seconds (default: 12).
+#                       The actual video auto-extends to fit all vehicles
+#                       (it can be LONGER than this, never shorter). At default
+#                       demand (~400 veh/h/approach), ~25 vehicles fit in 12s;
+#                       100+ vehicles will spread across minutes.
 #   --out DIR           Output directory (default: output/run_car)
 #   --only CAM          Render only this camera e.g. in_N (debug)
 #   --skip-asset-check  Skip blender asset validation step
@@ -27,12 +30,20 @@
 #                        flow veh/h + turning split), or 'none' for the legacy
 #                        uniform-random scheduler. Default: built-in demand
 #                        model (~400 veh/h/approach, straight-heavy split).
-#   --jobs N            Parallel render workers (default: auto-detect from free VRAM)
+#   --jobs N            Parallel render workers (default: auto-detect from free
+#                       VRAM, capped by --max-workers-per-gpu)
+#   --max-workers-per-gpu N
+#                       Cap on Blender workers per GPU (default: 2). The VRAM
+#                       budget alone over-packs big cards (a 15 GB T4 lets ~9
+#                       jobs fit by VRAM, but 4+ heavy Cycles+OptiX contexts
+#                       stall the render — silent hang). Raise for light scenes
+#                       only (few vehicles / no signal).
+#   --silence-timeout S Render watchdog: kill the pool if a worker is silent
+#                       for S seconds (default: 600)
+#   --samples N         Cycles render samples (default: 48). Lower = faster,
+#                       noisier (denoiser compensates). Try 16-24 for tests.
 #   --blender PATH      Path to blender binary (default: auto-detect)
 #   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
-#   --samples N         Cycles render samples per frame (default: 48; 16-24
-#                       for quick test runs, 48 for production)
-#   --silence-timeout S Render watchdog silence threshold in seconds (default 600)
 #   -h, --help          Show this help
 #
 # Logging: all output (stdout+stderr) is tee'd to <out>/run_<timestamp>.log
@@ -57,6 +68,7 @@ DEMAND=""
 BLENDER_BIN=""
 PYTHON_BIN=""
 JOBS=0   # 0 = auto-detect from free VRAM
+MAX_WORKERS_PER_GPU=2   # cap on Blender workers per GPU (prevents VRAM oversubscription hang)
 SILENCE_TIMEOUT=0   # 0 = use run_pipeline.py default (600s)
 SAMPLES=0           # 0 = use build_scene default (48)
 
@@ -83,6 +95,7 @@ while [[ $# -gt 0 ]]; do
         --blender)        BLENDER_BIN="$2";   shift 2 ;;
         --python)         PYTHON_BIN="$2";    shift 2 ;;
         --jobs)           JOBS="$2";          shift 2 ;;
+        --max-workers-per-gpu) MAX_WORKERS_PER_GPU="$2"; shift 2 ;;
         --silence-timeout) SILENCE_TIMEOUT="$2"; shift 2 ;;
         --samples)        SAMPLES="$2";       shift 2 ;;
         -h|--help)        usage ;;
@@ -185,6 +198,7 @@ PIPELINE_ARGS=(
 [[ -n "$ONLY" ]]             && PIPELINE_ARGS+=(--only "$ONLY")
 [[ "$SKIP_ASSET_CHECK" -eq 1 ]] && PIPELINE_ARGS+=(--skip-asset-check)
 [[ "$JOBS" -gt 0 ]]         && PIPELINE_ARGS+=(--jobs "$JOBS")
+[[ "$MAX_WORKERS_PER_GPU" -gt 0 ]] && PIPELINE_ARGS+=(--max-workers-per-gpu "$MAX_WORKERS_PER_GPU")
 [[ "$SIGNAL" -eq 1 ]]        && PIPELINE_ARGS+=(--signal)
 [[ "$SIGNAL" -eq 1 ]]        && PIPELINE_ARGS+=(--signal-mode "$SIGNAL_MODE")
 [[ -n "$DEMAND" ]]           && PIPELINE_ARGS+=(--demand "$DEMAND")

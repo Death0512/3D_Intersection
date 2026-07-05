@@ -476,6 +476,26 @@ def generate(seed: int, num_vehicles: int, seconds: float,
     tail = fps  # 1 s of empty road after the last car leaves
     duration_frames = max(min_duration_frames, required + tail)
 
+    # Surface a large mismatch between the requested --seconds floor and the
+    # actual rendered duration. The video auto-extends to fit every vehicle
+    # (it can be longer than the minimum, never shorter — that's by design),
+    # but a 12s request that becomes a ~490s render is almost always a user
+    # mistake (too many vehicles for the requested window). Warn loudly so the
+    # user can Ctrl-C BEFORE the render step spends an hour producing a much
+    # longer clip than intended. Print to both stdout (visible in terminal)
+    # and the scenario line below echoes it in the log.
+    actual_seconds = duration_frames / fps
+    if actual_seconds > seconds * 1.5 and duration_frames > min_duration_frames * 2:
+        import sys as _sys
+        print(f"\n[WARN] --seconds={seconds:g} is a MINIMUM. The actual video "
+              f"will be {actual_seconds:.1f}s ({duration_frames} frames) because "
+              f"{num_vehicles} vehicles cannot fit in {seconds:g}s and auto-extend to "
+              f"{required} frames (required) + {tail} (tail). Rendering "
+              f"{duration_frames} frames per camera.", file=_sys.stderr, flush=True)
+        print(f"[WARN] For a ~{seconds:g}s clip, use ~{int(seconds * 1600 / 3600 * 4)} "
+              f"vehicles at default demand; for {num_vehicles} vehicles, expect "
+              f"a ~{actual_seconds:.0f}s video.", file=_sys.stderr, flush=True)
+
     scenario = {
         "seed": seed,
         "fps": fps,

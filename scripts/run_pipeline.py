@@ -45,6 +45,22 @@ VRAM_PER_JOB_MIB = 1600
 # Minimum free VRAM to attempt any GPU rendering (MiB).
 MIN_FREE_VRAM_MIB = 1200
 
+# Hard cap on Blender render workers per GPU. VRAM is not the only constraint
+# on per-GPU packing: each Cycles+OptiX context also contends for the GPU's
+# compute units, the host-side texture upload bandwidth, and the CPU-side
+# denoiser (OIDN runs on the CPU when the OptiX-denox weights file
+# /usr/share/nvidia/nvoptix.bin is unavailable — the case on Kaggle's T4
+# container). The prior packing used only VRAM (free // VRAM_PER_JOB_MIB) and
+# on a 15 GB T4 could schedule 4+ heavy scenes (40+ vehicle scenes, each with
+# hundreds of remapped textures — see the `in_E` build of 42 vehicles / 378
+# textures in run 1) onto one card. That exhausted VRAM and stalled the OptiX
+# render on frame 0 — silent for 600 s until the watchdog aborted the pool
+# (see PIPELINE ABORTED — worker silent for Ns). 2 per GPU keeps each Cycles
+# context at ~7 GB headroom on a 15 GB card and prevents the stall while still
+# using every GPU. Override with --max-workers-per-gpu for denser/lighter
+# scenes; the working n=50 baseline ran at 2/GPU on Kaggle 2×T4 without issue.
+MAX_WORKERS_PER_GPU = 2
+
 
 def run(cmd: list, cwd=ROOT, check=True, timeout=None):
     """Run a subprocess step, streaming stdout+stderr live.
@@ -216,18 +232,30 @@ def _free_vram_mib():
     return info[0][1]  # fallback: first available GPU, whatever its index
 
 
-def _detect_jobs(camera_count: int, explicit: int = 0):
+def _detect_jobs(camera_count: int, explicit: int = 0,
+                 max_workers_per_gpu: int = MAX_WORKERS_PER_GPU):
     """Determine how many parallel Blender jobs to run AND which GPU each binds to.
 
-    Multi-GPU hosts (e.g. Kaggle T4×2): each GPU runs one Blender worker,
-    giving near-linear throughput. Single-GPU: jobs based on VRAM budget
-    (all bind to GPU 0). Returns (job_count, gpu_assignment) where
-    gpu_assignment is a list of GPU-id integers, length == job_count.
+    Multi-GPU hosts (e.g. Kaggle T4×2): each GPU runs up to
+    ``max_workers_per_gpu`` Blender workers (default 2 — see MAX_WORKERS_PER_GPU
+    for the rationale), giving good throughput without exhausting VRAM /
+    compute on dense scenes. Single-GPU: same cap applies (avoids oversubscribing
+    one card). Returns (job_count, gpu_assignment) where gpu_assignment is a
+    list of GPU-id integers, length == job_count.
 
     ``explicit`` > 0 overrides auto-detection — all workers share GPU 0
     (user-chosen parallelism, not per-GPU).  Calls ``_gpu_info`` exactly once
     (cached), so the prior 3× nvidia-smi spawn is gone.
+
+    ``max_workers_per_gpu`` caps how many workers each GPU hosts regardless of
+    the VRAM-derived estimate. The VRAM budget alone over-packs on big cards
+    (a 15 GB T4 lets ~9 jobs fit by VRAM, but 4+ heavy Cycles+OptiX contexts
+    stall the render — see MAX_WORKERS_PER_GPU docstring). Raise it via
+    --max-workers-per-gpu for lighter scenes (few vehicles / no signal) where
+    the per-scene VRAM footprint is small.
     """
+    if max_workers_per_gpu < 1:
+        max_workers_per_gpu = 1
     assignment: list[int] = []
     if explicit and explicit > 0:
         n = min(explicit, camera_count)
@@ -239,15 +267,16 @@ def _detect_jobs(camera_count: int, explicit: int = 0):
         print("[GPU] nvidia-smi unavailable — defaulting to --jobs 1")
         return 1, [0]
 
-    # Multi-GPU: pack multiple workers per GPU (VRAM-limited, no fixed cap),
-    # interleaved so capping by camera_count spreads load evenly across GPUs.
+    # Multi-GPU: pack up to max_workers_per_gpu workers per GPU (VRAM-limited
+    # AND cap-limited), interleaved so capping by camera_count spreads load
+    # evenly across GPUs.
     if n_gpu >= 2:
-        # Per-GPU worker slots based on VRAM budget.
+        # Per-GPU worker slots based on VRAM budget, capped per-GPU.
         per_gpu_slots: list[tuple[int, int]] = []  # (gpu_id, n_slots)
         for gid, free in info:
             if free < MIN_FREE_VRAM_MIB:
                 continue
-            w = max(1, free // VRAM_PER_JOB_MIB)
+            w = max(1, min(free // VRAM_PER_JOB_MIB, max_workers_per_gpu))
             per_gpu_slots.append((gid, int(w)))
         if len(per_gpu_slots) < 2:
             print(f"[GPU] {n_gpu} GPU(s) detected but only "
@@ -268,23 +297,24 @@ def _detect_jobs(camera_count: int, explicit: int = 0):
         from collections import Counter
         per_gpu = Counter(assignment)
         hdr = " ".join(f"GPU{g}×{per_gpu.get(g, 0)}" for g, _ in per_gpu_slots)
-        print(f"[GPU] {n_gpu} GPU(s), VRAM-limited → {n} parallel "
-              f"render worker{'' if n==1 else 's'} ({hdr})")
+        print(f"[GPU] {n_gpu} GPU(s), cap={max_workers_per_gpu}/GPU → {n} "
+              f"parallel render worker{'' if n==1 else 's'} ({hdr})")
         return n, assignment
 
-    # Single GPU: VRAM-budget job count (original behaviour).
+    # Single GPU: VRAM-budget job count, capped per-GPU (original behaviour
+    # plus the cap so a huge single card doesn't oversubscribe).
     free = info[0][1] if info[0][0] == 0 else _free_vram_mib()
     if free is None:
         print("[GPU] nvidia-smi unavailable — defaulting to --jobs 1")
         return 1, [0]
-    jobs = max(1, free // VRAM_PER_JOB_MIB)
+    jobs = max(1, min(free // VRAM_PER_JOB_MIB, max_workers_per_gpu))
     jobs = min(jobs, camera_count)
     if free < MIN_FREE_VRAM_MIB:
         print(f"[GPU] free VRAM {free} MiB < {MIN_FREE_VRAM_MIB} — forcing --jobs 1")
         jobs = 1
     assignment = [0] * jobs
-    print(f"[GPU] free VRAM {free} MiB → {jobs} parallel "
-          f"render job{'' if jobs==1 else 's'} "
+    print(f"[GPU] free VRAM {free} MiB, cap={max_workers_per_gpu}/GPU → "
+          f"{jobs} parallel render job{'' if jobs==1 else 's'} "
           f"(budget {VRAM_PER_JOB_MIB} MiB/job)")
     return jobs, assignment
 
@@ -558,12 +588,24 @@ def main():
     ap.add_argument("--fps", type=int, default=None,
                     help="frames per second (default: geometry.FPS)")
     ap.add_argument("--seconds", type=float, default=12.0,
-                    help="minimum video length in seconds (actual duration auto-extends "
-                         "to fit all vehicles)")
+                    help="MINIMUM video length in seconds. The actual video "
+                         "auto-extends to fit all vehicles (it can be longer "
+                         "than this, never shorter). At default demand "
+                         "(400 veh/h/approach), ~25 vehicles fit in 12s; "
+                         "100+ vehicles will spread across minutes.")
     ap.add_argument("--out", type=str, default=os.path.join(ROOT, "output", "run1"))
     ap.add_argument("--only", help="render only this camera (debug)")
     ap.add_argument("--jobs", type=int, default=0,
-                    help="parallel render workers (0 = auto-detect from free VRAM)")
+                    help="parallel render workers (0 = auto-detect from free "
+                         "VRAM capped by --max-workers-per-gpu)")
+    ap.add_argument("--max-workers-per-gpu", type=int,
+                    default=MAX_WORKERS_PER_GPU,
+                    help=f"cap on Blender render workers per GPU regardless of "
+                         f"free VRAM (default {MAX_WORKERS_PER_GPU}). The VRAM "
+                         f"budget alone over-packs big cards (a 15 GB T4 lets "
+                         f"~9 jobs fit by VRAM, but 4+ heavy Cycles+OptiX "
+                         f"contexts stall the render — silent hang). Raise for "
+                         f"light scenes (few vehicles / no signal) only.")
     ap.add_argument("--silence-timeout", type=int,
                     default=DEFAULT_SILENCE_TIMEOUT_S,
                     help=f"seconds a render worker may go silent before the "
@@ -617,7 +659,9 @@ def main():
     step_plates(scn, out_dir)
 
     print("\n[4/5] Render cameras (parallel)")
-    n_jobs, gpu_assign = _detect_jobs(8 if not args.only else 1, explicit=args.jobs)
+    n_jobs, gpu_assign = _detect_jobs(
+        8 if not args.only else 1, explicit=args.jobs,
+        max_workers_per_gpu=args.max_workers_per_gpu)
     step_render_parallel(scn, out_dir, jobs=n_jobs, gpu_assignment=gpu_assign,
                          only=args.only, silence_timeout_s=args.silence_timeout,
                          samples=args.samples)

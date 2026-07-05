@@ -1,0 +1,1422 @@
+run_all.sh log â€” started 2026-07-05T05:53:47+00:00
+host: 68f9040890da  user: ?  kaggle: 1
+python : /usr/bin/python3
+blender: /root/.local/opt/blender-5.1.2/blender
+args   : 
+out    : /kaggle/working/run1
+============================================================
+============================================================
+PIPELINE  seed=42 n=120  min=12.0s (30 fps)  out=/kaggle/working/run1
+  python : /usr/bin/python3
+  blender: /root/.local/opt/blender-5.1.2/blender
+============================================================
+[env] all 8 env files present and valid
+[0/5] Env files OK
+
+[1/5] Asset validation
+
+$ /root/.local/opt/blender-5.1.2/blender -b --python /kaggle/working/3D_Intersection/scripts/validate_assets.py
+  00:00.418  blend            | Read blend: "/kaggle/working/3D_Intersection/assets/road.blend"
+  00:00.461  blend            | Read blend: "/kaggle/working/3D_Intersection/assets/car.blend"
+  Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)
+  ============================================================
+  VALIDATE: env files (required inputs)
+  ============================================================
+  [env] all 8 env files present and valid
+  ============================================================
+  VALIDATE: road
+  ============================================================
+    [PASS] ENV_road collection present
+    [PASS] has mesh objects  (1 mesh(es))
+    [PASS] width ~ 14.0 m  (got 14.000)
+    [PASS] length > 30 m  (got 76.651)
+    [PASS] min Z ~ 0  (got 0.035)
+    [PASS] no cameras
+    [PASS] no lights
+  ------------------------------------------------------------
+  ============================================================
+  VALIDATE: car
+  ============================================================
+    [PASS] collection VEH_car present
+    [PASS] has mesh objects  (3)
+    [PASS] length ~ 4.47 m on Y (Â±5%)  (got dims=[1.893, 4.48, 1.281])
+    [PASS] min Z ~ 0 (grounded)  (got 0.000)
+    [PASS] LicensePlate_Mat present
+    [PASS] LicensePlate_Mat has Image Texture node
+    [PASS] plate image assigned  (plate.png.001)
+    [PASS] no cameras
+    [PASS] no lights
+    [PASS] no armatures
+    dims: [1.893, 4.48, 1.281]
+  ------------------------------------------------------------
+  ============================================================
+  OVERALL: ALL PASS
+  ============================================================
+  (ok, 0.8s)
+
+[2/5] Scenario generation
+
+$ /usr/bin/python3 /kaggle/working/3D_Intersection/scripts/scenario_gen.py --seed 42 --num-vehicles 120 --seconds 12.0 --out /kaggle/working/run1 --fps 30 --signal --signal-mode adaptive
+  [signal] adaptive timeline built: 30 intervals, cycle_frames=13245
+  [signal] adaptive timeline built: 30 intervals, cycle_frames=13245
+  [signal] adaptive timeline built: 30 intervals, cycle_frames=13245
+  [signal] adaptive timeline built: 30 intervals, cycle_frames=13245
+  [signal] adaptive timeline built: 30 intervals, cycle_frames=13245
+  [signal] adaptive timeline built: 30 intervals, cycle_frames=13245
+  [signal] adaptive timeline built: 30 intervals, cycle_frames=13245
+  [signal] adaptive timeline built: 30 intervals, cycle_frames=13245
+  Wrote scenario: /kaggle/working/run1/scenario.json  (120 vehicles, 30 fps, duration_frames=14733f (floor=360f, required=14703f, tail=+30f))
+  (ok, 0.4s)
+
+[3/5] Plate pre-generation
+
+$ /usr/bin/python3 -c import sys,json; sys.path.insert(0,'scripts'); from gen_plate import pregenerate_plates; d=json.load(open('/kaggle/working/run1/scenario.json')); pregenerate_plates([v['plate'] for v in d['vehicles']], '/kaggle/working/run1/plates'); print('plates done')
+  plates done
+  (ok, 0.6s)
+
+[4/5] Render cameras (parallel)
+[GPU] 2 GPU(s), VRAM-limited â†’ 8 parallel render workers (GPU0Ã—4 GPU1Ã—4)
+
+[in_N] $ /root/.local/opt/blender-5.1.2/blender -b --python /kaggle/working/3D_Intersection/scripts/render.py -- --scenario /kaggle/working/run1/scenario.json --out /kaggle/working/run1 --only in_N --no-metadata --samples 48  (GPU 0)
+
+[out_N] $ /root/.local/opt/blender-5.1.2/blender -b --python /kaggle/working/3D_Intersection/scripts/render.py -- --scenario /kaggle/working/run1/scenario.json --out /kaggle/working/run1 --only out_N --no-metadata --samples 48  (GPU 1)
+
+[in_E] $ /root/.local/opt/blender-5.1.2/blender -b --python /kaggle/working/3D_Intersection/scripts/render.py -- --scenario /kaggle/working/run1/scenario.json --out /kaggle/working/run1 --only in_E --no-metadata --samples 48  (GPU 0)
+
+[out_E] $ /root/.local/opt/blender-5.1.2/blender -b --python /kaggle/working/3D_Intersection/scripts/render.py -- --scenario /kaggle/working/run1/scenario.json --out /kaggle/working/run1 --only out_E --no-metadata --samples 48  (GPU 1)
+
+[in_S] $ /root/.local/opt/blender-5.1.2/blender -b --python /kaggle/working/3D_Intersection/scripts/render.py -- --scenario /kaggle/working/run1/scenario.json --out /kaggle/working/run1 --only in_S --no-metadata --samples 48  (GPU 0)
+
+[out_S] $ /root/.local/opt/blender-5.1.2/blender -b --python /kaggle/working/3D_Intersection/scripts/render.py -- --scenario /kaggle/working/run1/scenario.json --out /kaggle/working/run1 --only out_S --no-metadata --samples 48  (GPU 1)
+
+[in_W] $ /root/.local/opt/blender-5.1.2/blender -b --python /kaggle/working/3D_Intersection/scripts/render.py -- --scenario /kaggle/working/run1/scenario.json --out /kaggle/working/run1 --only in_W --no-metadata --samples 48  (GPU 0)
+
+[out_W] $ /root/.local/opt/blender-5.1.2/blender -b --python /kaggle/working/3D_Intersection/scripts/render.py -- --scenario /kaggle/working/run1/scenario.json --out /kaggle/working/run1 --only out_W --no-metadata --samples 48  (GPU 1)
+  [in_E]   [in_E] building scene...
+  [in_S]   [in_S] building scene...
+  [in_W]   [in_W] building scene...
+  [out_N]   [out_N] building scene...
+  [out_S]   [out_S] building scene...
+  [out_W]   [out_W] building scene...
+  [in_N]   [in_N] building scene...
+  [out_E]   [out_E] building scene...
+  [in_E]   [build] placing vehicles for in_E (scanning 120 total)...
+  [in_E]     [in_E] V1: V002 E/0/straight
+  [out_S]   [build] placing vehicles for out_S (scanning 120 total)...
+  [out_S]     [out_S] V1: V001 S/3/straight
+  [in_S]   [build] placing vehicles for in_S (scanning 120 total)...
+  [in_S]     [in_S] V1: V000 S/0/left
+  [in_N]   [build] placing vehicles for in_N (scanning 120 total)...
+  [in_N]     [in_N] V1: V004 N/2/straight
+  [out_W]   [build] placing vehicles for out_W (scanning 120 total)...
+  [out_W]     [out_W] V1: V009 W/2/straight
+  [in_W]   [build] placing vehicles for in_W (scanning 120 total)...
+  [in_W]     [in_W] V1: V009 W/2/straight
+  [out_N]   [build] placing vehicles for out_N (scanning 120 total)...
+  [out_N]     [out_N] V1: V004 N/2/straight
+  [out_E]   [build] placing vehicles for out_E (scanning 120 total)...
+  [out_E]     [out_E] V1: V000 S/0/left
+  [out_S]   [tex] V001: remapped 9 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V003: remapped 18 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V005: remapped 27 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V019: remapped 36 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]     [out_S] V5: V022 S/0/straight
+  [in_E]   [tex] V002: remapped 9 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V009: remapped 9 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V013: remapped 18 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V024: remapped 27 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V030: remapped 36 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]     [out_W] V5: V033 W/2/straight
+  [in_E]   [tex] V005: remapped 18 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V006: remapped 27 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V007: remapped 36 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]     [in_E] V5: V014 E/2/straight
+  [in_N]   [tex] V004: remapped 9 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V008: remapped 18 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V010: remapped 27 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V011: remapped 36 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]     [in_N] V5: V012 N/2/straight
+  [in_W]   [tex] V009: remapped 9 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V013: remapped 18 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V024: remapped 27 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V030: remapped 36 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]     [in_W] V5: V033 W/2/straight
+  [out_N]   [tex] V004: remapped 9 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V008: remapped 18 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V010: remapped 27 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V011: remapped 36 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]     [out_N] V5: V012 N/2/straight
+  [in_S]   [tex] V000: remapped 9 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V001: remapped 18 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V003: remapped 27 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V022: remapped 36 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]     [in_S] V5: V025 S/0/straight
+  [out_E]   [tex] V000: remapped 9 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V002: remapped 18 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V006: remapped 27 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V007: remapped 36 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]     [out_E] V5: V014 E/2/straight
+  [in_S]   [tex] V025: remapped 45 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V026: remapped 54 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V028: remapped 63 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V038: remapped 72 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V042: remapped 81 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]     [in_S] V10: V046 S/3/straight
+  [in_W]   [tex] V033: remapped 45 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V043: remapped 54 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V053: remapped 63 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V062: remapped 72 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V064: remapped 81 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]     [in_W] V10: V065 W/0/straight
+  [in_E]   [tex] V014: remapped 45 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V018: remapped 54 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V019: remapped 63 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V023: remapped 72 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V031: remapped 81 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]     [in_E] V10: V034 E/0/straight
+  [out_S]   [tex] V022: remapped 45 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V025: remapped 54 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V026: remapped 63 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V028: remapped 72 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V038: remapped 81 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]     [out_S] V10: V042 S/3/straight
+  [in_N]   [tex] V012: remapped 45 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V015: remapped 54 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V016: remapped 63 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V017: remapped 72 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V020: remapped 81 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]     [in_N] V10: V021 N/1/straight
+  [out_N]   [tex] V012: remapped 45 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V015: remapped 54 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V016: remapped 63 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V017: remapped 72 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V020: remapped 81 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]     [out_N] V10: V021 N/1/straight
+  [out_E]   [tex] V014: remapped 45 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V018: remapped 54 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V023: remapped 63 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V031: remapped 72 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V034: remapped 81 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]     [out_E] V10: V035 E/1/straight
+  [out_W]   [tex] V033: remapped 45 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V043: remapped 54 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V047: remapped 63 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V053: remapped 72 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V062: remapped 81 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]     [out_W] V10: V064 W/1/straight
+  [in_W]   [tex] V065: remapped 90 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V070: remapped 99 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V077: remapped 108 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V083: remapped 117 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V088: remapped 126 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]     [in_W] V15: V091 W/2/straight
+  [out_N]   [tex] V021: remapped 90 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V027: remapped 99 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V029: remapped 108 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V032: remapped 117 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V039: remapped 126 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]     [out_N] V15: V041 N/3/straight
+  [in_N]   [tex] V021: remapped 90 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V027: remapped 99 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V029: remapped 108 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V032: remapped 117 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V039: remapped 126 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]     [in_N] V15: V041 N/3/straight
+  [out_S]   [tex] V042: remapped 90 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V046: remapped 99 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V051: remapped 108 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V055: remapped 117 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V057: remapped 126 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]     [out_S] V15: V069 S/2/straight
+  [in_S]   [tex] V046: remapped 90 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V047: remapped 99 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V051: remapped 108 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V057: remapped 117 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V069: remapped 126 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]     [in_S] V15: V082 S/2/straight
+  [out_E]   [tex] V035: remapped 90 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V036: remapped 99 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V037: remapped 108 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V040: remapped 117 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V045: remapped 126 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]     [out_E] V15: V049 E/3/straight
+  [out_W]   [tex] V064: remapped 90 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V065: remapped 99 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V077: remapped 108 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V083: remapped 117 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V088: remapped 126 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]     [out_W] V15: V091 W/2/straight
+  [in_E]   [tex] V034: remapped 90 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V035: remapped 99 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V036: remapped 108 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V037: remapped 117 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V040: remapped 126 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]     [in_E] V15: V045 E/3/straight
+  [in_W]   [tex] V091: remapped 135 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V092: remapped 144 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V098: remapped 153 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V100: remapped 162 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [tex] V102: remapped 171 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_W]   [env] camera override active for in_W (camera.location[x] env=90.0 vs geometry=69.751000)
+  [in_W] [GPU] refreshing devices...
+  [out_E]   [tex] V049: remapped 135 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V052: remapped 144 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V054: remapped 153 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V056: remapped 162 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V059: remapped 171 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]     [out_E] V20: V061 E/1/straight
+  [in_N]   [tex] V041: remapped 135 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V044: remapped 144 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V048: remapped 153 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V050: remapped 162 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V054: remapped 171 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]     [in_N] V20: V058 N/0/straight
+  [in_W] [GPU] 3 device(s): Tesla T4(CUDA), Intel Xeon CPU @ 2.00GHz(CPU), Tesla T4(OPTIX)
+  [in_W] [GPU] Cycles OPTIX enabled: Tesla T4
+  [in_W]   [denoiser] OPENIMAGEDENOISE active
+  [out_N]   [tex] V041: remapped 135 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V044: remapped 144 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V048: remapped 153 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V050: remapped 162 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V058: remapped 171 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]     [out_N] V20: V060 N/1/straight
+  [out_S]   [tex] V069: remapped 135 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V070: remapped 144 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V082: remapped 153 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V089: remapped 162 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V090: remapped 171 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]     [out_S] V20: V093 S/2/straight
+  [in_W] Info: Saved as "scene_in_W.blend"
+  [in_W] Built in_W: 19 vehicles -> /kaggle/working/run1/scene_in_W.blend
+  [in_W]   [in_W] configuring GPU...
+  [in_W] [GPU] Cycles OPTIX enabled: Tesla T4
+  [in_W]   [denoiser] OPENIMAGEDENOISE active
+  [in_W]   [in_W] Cycles samples = 48
+  [in_W]   [in_W] rendering frames 0..14733 (48 samples)...
+  [in_W]   frame 0/14733 (0.4s)
+  [in_S]   [tex] V082: remapped 135 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V089: remapped 144 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V090: remapped 153 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V093: remapped 162 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V094: remapped 171 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]     [in_S] V20: V096 S/3/straight
+  [out_W]   [tex] V091: remapped 135 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V092: remapped 144 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V098: remapped 153 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V100: remapped 162 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [tex] V101: remapped 171 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]     [out_W] V20: V102 W/1/straight
+  [in_E]   [tex] V045: remapped 135 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V049: remapped 144 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V052: remapped 153 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V055: remapped 162 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V056: remapped 171 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]     [in_E] V20: V059 E/2/straight
+  [out_W]   [tex] V102: remapped 180 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_W]   [env] camera override active for out_W (camera.location[x] env=5.0 vs geometry=-15.000000)
+  [out_W] [GPU] refreshing devices...
+  [out_W] [GPU] 3 device(s): Tesla T4(CUDA), Intel Xeon CPU @ 2.00GHz(CPU), Tesla T4(OPTIX)
+  [out_W] [GPU] Cycles OPTIX enabled: Tesla T4
+  [out_W]   [denoiser] OPENIMAGEDENOISE active
+  [out_W] Info: Saved as "scene_out_W.blend"
+  [out_W] Built out_W: 20 vehicles -> /kaggle/working/run1/scene_out_W.blend
+  [out_W]   [out_W] configuring GPU...
+  [out_W] [GPU] Cycles OPTIX enabled: Tesla T4
+  [out_W]   [denoiser] OPENIMAGEDENOISE active
+  [out_W]   [out_W] Cycles samples = 48
+  [out_W]   [out_W] rendering frames 0..14733 (48 samples)...
+  [out_W]   frame 0/14733 (0.4s)
+  [out_E]   [tex] V061: remapped 180 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V063: remapped 189 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V066: remapped 198 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V067: remapped 207 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V068: remapped 216 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]     [out_E] V25: V071 E/3/straight
+  [out_S]   [tex] V093: remapped 180 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V094: remapped 189 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V096: remapped 198 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V106: remapped 207 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V107: remapped 216 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]     [out_S] V25: V109 S/0/straight
+  [in_N]   [tex] V058: remapped 180 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V060: remapped 189 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V073: remapped 198 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V074: remapped 207 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V079: remapped 216 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]     [in_N] V25: V080 N/0/straight
+  [out_N]   [tex] V060: remapped 180 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V073: remapped 189 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V075: remapped 198 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V079: remapped 207 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V080: remapped 216 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]     [out_N] V25: V081 N/1/straight
+  [in_E]   [tex] V059: remapped 180 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V061: remapped 189 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V063: remapped 198 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V066: remapped 207 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V067: remapped 216 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]     [in_E] V25: V068 E/2/straight
+  [in_S]   [tex] V096: remapped 180 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V106: remapped 189 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V107: remapped 198 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V109: remapped 207 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [tex] V110: remapped 216 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_S]   [env] camera override active for in_S (camera.location[y] env=90.0 vs geometry=69.751000)
+  [in_S] [GPU] refreshing devices...
+  [in_S] [GPU] 3 device(s): Tesla T4(CUDA), Intel Xeon CPU @ 2.00GHz(CPU), Tesla T4(OPTIX)
+  [in_S] [GPU] Cycles OPTIX enabled: Tesla T4
+  [in_S]   [denoiser] OPENIMAGEDENOISE active
+  [in_S] Info: Saved as "scene_in_S.blend"
+  [in_S] Built in_S: 24 vehicles -> /kaggle/working/run1/scene_in_S.blend
+  [in_S]   [in_S] configuring GPU...
+  [in_S] [GPU] Cycles OPTIX enabled: Tesla T4
+  [in_S]   [denoiser] OPENIMAGEDENOISE active
+  [in_S]   [in_S] Cycles samples = 48
+  [in_S]   [in_S] rendering frames 0..14733 (48 samples)...
+  [in_S]   frame 0/14733 (0.8s)
+  [out_S]   [tex] V109: remapped 225 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [tex] V110: remapped 234 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_S]   [env] camera override active for out_S (camera.location[y] env=5.0 vs geometry=-15.000000)
+  [out_S] [GPU] refreshing devices...
+  [out_S] [GPU] 3 device(s): Tesla T4(CUDA), Intel Xeon CPU @ 2.00GHz(CPU), Tesla T4(OPTIX)
+  [out_S] [GPU] Cycles OPTIX enabled: Tesla T4
+  [out_S]   [denoiser] OPENIMAGEDENOISE active
+  [out_S] Info: Saved as "scene_out_S.blend"
+  [out_S] Built out_S: 26 vehicles -> /kaggle/working/run1/scene_out_S.blend
+  [out_S]   [out_S] configuring GPU...
+  [out_S] [GPU] Cycles OPTIX enabled: Tesla T4
+  [out_S]   [denoiser] OPENIMAGEDENOISE active
+  [out_S]   [out_S] Cycles samples = 48
+  [out_S]   [out_S] rendering frames 0..14733 (48 samples)...
+  [out_S]   frame 0/14733 (0.7s)
+  [out_E]   [tex] V071: remapped 225 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V072: remapped 234 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V074: remapped 243 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V076: remapped 252 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V078: remapped 261 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]     [out_E] V30: V084 E/2/straight
+  [in_N]   [tex] V080: remapped 225 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V081: remapped 234 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V086: remapped 243 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V087: remapped 252 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V095: remapped 261 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]     [in_N] V30: V099 N/1/straight
+  [out_N]   [tex] V081: remapped 225 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V086: remapped 234 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V087: remapped 243 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V095: remapped 252 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V099: remapped 261 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]     [out_N] V30: V108 N/1/straight
+  [in_E]   [tex] V068: remapped 225 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V071: remapped 234 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V072: remapped 243 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V075: remapped 252 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V076: remapped 261 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]     [in_E] V30: V078 E/3/straight
+  [out_N]   [tex] V108: remapped 270 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V113: remapped 279 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V116: remapped 288 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [tex] V119: remapped 297 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_N]   [env] camera override active for out_N (camera.location[y] env=-5.0 vs geometry=15.000000)
+  [out_N] [GPU] refreshing devices...
+  [out_N] [GPU] 3 device(s): Tesla T4(CUDA), Intel Xeon CPU @ 2.00GHz(CPU), Tesla T4(OPTIX)
+  [out_N] [GPU] Cycles OPTIX enabled: Tesla T4
+  [out_N]   [denoiser] OPENIMAGEDENOISE active
+  [out_N] Info: Saved as "scene_out_N.blend"
+  [out_N] Built out_N: 33 vehicles -> /kaggle/working/run1/scene_out_N.blend
+  [out_N]   [out_N] configuring GPU...
+  [out_N] [GPU] Cycles OPTIX enabled: Tesla T4
+  [out_N]   [denoiser] OPENIMAGEDENOISE active
+  [out_N]   [out_N] Cycles samples = 48
+  [out_N]   [out_N] rendering frames 0..14733 (48 samples)...
+  [out_N]   frame 0/14733 (1.1s)
+  [in_W] Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)
+  [out_E]   [tex] V084: remapped 270 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V085: remapped 279 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V097: remapped 288 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V103: remapped 297 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V104: remapped 306 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]     [out_E] V35: V105 E/1/straight
+  [in_N]   [tex] V099: remapped 270 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V101: remapped 279 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V108: remapped 288 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V113: remapped 297 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [tex] V116: remapped 306 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]     [in_N] V35: V119 N/0/straight
+  [in_E]   [tex] V078: remapped 270 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V084: remapped 279 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V085: remapped 288 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V097: remapped 297 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V103: remapped 306 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]     [in_E] V35: V104 E/2/straight
+  [in_N]   [tex] V119: remapped 315 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_N]   [env] camera override active for in_N (camera.location[y] env=-90.0 vs geometry=-69.751000)
+  [in_N] [GPU] refreshing devices...
+  [in_N] [GPU] 3 device(s): Tesla T4(CUDA), Intel Xeon CPU @ 2.00GHz(CPU), Tesla T4(OPTIX)
+  [in_N] [GPU] Cycles OPTIX enabled: Tesla T4
+  [in_N]   [denoiser] OPENIMAGEDENOISE active
+  [out_W] Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)
+  [in_N] Info: Saved as "scene_in_N.blend"
+  [in_N] Built in_N: 35 vehicles -> /kaggle/working/run1/scene_in_N.blend
+  [in_N]   [in_N] configuring GPU...
+  [in_N] [GPU] Cycles OPTIX enabled: Tesla T4
+  [in_N]   [denoiser] OPENIMAGEDENOISE active
+  [in_N]   [in_N] Cycles samples = 48
+  [in_N]   [in_N] rendering frames 0..14733 (48 samples)...
+  [in_N]   frame 0/14733 (2.4s)
+  [in_S] Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)
+  [out_S] Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)
+  [out_E]   [tex] V105: remapped 315 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V111: remapped 324 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V112: remapped 333 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V114: remapped 342 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V115: remapped 351 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]     [out_E] V40: V117 E/0/straight
+  [in_E]   [tex] V104: remapped 315 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V105: remapped 324 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V111: remapped 333 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V112: remapped 342 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V114: remapped 351 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]     [in_E] V40: V115 E/0/straight
+  [out_E]   [tex] V117: remapped 360 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [tex] V118: remapped 369 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [out_E]   [env] camera override active for out_E (camera.location[x] env=-5.0 vs geometry=15.000000)
+  [out_E] [GPU] refreshing devices...
+  [out_E] [GPU] 3 device(s): Tesla T4(CUDA), Intel Xeon CPU @ 2.00GHz(CPU), Tesla T4(OPTIX)
+  [out_E] [GPU] Cycles OPTIX enabled: Tesla T4
+  [out_E]   [denoiser] OPENIMAGEDENOISE active
+  [out_E] Info: Saved as "scene_out_E.blend"
+  [out_E] Built out_E: 41 vehicles -> /kaggle/working/run1/scene_out_E.blend
+  [out_E]   [out_E] configuring GPU...
+  [out_E] [GPU] Cycles OPTIX enabled: Tesla T4
+  [out_E]   [denoiser] OPENIMAGEDENOISE active
+  [out_E]   [out_E] Cycles samples = 48
+  [out_E]   [out_E] rendering frames 0..14733 (48 samples)...
+  [out_E]   frame 0/14733 (2.2s)
+  [out_N] Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)
+  [in_E]   [tex] V115: remapped 360 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V117: remapped 369 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [tex] V118: remapped 378 textures to /kaggle/working/3D_Intersection/scripts/../models/car/textures
+  [in_E]   [env] camera override active for in_E (camera.location[x] env=-90.0 vs geometry=-69.751000)
+  [in_E] [GPU] refreshing devices...
+  [in_E] [GPU] 3 device(s): Tesla T4(CUDA), Intel Xeon CPU @ 2.00GHz(CPU), Tesla T4(OPTIX)
+  [in_E] [GPU] Cycles OPTIX enabled: Tesla T4
+  [in_E]   [denoiser] OPENIMAGEDENOISE active
+  [in_E] Info: Saved as "scene_in_E.blend"
+  [in_E] Built in_E: 42 vehicles -> /kaggle/working/run1/scene_in_E.blend
+  [in_E]   [in_E] configuring GPU...
+  [in_E] [GPU] Cycles OPTIX enabled: Tesla T4
+  [in_E]   [denoiser] OPENIMAGEDENOISE active
+  [in_E]   [in_E] Cycles samples = 48
+  [in_E]   [in_E] rendering frames 0..14733 (48 samples)...
+  [in_E]   frame 0/14733 (2.3s)
+  [in_N] Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)
+  [out_E] Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)
+  [in_E] Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)
+[in_E] FAILED (720.2s)
+[out_W] FAILED (720.6s)
+[in_W] FAILED (720.8s)
+[out_E] FAILED (721.3s)
+[out_N] FAILED (721.3s)
+[out_S] FAILED (721.5s)
+[in_N] FAILED (721.5s)
+[in_S] FAILED (721.6s)
+
+  Render summary (8/8 cameras):
+    in_N   FAILED  (721.5s)
+    out_N  FAILED  (721.3s)
+    in_E   FAILED  (720.2s)
+    out_E  FAILED  (721.3s)
+    in_S   FAILED  (721.6s)
+    out_S  FAILED  (721.5s)
+    in_W   FAILED  (720.8s)
+    out_W  FAILED  (720.6s)
+  8 camera(s) FAILED â€” metadata will be partial
+
+[5/5] Metadata + run validation
+
+$ /usr/bin/python3 /kaggle/working/3D_Intersection/scripts/render.py -- --scenario /kaggle/working/run1/scenario.json --out /kaggle/working/run1 --metadata-only
+
+======================================================================
+PIPELINE ABORTED â€” worker [in_W] silent for 602s (> 600s timeout)
+  [in_N] last: 'Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)'
+  [out_N] last: 'Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)'
+  [in_E] last: 'Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)'
+  [out_E] last: 'Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)'
+  [in_S] last: 'Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)'
+  [out_S] last: 'Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)'
+  [in_W] last: 'Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)'
+  [out_W] last: 'Blender 5.1.2 (hash ec6e62d40fa9 built 2026-05-19 02:18:37)'
+======================================================================
+  Wrote metadata: /kaggle/working/run1/metadata.json
+  (ok, 3.6s)
+
+$ /usr/bin/python3 /kaggle/working/3D_Intersection/scripts/validate_run.py --out /kaggle/working/run1
+  ============================================================
+  VALIDATE RUN: /kaggle/working/run1
+  ============================================================
+    [FAIL] videos present (0/8)  (missing: {'in_W', 'in_S', 'out_W', 'in_E', 'in_N', 'out_N', 'out_S', 'out_E'})
+    [PASS] metadata.json exists
+    [FAIL] no lane headway conflicts  (bad lanes: [('E', 0), ('E', 3), ('N', 1)])
+    [PASS] V000 delta_t matches  (meta=63 expected=63)
+    [PASS] V000 reappear = disappear + dt
+    [PASS] V000 has plate  (TG-242-TR)
+    [PASS] V000 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V000 all visible frames have poses
+    [PASS] V000 in-segment camera tag
+    [PASS] V000 out-segment camera tag
+    [PASS] V001 delta_t matches  (meta=107 expected=107)
+    [PASS] V001 reappear = disappear + dt
+    [PASS] V001 has plate  (AF-765-SK)
+    [PASS] V001 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V001 all visible frames have poses
+    [PASS] V001 in-segment camera tag
+    [PASS] V001 out-segment camera tag
+    [PASS] V002 delta_t matches  (meta=80 expected=80)
+    [PASS] V002 reappear = disappear + dt
+    [PASS] V002 has plate  (KH-320-YI)
+    [PASS] V002 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V002 all visible frames have poses
+    [PASS] V002 in-segment camera tag
+    [PASS] V002 out-segment camera tag
+    [PASS] V003 delta_t matches  (meta=103 expected=103)
+    [PASS] V003 reappear = disappear + dt
+    [PASS] V003 has plate  (SN-487-CH)
+    [PASS] V003 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V003 all visible frames have poses
+    [PASS] V003 in-segment camera tag
+    [PASS] V003 out-segment camera tag
+    [PASS] V004 delta_t matches  (meta=65 expected=65)
+    [PASS] V004 reappear = disappear + dt
+    [PASS] V004 has plate  (ZW-987-CH)
+    [PASS] V004 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V004 all visible frames have poses
+    [PASS] V004 in-segment camera tag
+    [PASS] V004 out-segment camera tag
+    [PASS] V005 delta_t matches  (meta=218 expected=218)
+    [PASS] V005 reappear = disappear + dt
+    [PASS] V005 has plate  (QP-275-NG)
+    [PASS] V005 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V005 all visible frames have poses
+    [PASS] V005 in-segment camera tag
+    [PASS] V005 out-segment camera tag
+    [PASS] V006 delta_t matches  (meta=56 expected=56)
+    [PASS] V006 reappear = disappear + dt
+    [PASS] V006 has plate  (IT-157-FA)
+    [PASS] V006 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V006 all visible frames have poses
+    [PASS] V006 in-segment camera tag
+    [PASS] V006 out-segment camera tag
+    [PASS] V007 delta_t matches  (meta=69 expected=69)
+    [PASS] V007 reappear = disappear + dt
+    [PASS] V007 has plate  (IR-505-XQ)
+    [PASS] V007 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V007 all visible frames have poses
+    [PASS] V007 in-segment camera tag
+    [PASS] V007 out-segment camera tag
+    [PASS] V008 delta_t matches  (meta=97 expected=97)
+    [PASS] V008 reappear = disappear + dt
+    [PASS] V008 has plate  (LP-470-FZ)
+    [PASS] V008 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V008 all visible frames have poses
+    [PASS] V008 in-segment camera tag
+    [PASS] V008 out-segment camera tag
+    [PASS] V009 delta_t matches  (meta=107 expected=107)
+    [PASS] V009 reappear = disappear + dt
+    [PASS] V009 has plate  (RP-494-JZ)
+    [PASS] V009 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V009 all visible frames have poses
+    [PASS] V009 in-segment camera tag
+    [PASS] V009 out-segment camera tag
+    [PASS] V010 delta_t matches  (meta=63 expected=63)
+    [PASS] V010 reappear = disappear + dt
+    [PASS] V010 has plate  (XT-887-QC)
+    [PASS] V010 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V010 all visible frames have poses
+    [PASS] V010 in-segment camera tag
+    [PASS] V010 out-segment camera tag
+    [PASS] V011 delta_t matches  (meta=70 expected=70)
+    [PASS] V011 reappear = disappear + dt
+    [PASS] V011 has plate  (TN-208-WH)
+    [PASS] V011 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V011 all visible frames have poses
+    [PASS] V011 in-segment camera tag
+    [PASS] V011 out-segment camera tag
+    [PASS] V012 delta_t matches  (meta=69 expected=69)
+    [PASS] V012 reappear = disappear + dt
+    [PASS] V012 has plate  (XP-600-AY)
+    [PASS] V012 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V012 all visible frames have poses
+    [PASS] V012 in-segment camera tag
+    [PASS] V012 out-segment camera tag
+    [PASS] V013 delta_t matches  (meta=71 expected=71)
+    [PASS] V013 reappear = disappear + dt
+    [PASS] V013 has plate  (MB-878-ND)
+    [PASS] V013 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V013 all visible frames have poses
+    [PASS] V013 in-segment camera tag
+    [PASS] V013 out-segment camera tag
+    [PASS] V014 delta_t matches  (meta=96 expected=96)
+    [PASS] V014 reappear = disappear + dt
+    [PASS] V014 has plate  (YT-806-FI)
+    [PASS] V014 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V014 all visible frames have poses
+    [PASS] V014 in-segment camera tag
+    [PASS] V014 out-segment camera tag
+    [PASS] V015 delta_t matches  (meta=58 expected=58)
+    [PASS] V015 reappear = disappear + dt
+    [PASS] V015 has plate  (AO-702-FB)
+    [PASS] V015 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V015 all visible frames have poses
+    [PASS] V015 in-segment camera tag
+    [PASS] V015 out-segment camera tag
+    [PASS] V016 delta_t matches  (meta=77 expected=77)
+    [PASS] V016 reappear = disappear + dt
+    [PASS] V016 has plate  (HM-652-DY)
+    [PASS] V016 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V016 all visible frames have poses
+    [PASS] V016 in-segment camera tag
+    [PASS] V016 out-segment camera tag
+    [PASS] V017 delta_t matches  (meta=60 expected=60)
+    [PASS] V017 reappear = disappear + dt
+    [PASS] V017 has plate  (LL-578-WB)
+    [PASS] V017 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V017 all visible frames have poses
+    [PASS] V017 in-segment camera tag
+    [PASS] V017 out-segment camera tag
+    [PASS] V018 delta_t matches  (meta=70 expected=70)
+    [PASS] V018 reappear = disappear + dt
+    [PASS] V018 has plate  (EL-532-EM)
+    [PASS] V018 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V018 all visible frames have poses
+    [PASS] V018 in-segment camera tag
+    [PASS] V018 out-segment camera tag
+    [PASS] V019 delta_t matches  (meta=270 expected=270)
+    [PASS] V019 reappear = disappear + dt
+    [PASS] V019 has plate  (VZ-871-WE)
+    [PASS] V019 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V019 all visible frames have poses
+    [PASS] V019 in-segment camera tag
+    [PASS] V019 out-segment camera tag
+    [PASS] V020 delta_t matches  (meta=55 expected=55)
+    [PASS] V020 reappear = disappear + dt
+    [PASS] V020 has plate  (ZG-902-UH)
+    [PASS] V020 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V020 all visible frames have poses
+    [PASS] V020 in-segment camera tag
+    [PASS] V020 out-segment camera tag
+    [PASS] V021 delta_t matches  (meta=58 expected=58)
+    [PASS] V021 reappear = disappear + dt
+    [PASS] V021 has plate  (BI-151-PN)
+    [PASS] V021 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V021 all visible frames have poses
+    [PASS] V021 in-segment camera tag
+    [PASS] V021 out-segment camera tag
+    [PASS] V022 delta_t matches  (meta=68 expected=68)
+    [PASS] V022 reappear = disappear + dt
+    [PASS] V022 has plate  (RG-222-YO)
+    [PASS] V022 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V022 all visible frames have poses
+    [PASS] V022 in-segment camera tag
+    [PASS] V022 out-segment camera tag
+    [PASS] V023 delta_t matches  (meta=56 expected=56)
+    [PASS] V023 reappear = disappear + dt
+    [PASS] V023 has plate  (FS-344-GD)
+    [PASS] V023 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V023 all visible frames have poses
+    [PASS] V023 in-segment camera tag
+    [PASS] V023 out-segment camera tag
+    [PASS] V024 delta_t matches  (meta=57 expected=57)
+    [PASS] V024 reappear = disappear + dt
+    [PASS] V024 has plate  (ZZ-175-NN)
+    [PASS] V024 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V024 all visible frames have poses
+    [PASS] V024 in-segment camera tag
+    [PASS] V024 out-segment camera tag
+    [PASS] V025 delta_t matches  (meta=56 expected=56)
+    [PASS] V025 reappear = disappear + dt
+    [PASS] V025 has plate  (LO-409-PZ)
+    [PASS] V025 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V025 all visible frames have poses
+    [PASS] V025 in-segment camera tag
+    [PASS] V025 out-segment camera tag
+    [PASS] V026 delta_t matches  (meta=66 expected=66)
+    [PASS] V026 reappear = disappear + dt
+    [PASS] V026 has plate  (GX-860-OH)
+    [PASS] V026 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V026 all visible frames have poses
+    [PASS] V026 in-segment camera tag
+    [PASS] V026 out-segment camera tag
+    [PASS] V027 delta_t matches  (meta=96 expected=96)
+    [PASS] V027 reappear = disappear + dt
+    [PASS] V027 has plate  (GX-152-CL)
+    [PASS] V027 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V027 all visible frames have poses
+    [PASS] V027 in-segment camera tag
+    [PASS] V027 out-segment camera tag
+    [PASS] V028 delta_t matches  (meta=68 expected=68)
+    [PASS] V028 reappear = disappear + dt
+    [PASS] V028 has plate  (TO-537-OC)
+    [PASS] V028 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V028 all visible frames have poses
+    [PASS] V028 in-segment camera tag
+    [PASS] V028 out-segment camera tag
+    [PASS] V029 delta_t matches  (meta=98 expected=98)
+    [PASS] V029 reappear = disappear + dt
+    [PASS] V029 has plate  (BJ-915-ZB)
+    [PASS] V029 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V029 all visible frames have poses
+    [PASS] V029 in-segment camera tag
+    [PASS] V029 out-segment camera tag
+    [PASS] V030 delta_t matches  (meta=57 expected=57)
+    [PASS] V030 reappear = disappear + dt
+    [PASS] V030 has plate  (KQ-258-YG)
+    [PASS] V030 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V030 all visible frames have poses
+    [PASS] V030 in-segment camera tag
+    [PASS] V030 out-segment camera tag
+    [PASS] V031 delta_t matches  (meta=97 expected=97)
+    [PASS] V031 reappear = disappear + dt
+    [PASS] V031 has plate  (YU-521-UW)
+    [PASS] V031 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V031 all visible frames have poses
+    [PASS] V031 in-segment camera tag
+    [PASS] V031 out-segment camera tag
+    [PASS] V032 delta_t matches  (meta=77 expected=77)
+    [PASS] V032 reappear = disappear + dt
+    [PASS] V032 has plate  (MF-571-JV)
+    [PASS] V032 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V032 all visible frames have poses
+    [PASS] V032 in-segment camera tag
+    [PASS] V032 out-segment camera tag
+    [PASS] V033 delta_t matches  (meta=55 expected=55)
+    [PASS] V033 reappear = disappear + dt
+    [PASS] V033 has plate  (ZH-756-NR)
+    [PASS] V033 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V033 all visible frames have poses
+    [PASS] V033 in-segment camera tag
+    [PASS] V033 out-segment camera tag
+    [PASS] V034 delta_t matches  (meta=86 expected=86)
+    [PASS] V034 reappear = disappear + dt
+    [PASS] V034 has plate  (AP-453-SI)
+    [PASS] V034 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V034 all visible frames have poses
+    [PASS] V034 in-segment camera tag
+    [PASS] V034 out-segment camera tag
+    [PASS] V035 delta_t matches  (meta=65 expected=65)
+    [PASS] V035 reappear = disappear + dt
+    [PASS] V035 has plate  (NU-803-ST)
+    [PASS] V035 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V035 all visible frames have poses
+    [PASS] V035 in-segment camera tag
+    [PASS] V035 out-segment camera tag
+    [PASS] V036 delta_t matches  (meta=96 expected=96)
+    [PASS] V036 reappear = disappear + dt
+    [PASS] V036 has plate  (RD-407-NR)
+    [PASS] V036 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V036 all visible frames have poses
+    [PASS] V036 in-segment camera tag
+    [PASS] V036 out-segment camera tag
+    [PASS] V037 delta_t matches  (meta=60 expected=60)
+    [PASS] V037 reappear = disappear + dt
+    [PASS] V037 has plate  (RX-730-OK)
+    [PASS] V037 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V037 all visible frames have poses
+    [PASS] V037 in-segment camera tag
+    [PASS] V037 out-segment camera tag
+    [PASS] V038 delta_t matches  (meta=65 expected=65)
+    [PASS] V038 reappear = disappear + dt
+    [PASS] V038 has plate  (ML-318-NU)
+    [PASS] V038 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V038 all visible frames have poses
+    [PASS] V038 in-segment camera tag
+    [PASS] V038 out-segment camera tag
+    [PASS] V039 delta_t matches  (meta=73 expected=73)
+    [PASS] V039 reappear = disappear + dt
+    [PASS] V039 has plate  (VT-788-IU)
+    [PASS] V039 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V039 all visible frames have poses
+    [PASS] V039 in-segment camera tag
+    [PASS] V039 out-segment camera tag
+    [PASS] V040 delta_t matches  (meta=64 expected=64)
+    [PASS] V040 reappear = disappear + dt
+    [PASS] V040 has plate  (LX-689-FS)
+    [PASS] V040 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V040 all visible frames have poses
+    [PASS] V040 in-segment camera tag
+    [PASS] V040 out-segment camera tag
+    [PASS] V041 delta_t matches  (meta=58 expected=58)
+    [PASS] V041 reappear = disappear + dt
+    [PASS] V041 has plate  (UC-535-FU)
+    [PASS] V041 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V041 all visible frames have poses
+    [PASS] V041 in-segment camera tag
+    [PASS] V041 out-segment camera tag
+    [PASS] V042 delta_t matches  (meta=72 expected=72)
+    [PASS] V042 reappear = disappear + dt
+    [PASS] V042 has plate  (MN-672-PY)
+    [PASS] V042 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V042 all visible frames have poses
+    [PASS] V042 in-segment camera tag
+    [PASS] V042 out-segment camera tag
+    [PASS] V043 delta_t matches  (meta=61 expected=61)
+    [PASS] V043 reappear = disappear + dt
+    [PASS] V043 has plate  (LE-982-MG)
+    [PASS] V043 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V043 all visible frames have poses
+    [PASS] V043 in-segment camera tag
+    [PASS] V043 out-segment camera tag
+    [PASS] V044 delta_t matches  (meta=64 expected=64)
+    [PASS] V044 reappear = disappear + dt
+    [PASS] V044 has plate  (HC-392-GI)
+    [PASS] V044 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V044 all visible frames have poses
+    [PASS] V044 in-segment camera tag
+    [PASS] V044 out-segment camera tag
+    [PASS] V045 delta_t matches  (meta=55 expected=55)
+    [PASS] V045 reappear = disappear + dt
+    [PASS] V045 has plate  (KI-577-KF)
+    [PASS] V045 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V045 all visible frames have poses
+    [PASS] V045 in-segment camera tag
+    [PASS] V045 out-segment camera tag
+    [PASS] V046 delta_t matches  (meta=60 expected=60)
+    [PASS] V046 reappear = disappear + dt
+    [PASS] V046 has plate  (OM-460-HK)
+    [PASS] V046 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V046 all visible frames have poses
+    [PASS] V046 in-segment camera tag
+    [PASS] V046 out-segment camera tag
+    [PASS] V047 delta_t matches  (meta=274 expected=274)
+    [PASS] V047 reappear = disappear + dt
+    [PASS] V047 has plate  (FL-129-KR)
+    [PASS] V047 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V047 all visible frames have poses
+    [PASS] V047 in-segment camera tag
+    [PASS] V047 out-segment camera tag
+    [PASS] V048 delta_t matches  (meta=103 expected=103)
+    [PASS] V048 reappear = disappear + dt
+    [PASS] V048 has plate  (AK-677-RC)
+    [PASS] V048 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V048 all visible frames have poses
+    [PASS] V048 in-segment camera tag
+    [PASS] V048 out-segment camera tag
+    [PASS] V049 delta_t matches  (meta=106 expected=106)
+    [PASS] V049 reappear = disappear + dt
+    [PASS] V049 has plate  (LI-488-HY)
+    [PASS] V049 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V049 all visible frames have poses
+    [PASS] V049 in-segment camera tag
+    [PASS] V049 out-segment camera tag
+    [PASS] V050 delta_t matches  (meta=94 expected=94)
+    [PASS] V050 reappear = disappear + dt
+    [PASS] V050 has plate  (FB-767-BA)
+    [PASS] V050 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V050 all visible frames have poses
+    [PASS] V050 in-segment camera tag
+    [PASS] V050 out-segment camera tag
+    [PASS] V051 delta_t matches  (meta=63 expected=63)
+    [PASS] V051 reappear = disappear + dt
+    [PASS] V051 has plate  (CY-576-ST)
+    [PASS] V051 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V051 all visible frames have poses
+    [PASS] V051 in-segment camera tag
+    [PASS] V051 out-segment camera tag
+    [PASS] V052 delta_t matches  (meta=100 expected=100)
+    [PASS] V052 reappear = disappear + dt
+    [PASS] V052 has plate  (ZC-126-YO)
+    [PASS] V052 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V052 all visible frames have poses
+    [PASS] V052 in-segment camera tag
+    [PASS] V052 out-segment camera tag
+    [PASS] V053 delta_t matches  (meta=104 expected=104)
+    [PASS] V053 reappear = disappear + dt
+    [PASS] V053 has plate  (GS-408-WP)
+    [PASS] V053 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V053 all visible frames have poses
+    [PASS] V053 in-segment camera tag
+    [PASS] V053 out-segment camera tag
+    [PASS] V054 delta_t matches  (meta=217 expected=217)
+    [PASS] V054 reappear = disappear + dt
+    [PASS] V054 has plate  (JN-449-AK)
+    [PASS] V054 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V054 all visible frames have poses
+    [PASS] V054 in-segment camera tag
+    [PASS] V054 out-segment camera tag
+    [PASS] V055 delta_t matches  (meta=208 expected=208)
+    [PASS] V055 reappear = disappear + dt
+    [PASS] V055 has plate  (DE-634-ZH)
+    [PASS] V055 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V055 all visible frames have poses
+    [PASS] V055 in-segment camera tag
+    [PASS] V055 out-segment camera tag
+    [PASS] V056 delta_t matches  (meta=82 expected=82)
+    [PASS] V056 reappear = disappear + dt
+    [PASS] V056 has plate  (VC-561-GM)
+    [PASS] V056 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V056 all visible frames have poses
+    [PASS] V056 in-segment camera tag
+    [PASS] V056 out-segment camera tag
+    [PASS] V057 delta_t matches  (meta=87 expected=87)
+    [PASS] V057 reappear = disappear + dt
+    [PASS] V057 has plate  (UI-710-SH)
+    [PASS] V057 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V057 all visible frames have poses
+    [PASS] V057 in-segment camera tag
+    [PASS] V057 out-segment camera tag
+    [PASS] V058 delta_t matches  (meta=64 expected=64)
+    [PASS] V058 reappear = disappear + dt
+    [PASS] V058 has plate  (TR-761-SL)
+    [PASS] V058 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V058 all visible frames have poses
+    [PASS] V058 in-segment camera tag
+    [PASS] V058 out-segment camera tag
+    [PASS] V059 delta_t matches  (meta=83 expected=83)
+    [PASS] V059 reappear = disappear + dt
+    [PASS] V059 has plate  (JO-452-LT)
+    [PASS] V059 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V059 all visible frames have poses
+    [PASS] V059 in-segment camera tag
+    [PASS] V059 out-segment camera tag
+    [PASS] V060 delta_t matches  (meta=63 expected=63)
+    [PASS] V060 reappear = disappear + dt
+    [PASS] V060 has plate  (FD-648-YR)
+    [PASS] V060 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V060 all visible frames have poses
+    [PASS] V060 in-segment camera tag
+    [PASS] V060 out-segment camera tag
+    [PASS] V061 delta_t matches  (meta=96 expected=96)
+    [PASS] V061 reappear = disappear + dt
+    [PASS] V061 has plate  (PZ-952-FF)
+    [PASS] V061 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V061 all visible frames have poses
+    [PASS] V061 in-segment camera tag
+    [PASS] V061 out-segment camera tag
+    [PASS] V062 delta_t matches  (meta=73 expected=73)
+    [PASS] V062 reappear = disappear + dt
+    [PASS] V062 has plate  (OS-229-QT)
+    [PASS] V062 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V062 all visible frames have poses
+    [PASS] V062 in-segment camera tag
+    [PASS] V062 out-segment camera tag
+    [PASS] V063 delta_t matches  (meta=64 expected=64)
+    [PASS] V063 reappear = disappear + dt
+    [PASS] V063 has plate  (ZG-982-MV)
+    [PASS] V063 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V063 all visible frames have poses
+    [PASS] V063 in-segment camera tag
+    [PASS] V063 out-segment camera tag
+    [PASS] V064 delta_t matches  (meta=57 expected=57)
+    [PASS] V064 reappear = disappear + dt
+    [PASS] V064 has plate  (OH-354-DT)
+    [PASS] V064 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V064 all visible frames have poses
+    [PASS] V064 in-segment camera tag
+    [PASS] V064 out-segment camera tag
+    [PASS] V065 delta_t matches  (meta=89 expected=89)
+    [PASS] V065 reappear = disappear + dt
+    [PASS] V065 has plate  (ZH-735-BY)
+    [PASS] V065 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V065 all visible frames have poses
+    [PASS] V065 in-segment camera tag
+    [PASS] V065 out-segment camera tag
+    [PASS] V066 delta_t matches  (meta=63 expected=63)
+    [PASS] V066 reappear = disappear + dt
+    [PASS] V066 has plate  (GO-260-AL)
+    [PASS] V066 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V066 all visible frames have poses
+    [PASS] V066 in-segment camera tag
+    [PASS] V066 out-segment camera tag
+    [PASS] V067 delta_t matches  (meta=66 expected=66)
+    [PASS] V067 reappear = disappear + dt
+    [PASS] V067 has plate  (BG-370-UQ)
+    [PASS] V067 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V067 all visible frames have poses
+    [PASS] V067 in-segment camera tag
+    [PASS] V067 out-segment camera tag
+    [PASS] V068 delta_t matches  (meta=83 expected=83)
+    [PASS] V068 reappear = disappear + dt
+    [PASS] V068 has plate  (DB-911-HT)
+    [PASS] V068 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V068 all visible frames have poses
+    [PASS] V068 in-segment camera tag
+    [PASS] V068 out-segment camera tag
+    [PASS] V069 delta_t matches  (meta=88 expected=88)
+    [PASS] V069 reappear = disappear + dt
+    [PASS] V069 has plate  (NM-182-PX)
+    [PASS] V069 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V069 all visible frames have poses
+    [PASS] V069 in-segment camera tag
+    [PASS] V069 out-segment camera tag
+    [PASS] V070 delta_t matches  (meta=148 expected=148)
+    [PASS] V070 reappear = disappear + dt
+    [PASS] V070 has plate  (OY-883-RH)
+    [PASS] V070 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V070 all visible frames have poses
+    [PASS] V070 in-segment camera tag
+    [PASS] V070 out-segment camera tag
+    [PASS] V071 delta_t matches  (meta=65 expected=65)
+    [PASS] V071 reappear = disappear + dt
+    [PASS] V071 has plate  (EP-750-VZ)
+    [PASS] V071 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V071 all visible frames have poses
+    [PASS] V071 in-segment camera tag
+    [PASS] V071 out-segment camera tag
+    [PASS] V072 delta_t matches  (meta=82 expected=82)
+    [PASS] V072 reappear = disappear + dt
+    [PASS] V072 has plate  (KM-778-YV)
+    [PASS] V072 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V072 all visible frames have poses
+    [PASS] V072 in-segment camera tag
+    [PASS] V072 out-segment camera tag
+    [PASS] V073 delta_t matches  (meta=67 expected=67)
+    [PASS] V073 reappear = disappear + dt
+    [PASS] V073 has plate  (WV-101-RO)
+    [PASS] V073 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V073 all visible frames have poses
+    [PASS] V073 in-segment camera tag
+    [PASS] V073 out-segment camera tag
+    [PASS] V074 delta_t matches  (meta=212 expected=212)
+    [PASS] V074 reappear = disappear + dt
+    [PASS] V074 has plate  (TF-662-DH)
+    [PASS] V074 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V074 all visible frames have poses
+    [PASS] V074 in-segment camera tag
+    [PASS] V074 out-segment camera tag
+    [PASS] V075 delta_t matches  (meta=211 expected=211)
+    [PASS] V075 reappear = disappear + dt
+    [PASS] V075 has plate  (IA-517-CZ)
+    [PASS] V075 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V075 all visible frames have poses
+    [PASS] V075 in-segment camera tag
+    [PASS] V075 out-segment camera tag
+    [PASS] V076 delta_t matches  (meta=91 expected=91)
+    [PASS] V076 reappear = disappear + dt
+    [PASS] V076 has plate  (HS-525-VZ)
+    [PASS] V076 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V076 all visible frames have poses
+    [PASS] V076 in-segment camera tag
+    [PASS] V076 out-segment camera tag
+    [PASS] V077 delta_t matches  (meta=59 expected=59)
+    [PASS] V077 reappear = disappear + dt
+    [PASS] V077 has plate  (WW-382-UW)
+    [PASS] V077 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V077 all visible frames have poses
+    [PASS] V077 in-segment camera tag
+    [PASS] V077 out-segment camera tag
+    [PASS] V078 delta_t matches  (meta=70 expected=70)
+    [PASS] V078 reappear = disappear + dt
+    [PASS] V078 has plate  (VP-775-MD)
+    [PASS] V078 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V078 all visible frames have poses
+    [PASS] V078 in-segment camera tag
+    [PASS] V078 out-segment camera tag
+    [PASS] V079 delta_t matches  (meta=63 expected=63)
+    [PASS] V079 reappear = disappear + dt
+    [PASS] V079 has plate  (WZ-344-OG)
+    [PASS] V079 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V079 all visible frames have poses
+    [PASS] V079 in-segment camera tag
+    [PASS] V079 out-segment camera tag
+    [PASS] V080 delta_t matches  (meta=81 expected=81)
+    [PASS] V080 reappear = disappear + dt
+    [PASS] V080 has plate  (ZU-767-ZM)
+    [PASS] V080 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V080 all visible frames have poses
+    [PASS] V080 in-segment camera tag
+    [PASS] V080 out-segment camera tag
+    [PASS] V081 delta_t matches  (meta=85 expected=85)
+    [PASS] V081 reappear = disappear + dt
+    [PASS] V081 has plate  (LN-567-AD)
+    [PASS] V081 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V081 all visible frames have poses
+    [PASS] V081 in-segment camera tag
+    [PASS] V081 out-segment camera tag
+    [PASS] V082 delta_t matches  (meta=73 expected=73)
+    [PASS] V082 reappear = disappear + dt
+    [PASS] V082 has plate  (QW-972-RN)
+    [PASS] V082 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V082 all visible frames have poses
+    [PASS] V082 in-segment camera tag
+    [PASS] V082 out-segment camera tag
+    [PASS] V083 delta_t matches  (meta=63 expected=63)
+    [PASS] V083 reappear = disappear + dt
+    [PASS] V083 has plate  (BQ-394-ZT)
+    [PASS] V083 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V083 all visible frames have poses
+    [PASS] V083 in-segment camera tag
+    [PASS] V083 out-segment camera tag
+    [PASS] V084 delta_t matches  (meta=71 expected=71)
+    [PASS] V084 reappear = disappear + dt
+    [PASS] V084 has plate  (SX-147-IB)
+    [PASS] V084 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V084 all visible frames have poses
+    [PASS] V084 in-segment camera tag
+    [PASS] V084 out-segment camera tag
+    [PASS] V085 delta_t matches  (meta=88 expected=88)
+    [PASS] V085 reappear = disappear + dt
+    [PASS] V085 has plate  (EE-724-WQ)
+    [PASS] V085 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V085 all visible frames have poses
+    [PASS] V085 in-segment camera tag
+    [PASS] V085 out-segment camera tag
+    [PASS] V086 delta_t matches  (meta=54 expected=54)
+    [PASS] V086 reappear = disappear + dt
+    [PASS] V086 has plate  (GA-923-MH)
+    [PASS] V086 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V086 all visible frames have poses
+    [PASS] V086 in-segment camera tag
+    [PASS] V086 out-segment camera tag
+    [PASS] V087 delta_t matches  (meta=79 expected=79)
+    [PASS] V087 reappear = disappear + dt
+    [PASS] V087 has plate  (RL-409-FK)
+    [PASS] V087 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V087 all visible frames have poses
+    [PASS] V087 in-segment camera tag
+    [PASS] V087 out-segment camera tag
+    [PASS] V088 delta_t matches  (meta=59 expected=59)
+    [PASS] V088 reappear = disappear + dt
+    [PASS] V088 has plate  (HZ-774-KA)
+    [PASS] V088 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V088 all visible frames have poses
+    [PASS] V088 in-segment camera tag
+    [PASS] V088 out-segment camera tag
+    [PASS] V089 delta_t matches  (meta=65 expected=65)
+    [PASS] V089 reappear = disappear + dt
+    [PASS] V089 has plate  (UP-460-FE)
+    [PASS] V089 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V089 all visible frames have poses
+    [PASS] V089 in-segment camera tag
+    [PASS] V089 out-segment camera tag
+    [PASS] V090 delta_t matches  (meta=83 expected=83)
+    [PASS] V090 reappear = disappear + dt
+    [PASS] V090 has plate  (CQ-140-IL)
+    [PASS] V090 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V090 all visible frames have poses
+    [PASS] V090 in-segment camera tag
+    [PASS] V090 out-segment camera tag
+    [PASS] V091 delta_t matches  (meta=59 expected=59)
+    [PASS] V091 reappear = disappear + dt
+    [PASS] V091 has plate  (FU-997-ZN)
+    [PASS] V091 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V091 all visible frames have poses
+    [PASS] V091 in-segment camera tag
+    [PASS] V091 out-segment camera tag
+    [PASS] V092 delta_t matches  (meta=64 expected=64)
+    [PASS] V092 reappear = disappear + dt
+    [PASS] V092 has plate  (HW-923-CZ)
+    [PASS] V092 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V092 all visible frames have poses
+    [PASS] V092 in-segment camera tag
+    [PASS] V092 out-segment camera tag
+    [PASS] V093 delta_t matches  (meta=65 expected=65)
+    [PASS] V093 reappear = disappear + dt
+    [PASS] V093 has plate  (ZU-474-CK)
+    [PASS] V093 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V093 all visible frames have poses
+    [PASS] V093 in-segment camera tag
+    [PASS] V093 out-segment camera tag
+    [PASS] V094 delta_t matches  (meta=81 expected=81)
+    [PASS] V094 reappear = disappear + dt
+    [PASS] V094 has plate  (JQ-480-CG)
+    [PASS] V094 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V094 all visible frames have poses
+    [PASS] V094 in-segment camera tag
+    [PASS] V094 out-segment camera tag
+    [PASS] V095 delta_t matches  (meta=54 expected=54)
+    [PASS] V095 reappear = disappear + dt
+    [PASS] V095 has plate  (BV-817-HK)
+    [PASS] V095 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V095 all visible frames have poses
+    [PASS] V095 in-segment camera tag
+    [PASS] V095 out-segment camera tag
+    [PASS] V096 delta_t matches  (meta=57 expected=57)
+    [PASS] V096 reappear = disappear + dt
+    [PASS] V096 has plate  (XD-564-JY)
+    [PASS] V096 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V096 all visible frames have poses
+    [PASS] V096 in-segment camera tag
+    [PASS] V096 out-segment camera tag
+    [PASS] V097 delta_t matches  (meta=79 expected=79)
+    [PASS] V097 reappear = disappear + dt
+    [PASS] V097 has plate  (MK-386-AJ)
+    [PASS] V097 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V097 all visible frames have poses
+    [PASS] V097 in-segment camera tag
+    [PASS] V097 out-segment camera tag
+    [PASS] V098 delta_t matches  (meta=99 expected=99)
+    [PASS] V098 reappear = disappear + dt
+    [PASS] V098 has plate  (OZ-467-BH)
+    [PASS] V098 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V098 all visible frames have poses
+    [PASS] V098 in-segment camera tag
+    [PASS] V098 out-segment camera tag
+    [PASS] V099 delta_t matches  (meta=89 expected=89)
+    [PASS] V099 reappear = disappear + dt
+    [PASS] V099 has plate  (PA-905-IZ)
+    [PASS] V099 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V099 all visible frames have poses
+    [PASS] V099 in-segment camera tag
+    [PASS] V099 out-segment camera tag
+    [PASS] V100 delta_t matches  (meta=60 expected=60)
+    [PASS] V100 reappear = disappear + dt
+    [PASS] V100 has plate  (GU-907-XA)
+    [PASS] V100 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V100 all visible frames have poses
+    [PASS] V100 in-segment camera tag
+    [PASS] V100 out-segment camera tag
+    [PASS] V101 delta_t matches  (meta=193 expected=193)
+    [PASS] V101 reappear = disappear + dt
+    [PASS] V101 has plate  (AA-908-UP)
+    [PASS] V101 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V101 all visible frames have poses
+    [PASS] V101 in-segment camera tag
+    [PASS] V101 out-segment camera tag
+    [PASS] V102 delta_t matches  (meta=61 expected=61)
+    [PASS] V102 reappear = disappear + dt
+    [PASS] V102 has plate  (BL-470-NC)
+    [PASS] V102 out_camera matches exit direction  (out_W vs out_W)
+    [PASS] V102 all visible frames have poses
+    [PASS] V102 in-segment camera tag
+    [PASS] V102 out-segment camera tag
+    [PASS] V103 delta_t matches  (meta=63 expected=63)
+    [PASS] V103 reappear = disappear + dt
+    [PASS] V103 has plate  (HQ-131-BM)
+    [PASS] V103 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V103 all visible frames have poses
+    [PASS] V103 in-segment camera tag
+    [PASS] V103 out-segment camera tag
+    [PASS] V104 delta_t matches  (meta=83 expected=83)
+    [PASS] V104 reappear = disappear + dt
+    [PASS] V104 has plate  (ID-229-HQ)
+    [PASS] V104 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V104 all visible frames have poses
+    [PASS] V104 in-segment camera tag
+    [PASS] V104 out-segment camera tag
+    [PASS] V105 delta_t matches  (meta=76 expected=76)
+    [PASS] V105 reappear = disappear + dt
+    [PASS] V105 has plate  (CS-973-RW)
+    [PASS] V105 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V105 all visible frames have poses
+    [PASS] V105 in-segment camera tag
+    [PASS] V105 out-segment camera tag
+    [PASS] V106 delta_t matches  (meta=99 expected=99)
+    [PASS] V106 reappear = disappear + dt
+    [PASS] V106 has plate  (KC-537-IG)
+    [PASS] V106 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V106 all visible frames have poses
+    [PASS] V106 in-segment camera tag
+    [PASS] V106 out-segment camera tag
+    [PASS] V107 delta_t matches  (meta=58 expected=58)
+    [PASS] V107 reappear = disappear + dt
+    [PASS] V107 has plate  (CT-931-DB)
+    [PASS] V107 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V107 all visible frames have poses
+    [PASS] V107 in-segment camera tag
+    [PASS] V107 out-segment camera tag
+    [PASS] V108 delta_t matches  (meta=58 expected=58)
+    [PASS] V108 reappear = disappear + dt
+    [PASS] V108 has plate  (WS-394-PJ)
+    [PASS] V108 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V108 all visible frames have poses
+    [PASS] V108 in-segment camera tag
+    [PASS] V108 out-segment camera tag
+    [PASS] V109 delta_t matches  (meta=64 expected=64)
+    [PASS] V109 reappear = disappear + dt
+    [PASS] V109 has plate  (JT-687-FL)
+    [PASS] V109 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V109 all visible frames have poses
+    [PASS] V109 in-segment camera tag
+    [PASS] V109 out-segment camera tag
+    [PASS] V110 delta_t matches  (meta=95 expected=95)
+    [PASS] V110 reappear = disappear + dt
+    [PASS] V110 has plate  (SI-447-JE)
+    [PASS] V110 out_camera matches exit direction  (out_S vs out_S)
+    [PASS] V110 all visible frames have poses
+    [PASS] V110 in-segment camera tag
+    [PASS] V110 out-segment camera tag
+    [PASS] V111 delta_t matches  (meta=56 expected=56)
+    [PASS] V111 reappear = disappear + dt
+    [PASS] V111 has plate  (CN-485-KI)
+    [PASS] V111 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V111 all visible frames have poses
+    [PASS] V111 in-segment camera tag
+    [PASS] V111 out-segment camera tag
+    [PASS] V112 delta_t matches  (meta=85 expected=85)
+    [PASS] V112 reappear = disappear + dt
+    [PASS] V112 has plate  (ET-150-RH)
+    [PASS] V112 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V112 all visible frames have poses
+    [PASS] V112 in-segment camera tag
+    [PASS] V112 out-segment camera tag
+    [PASS] V113 delta_t matches  (meta=68 expected=68)
+    [PASS] V113 reappear = disappear + dt
+    [PASS] V113 has plate  (IC-794-RM)
+    [PASS] V113 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V113 all visible frames have poses
+    [PASS] V113 in-segment camera tag
+    [PASS] V113 out-segment camera tag
+    [PASS] V114 delta_t matches  (meta=96 expected=96)
+    [PASS] V114 reappear = disappear + dt
+    [PASS] V114 has plate  (YT-882-GI)
+    [PASS] V114 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V114 all visible frames have poses
+    [PASS] V114 in-segment camera tag
+    [PASS] V114 out-segment camera tag
+    [PASS] V115 delta_t matches  (meta=100 expected=100)
+    [PASS] V115 reappear = disappear + dt
+    [PASS] V115 has plate  (NV-925-JK)
+    [PASS] V115 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V115 all visible frames have poses
+    [PASS] V115 in-segment camera tag
+    [PASS] V115 out-segment camera tag
+    [PASS] V116 delta_t matches  (meta=74 expected=74)
+    [PASS] V116 reappear = disappear + dt
+    [PASS] V116 has plate  (OS-527-HK)
+    [PASS] V116 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V116 all visible frames have poses
+    [PASS] V116 in-segment camera tag
+    [PASS] V116 out-segment camera tag
+    [PASS] V117 delta_t matches  (meta=81 expected=81)
+    [PASS] V117 reappear = disappear + dt
+    [PASS] V117 has plate  (CV-349-LK)
+    [PASS] V117 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V117 all visible frames have poses
+    [PASS] V117 in-segment camera tag
+    [PASS] V117 out-segment camera tag
+    [PASS] V118 delta_t matches  (meta=66 expected=66)
+    [PASS] V118 reappear = disappear + dt
+    [PASS] V118 has plate  (BQ-643-NX)
+    [PASS] V118 out_camera matches exit direction  (out_E vs out_E)
+    [PASS] V118 all visible frames have poses
+    [PASS] V118 in-segment camera tag
+    [PASS] V118 out-segment camera tag
+    [PASS] V119 delta_t matches  (meta=72 expected=72)
+    [PASS] V119 reappear = disappear + dt
+    [PASS] V119 has plate  (DF-716-DT)
+    [PASS] V119 out_camera matches exit direction  (out_N vs out_N)
+    [PASS] V119 all visible frames have poses
+    [PASS] V119 in-segment camera tag
+    [PASS] V119 out-segment camera tag
+  ============================================================
+  OVERALL: FAILURES PRESENT
+  ============================================================
+Command failed (code 1) after 0.8s: /usr/bin/python3 /kaggle/working/3D_Intersection/scripts/validate_run.py --out /kaggle/working/run1
+  last output:
+      [PASS] V118 has plate  (BQ-643-NX)
+      [PASS] V118 out_camera matches exit direction  (out_E vs out_E)
+      [PASS] V118 all visible frames have poses
+      [PASS] V118 in-segment camera tag
+      [PASS] V118 out-segment camera tag
+      [PASS] V119 delta_t matches  (meta=72 expected=72)
+      [PASS] V119 reappear = disappear + dt
+      [PASS] V119 has plate  (DF-716-DT)
+      [PASS] V119 out_camera matches exit direction  (out_N vs out_N)
+      [PASS] V119 all visible frames have poses
+      [PASS] V119 in-segment camera tag
+      [PASS] V119 out-segment camera tag
+    ============================================================
+    OVERALL: FAILURES PRESENT
+    ============================================================
+============================================================
+run_all.sh log â€” ended 2026-07-05T06:05:57+00:00 (pipeline exit 1)
