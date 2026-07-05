@@ -60,6 +60,14 @@ DEFAULT_APPROACH_FLOW_VPH = 400.0
 # default turning split {turn: fraction}. Lane-turn restrictions still apply.
 DEFAULT_TURN_SPLIT = {"left": 0.15, "straight": 0.70, "right": 0.15}
 
+# Margin applied when scaling the Poisson arrival horizon to the vehicle count
+# (see schedule_departures_poisson). The natural horizon is
+#   n_vehicles / total_rate_per_s
+# and the ×1.5 covers Poisson variance so the drawn arrivals >= vehicle count
+# with very high probability — making the consecutive-frame "leftover cramming"
+# path a rare safety net instead of the norm.
+POISSON_HORIZON_MARGIN = 1.5
+
 
 class DemandModel:
     """Per-approach Poisson demand with a turning-movement split.
@@ -351,7 +359,27 @@ def schedule_departures_poisson(vehicles: list, duration_frames: int,
     (the scenario duration auto-extends in ``generate`` to fit every vehicle).
     """
     fps_f = float(fps)
-    horizon_s = duration_frames / fps_f
+    floor_horizon_s = duration_frames / fps_f
+
+    # Scale the arrival horizon to the vehicle count so every vehicle gets a
+    # real Poisson arrival at the demand rate, spread over the natural window.
+    # The previous behaviour pinned the horizon to `duration_frames/fps` (the
+    # --seconds floor): at default demand (400 veh/h/approach ~= 0.444 veh/s
+    # total) a 12s window only emits ~5 Poisson arrivals, so the other ~85 of
+    # 90 vehicles fell into the "leftover cramming" path (consecutive frames)
+    # -- producing a massive queue, signal saturation, and dense scenes that
+    # render pathologically slowly. See memory 39 / the n=90 Kaggle hang.
+    #
+    # natural_horizon = n_vehicles / total_rate_per_s  (the time demand would
+    # take to emit that many arrivals); ×POISSON_HORIZON_MARGIN covers Poisson
+    # variance. The passed `duration_frames` becomes a true floor only.
+    total_rate_ps = sum(demand.flow_vph(a) for a in G.Direction) / 3600.0
+    n_veh = len(vehicles)
+    if total_rate_ps > 0 and n_veh > 0:
+        natural_horizon_s = (n_veh / total_rate_ps) * POISSON_HORIZON_MARGIN
+        horizon_s = max(floor_horizon_s, natural_horizon_s)
+    else:
+        horizon_s = floor_horizon_s
 
     # Generate per-approach arrival sequences from independent Poisson clocks.
     arrivals_by_approach: dict = {}
@@ -869,6 +897,13 @@ def main():
                          f"({DEFAULT_APPROACH_FLOW_VPH:g} veh/h/approach) is used. "
                          "Pass 'none' to disable demand and use the legacy "
                          "uniform-random scheduler.")
+    ap.add_argument("--demand-scale", type=float, default=1.0,
+                    help="convenience density multiplier applied to the default "
+                         "demand model when --demand is not given (default: "
+                         "%(default)s). E.g. --demand-scale 3 makes ~1200 "
+                         "veh/h/approach — denser on-screen traffic without "
+                         "authoring a JSON. Ignored when --demand is a path or "
+                         "'none'.")
     ap.add_argument("--out", type=str, default=os.path.join(HERE, "..", "output", "run1"))
     args = ap.parse_args()
     if args.signal:
@@ -883,7 +918,18 @@ def main():
     elif args.demand:
         demand = DemandModel.from_file(args.demand)
     else:
-        demand = DemandModel.default()
+        # --demand-scale multiplies the default per-approach flow for a one-flag
+        # density knob without authoring a JSON. Scale of 1.0 leaves the default
+        # untouched.
+        scale = max(0.0, args.demand_scale)
+        if scale == 1.0:
+            demand = DemandModel.default()
+        elif scale == 0.0:
+            demand = None  # treat 0 as "no demand" (legacy uniform scheduler)
+        else:
+            demand = DemandModel(
+                flows={d: DEFAULT_APPROACH_FLOW_VPH * scale for d in G.Direction},
+                turn_split=DEFAULT_TURN_SPLIT)
     generate(args.seed, args.num_vehicles, args.seconds, args.out, fps=args.fps,
              signal_plan=signal_plan, demand=demand,
              signal_mode=args.signal_mode)

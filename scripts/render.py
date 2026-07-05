@@ -311,49 +311,69 @@ def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float,
 # render.py is invoked directly without --samples).
 RENDER_SAMPLES = None
 
-# Per-frame progress: emit a progress line every N frames during the Cycles
-# animation render (the single longest operation). Without this, headless
-# Blender produces zero stdout during the render, which — combined with a
-# block-buffered stdout under non-TTY — is the root cause of the multi-hour
-# silent-hang scenario. The handler prints to stdout (flush=True) so the
-# parent process's `for line in proc.stdout` gets a regular heartbeat and
-# the watchdog knows we're alive.
-RENDER_PROGRESS_EVERY = 10  # frames
+# Per-frame progress: emit a progress line during the Cycles animation render
+# (the single longest operation). Without this, headless Blender produces zero
+# stdout during the render, which — combined with a block-buffered stdout under
+# non-TTY — is the root cause of the multi-hour silent-hang scenario. The
+# handler prints to stdout (flush=True) so the parent process's
+# `for line in proc.stdout` gets a regular heartbeat and the watchdog knows we
+# are alive.
+#
+# CRITICAL: the handler registers on `render_write` (fires after each frame's
+# PNG is written to disk), NOT `frame_change_post`. `frame_change_post` does
+# NOT fire reliably per-frame during `bpy.ops.render.render(animation=True)` in
+# headless Blender — it only fires for UI/depsgraph frame changes. Using it
+# produced exactly one line (`frame 0`) then silence for the entire 13,000+
+# frame render, which the watchdog killed as a false-positive hang at 600s.
+# `render_write` is guaranteed to fire once per written frame during animation
+# render.
+RENDER_PROGRESS_EVERY = 10  # print every Nth frame
+HEARTBEAT_SECONDS = 30     # also print if >= this long since last print,
+                           # so a slow frame still emits before the watchdog
 
 
 def _install_render_progress_handler(scene):
-    """Register a bpy.app.handlers callback that prints per-frame progress.
+    """Register a `render_write` callback that prints per-frame progress.
 
     Called once before bpy.ops.render.render(animation=True) in render_one.
     The handler is unregistered after the render to avoid leaking across
     multiple camera renders in a single Blender process.
 
-    Headless Blender emits nothing to stdout during Cycles animation render
-    by default — this is the single biggest debug-visibility gap in the
-    pipeline (a 25,000-frame render at 0.006 s/frame = 150s of silence).
-    The handler emits `frame N/M (elapsed Xs)` every RENDER_PROGRESS_EVERY
-    frames, giving the watchdog a heartbeat and the user a progress bar.
+    Fires on `render_write` (after each frame's PNG hits disk) — the canonical
+    per-frame signal during animation render. Prints `frame N/M (elapsed Xs)`
+    every RENDER_PROGRESS_EVERY frames, OR if HEARTBEAT_SECONDS or more have
+    elapsed since the last print (wall-clock fallback so a slow-but-progressing
+    frame can't silently trip the 600s watchdog). A genuinely stalled render
+    writes nothing → the watchdog correctly kills it.
     """
     import bpy as _bpy
     try:
-        import bpy as _bpy
-        # Clear any prior install (idempotent across multiple render_one
-        # calls in the same Blender process).
-        _bpy.app.handlers.frame_change_post.clear()
+        _bpy.app.handlers.render_write.clear()
     except Exception:
         pass
 
-    frame_start = _bpy.context.scene.frame_start
     frame_end = _bpy.context.scene.frame_end
     t_start = time.time()
+    last_print_t = [t_start]
+    last_printed_frame = [-1]
 
-    def _on_frame_change(scene, depsgraph):
+    def _on_render_write(scene, *args):
         f = scene.frame_current
-        if f % RENDER_PROGRESS_EVERY == 0:
-            elapsed = time.time() - t_start
+        now = time.time()
+        elapsed = now - t_start
+        since_last = now - last_print_t[0]
+        # Print on the Nth-frame cadence, or the wall-clock heartbeat,
+        # or always on the first/last frame. Avoid duplicate prints for the
+        # same frame (render_write shouldn't double-fire, but be safe).
+        due = (f % RENDER_PROGRESS_EVERY == 0
+               or elapsed >= last_print_t[0] - t_start + HEARTBEAT_SECONDS
+               or f == frame_end)
+        if due and f != last_printed_frame[0]:
             print(f"  frame {f}/{frame_end} ({elapsed:.1f}s)", flush=True)
+            last_print_t[0] = now
+            last_printed_frame[0] = f
 
-    _bpy.app.handlers.frame_change_post.append(_on_frame_change)
+    _bpy.app.handlers.render_write.append(_on_render_write)
 
 
 def render_one(scenario: dict, camera_tag: str, out_dir: str):
@@ -414,7 +434,7 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
         # via run_pipeline.py, but render.py:main loops all cameras when
         # invoked directly).
         try:
-            bpy.app.handlers.frame_change_post.clear()
+            bpy.app.handlers.render_write.clear()
         except Exception:
             pass
 

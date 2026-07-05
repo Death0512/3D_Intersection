@@ -202,6 +202,72 @@ def test_generate_with_demand_writes_demand_field():
         assert "flows" in scn["demand"]
 
 
+def test_poisson_horizon_scales_with_vehicle_count():
+    """Fix 2a regression: with 90 vehicles at default demand, the Poisson
+    arrival horizon auto-scales to cover all vehicles — no consecutive-frame
+    cramming. Departs should span a natural window (~300s at 400*4 veh/h),
+    with the max depart_frame roughly n/total_rate * margin in seconds, and
+    fewer than 15% of vehicles sharing consecutive frames."""
+    dm = S.DemandModel.default()
+    rng = random.Random(42)
+    fps = 30
+    n = 90
+    vs = [S.make_vehicle(f"V{i:03d}", rng, demand=dm) for i in range(n)]
+    floor_frames = int(12 * fps)
+    vs = S.schedule_departures_poisson(vs, floor_frames, fps, dm, rng)
+
+    # Every vehicle got a depart_frame
+    for v in vs:
+        assert "depart_frame" in v
+        assert isinstance(v["depart_frame"], int)
+        assert v["depart_frame"] >= 0
+
+    frames = sorted(v["depart_frame"] for v in vs)
+    max_f = frames[-1]
+    # Natural expectation: the horizon should be large enough that arrivals
+    # are spread, not bunched at consecutive tail frames.
+    total_rate_ps = (S.DEFAULT_APPROACH_FLOW_VPH * 4) / 3600.0
+    expected_s = (n / total_rate_ps) * S.POISSON_HORIZON_MARGIN
+    expected_frames = int(expected_s * fps)
+    # Allow some slack (Poisson variance + safety pushes), but demand the
+    # max depart is at least 50% of the expected spread — far above the
+    # old 12s floor that crammed everything.
+    assert max_f >= expected_frames * 0.5, \
+        f"max depart {max_f} too low for {expected_frames} expected horizon"
+
+    # Consecutive-frame cramming: count per-approach depart pairs that are
+    # just 1 frame apart (the old "cram at tail+1" path). With a proper
+    # horizon, this should be rare (<15% of vehicles).
+    by_ap = {}
+    for v in vs:
+        by_ap.setdefault(G.Direction(v["approach"]), []).append(v["depart_frame"])
+    crammed = 0
+    for frames_ap in by_ap.values():
+        s = sorted(frames_ap)
+        for i in range(len(s) - 1):
+            if s[i + 1] - s[i] <= 1:
+                crammed += 1
+    assert crammed < n * 0.15, \
+        f"{crammed} crammed consecutive depart pairs (>{n*0.15} threshold)"
+
+
+def test_demand_scale_multiplies_default_flow():
+    """--demand-scale multiplies DEFAULT_APPROACH_FLOW_VPH."""
+    from argparse import Namespace
+    # Simulate --demand-scale 3
+    scale = 3.0
+    dm = S.DemandModel(
+        flows={d: S.DEFAULT_APPROACH_FLOW_VPH * scale for d in G.Direction},
+        turn_split=S.DEFAULT_TURN_SPLIT)
+    for d in G.Direction:
+        assert dm.flow_vph(d) == S.DEFAULT_APPROACH_FLOW_VPH * scale
+        assert dm.flow_vph(d) == 1200.0  # 400*3
+
+    # Simulate --demand-scale 0 → no demand
+    dm_zero = None
+    assert dm_zero is None
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0

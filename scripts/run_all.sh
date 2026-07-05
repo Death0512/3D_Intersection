@@ -30,6 +30,10 @@
 #                        flow veh/h + turning split), or 'none' for the legacy
 #                        uniform-random scheduler. Default: built-in demand
 #                        model (~400 veh/h/approach, straight-heavy split).
+#   --demand-scale F     Density multiplier on the default demand model when
+#                        --demand is not given (default: 1.0). E.g. 3 makes
+#                        ~1200 veh/h/approach -> denser on-screen traffic in a
+#                        shorter clip, no JSON file needed.
 #   --jobs N            Parallel render workers (default: auto-detect from free
 #                       VRAM, capped by --max-workers-per-gpu)
 #   --max-workers-per-gpu N
@@ -65,6 +69,7 @@ SKIP_ASSET_CHECK=0
 SIGNAL=0
 SIGNAL_MODE="fixed"
 DEMAND=""
+DEMAND_SCALE=""
 BLENDER_BIN=""
 PYTHON_BIN=""
 JOBS=0   # 0 = auto-detect from free VRAM
@@ -92,6 +97,7 @@ while [[ $# -gt 0 ]]; do
         --signal)         SIGNAL=1;           shift ;;
         --signal-mode)    SIGNAL_MODE="$2";   shift 2 ;;
         --demand)         DEMAND="$2";        shift 2 ;;
+        --demand-scale)   DEMAND_SCALE="$2";   shift 2 ;;
         --blender)        BLENDER_BIN="$2";   shift 2 ;;
         --python)         PYTHON_BIN="$2";    shift 2 ;;
         --jobs)           JOBS="$2";          shift 2 ;;
@@ -180,6 +186,8 @@ else
 fi
 if [[ -n "$DEMAND" ]]; then
     echo "  demand : $DEMAND"
+elif [[ -n "$DEMAND_SCALE" ]]; then
+    echo "  demand : default model (scale=${DEMAND_SCALE})"
 else
     echo "  demand : default model"
 fi
@@ -202,6 +210,7 @@ PIPELINE_ARGS=(
 [[ "$SIGNAL" -eq 1 ]]        && PIPELINE_ARGS+=(--signal)
 [[ "$SIGNAL" -eq 1 ]]        && PIPELINE_ARGS+=(--signal-mode "$SIGNAL_MODE")
 [[ -n "$DEMAND" ]]           && PIPELINE_ARGS+=(--demand "$DEMAND")
+[[ -n "$DEMAND_SCALE" ]]    && PIPELINE_ARGS+=(--demand-scale "$DEMAND_SCALE")
 [[ "$SILENCE_TIMEOUT" -gt 0 ]] && PIPELINE_ARGS+=(--silence-timeout "$SILENCE_TIMEOUT")
 [[ "$SAMPLES" -gt 0 ]]       && PIPELINE_ARGS+=(--samples "$SAMPLES")
 

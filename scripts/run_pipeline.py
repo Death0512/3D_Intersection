@@ -119,7 +119,8 @@ def step_assets_validate():
 
 
 def step_scenario(seed, num_vehicles, seconds, out_dir, fps=None,
-                   signal=False, signal_mode="fixed", demand=None):
+                   signal=False, signal_mode="fixed", demand=None,
+                   demand_scale=None):
     """Run scenario_gen.py. Bounded to 600s — the `_resolve_all` fixpoint is
     capped at 20 rounds, so even with 200 vehicles this stays well under 60s;
     a hang here means a non-converging signal/exit loop."""
@@ -135,6 +136,8 @@ def step_scenario(seed, num_vehicles, seconds, out_dir, fps=None,
         cmd += ["--signal-mode", str(signal_mode)]
     if demand is not None:
         cmd += ["--demand", str(demand)]
+    if demand_scale is not None:
+        cmd += ["--demand-scale", str(demand_scale)]
     run(cmd, timeout=600)
     return os.path.join(out_dir, "scenario.json")
 
@@ -629,6 +632,12 @@ def main():
                          "turning split). When omitted, the default demand "
                          "model is used. Pass 'none' to disable demand and "
                          "use the legacy uniform-random scheduler.")
+    ap.add_argument("--demand-scale", type=float, default=None,
+                    help="density multiplier on the default demand model "
+                         "(default: 1.0 when --demand is not given). E.g. "
+                         "--demand-scale 3 makes ~1200 veh/h/approach -> denser "
+                         "on-screen traffic, no JSON file needed. Ignored when "
+                         "--demand is a path or 'none'.")
     args = ap.parse_args()
 
     fps = args.fps
@@ -653,7 +662,7 @@ def main():
     print("\n[2/5] Scenario generation")
     scn = step_scenario(args.seed, args.num_vehicles, seconds, out_dir, fps=fps,
                         signal=args.signal, signal_mode=args.signal_mode,
-                        demand=args.demand)
+                        demand=args.demand, demand_scale=args.demand_scale)
 
     print("\n[3/5] Plate pre-generation")
     step_plates(scn, out_dir)
