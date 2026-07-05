@@ -264,8 +264,17 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
         if _remapped:
             print(f"  [tex] {veh['id']}: remapped {_remapped} textures to {tex_dir}")
 
-    # Assign plate + color to this vehicle's (now local) materials.
-    assign_plate_and_color(coll, veh["plate"], plates_dir, rgba=veh.get("color"))
+    # Assign plate + color to this vehicle's (now local) materials. Plate/
+    # color failures are data-quality (vehicle renders without a plate / with
+    # default color), NOT structural — so catch and warn here rather than
+    # aborting the whole vehicle. assign_plate_and_color already swallows
+    # material-assignment errors internally; this outer guard covers the
+    # render_plate() call (line 201) which isn't in that internal try/except.
+    try:
+        assign_plate_and_color(coll, veh["plate"], plates_dir, rgba=veh.get("color"))
+    except Exception as e:
+        print(f"  [{veh['id']}] [WARN] plate/color generation failed: {e} "
+              f"— vehicle will render without a plate", flush=True)
 
     approach = G.Direction(veh["approach"])
     # The motion is anchored at the env-JSON spawn point for THIS camera view:
@@ -392,18 +401,40 @@ def keyframe_motion(empty, motion: G.VehicleMotion, is_in_camera: bool,
     obj.keyframe_insert(data_path="rotation_euler", frame=start_frame)
     obj.keyframe_insert(data_path="rotation_euler", frame=end_frame)
 
-    # hide outside visible window (stepped interpolation for visibility)
-    obj.hide_render = True
-    obj.keyframe_insert(data_path="hide_render", frame=0)
-    obj.hide_render = False
-    obj.keyframe_insert(data_path="hide_render", frame=max(0, start_frame))
-
+    # hide outside visible window (stepped interpolation for visibility).
+    # Applied to the Empty AND every descendant mesh: `hide_render` is
+    # per-object in Blender and does NOT propagate parent→child, and an Empty
+    # renders nothing anyway — so keyframing only the Empty left the child
+    # meshes visible for the whole timeline, frozen at leave_pos after
+    # leave_frame (and at the spawn anchor before appear_frame). Mirroring the
+    # keyframes onto every descendant fixes both tails and restores
+    # render==metadata (compute_metadata emits frames only in
+    # [appear,disappear] ∪ [reappear,leave]). `hide_viewport` is set in
+    # parallel so the saved .blend is also correct when opened interactively.
+    vis_start = max(0, start_frame)
     hide_end = end_frame + 1
     if frame_end is not None and end_frame > frame_end:
         hide_end = frame_end + 1
-    obj.hide_render = True
-    obj.keyframe_insert(data_path="hide_render", frame=hide_end)
-    _set_step_interpolation(obj, "hide_render")
+
+    def _keyframe_visibility(o):
+        o.hide_render = True
+        o.hide_viewport = True
+        o.keyframe_insert(data_path="hide_render", frame=0)
+        o.keyframe_insert(data_path="hide_viewport", frame=0)
+        o.hide_render = False
+        o.hide_viewport = False
+        o.keyframe_insert(data_path="hide_render", frame=vis_start)
+        o.keyframe_insert(data_path="hide_viewport", frame=vis_start)
+        o.hide_render = True
+        o.hide_viewport = True
+        o.keyframe_insert(data_path="hide_render", frame=hide_end)
+        o.keyframe_insert(data_path="hide_viewport", frame=hide_end)
+        _set_step_interpolation(o, "hide_render")
+        _set_step_interpolation(o, "hide_viewport")
+
+    _keyframe_visibility(obj)
+    for child in obj.children_recursive:
+        _keyframe_visibility(child)
 
 
 def _action_fcurves(obj):
@@ -412,6 +443,11 @@ def _action_fcurves(obj):
     Blender 5.x: actions are slot-based — fcurves live in the first layer/strip
     channelbag keyed to slot 0. No legacy fallback (``Action.fcurves`` removed).
     Returns an empty list if no animation is assigned.
+
+    M14: wraps the layered-action traversal in a clearer error so a Blender
+    API change (e.g. a new sub-version renames ``channelbag`` or reorders
+    ``layers``/``slots``) surfaces a diagnosable message instead of a bare
+    ``AttributeError: 'NoneType' object has no attribute 'fcurves'`` mid-render.
     """
     ad = obj.animation_data
     if not ad or not ad.action:
@@ -419,9 +455,18 @@ def _action_fcurves(obj):
     a = ad.action
     if not (a.layers and a.slots):
         return []
-    strip = a.layers[0].strips[0]
-    cb = strip.channelbag(a.slots[0])
-    return list(cb.fcurves) if cb else []
+    try:
+        strip = a.layers[0].strips[0]
+        cb = strip.channelbag(a.slots[0])
+        return list(cb.fcurves) if cb else []
+    except Exception as e:
+        name = getattr(obj, "name", "<unknown>")
+        raise RuntimeError(
+            f"[scene] keyframe API error for object {name!r} "
+            f"(action={getattr(a, 'name', '?')!r}): {type(e).__name__}: {e}. "
+            f"This usually means the Blender 5.x slotted-action API changed — "
+            f"check action.layers[0].strips[0].channelbag(slots[0]).fcurves."
+        ) from e
 
 
 def _fcurves_for(obj, data_path):
@@ -506,6 +551,14 @@ def place_camera(approach: G.Direction, is_in: bool, road_meta: dict,
 CYCLES_SAMPLES = 48
 
 
+# Track whether configure_gpu has already refreshed devices in this Blender
+# process. refresh_devices() is an expensive (potentially multi-second) NVIDIA
+# driver round-trip; render_one calls configure_gpu twice (once in build_shot
+# and once after the .blend reload). The second call's refresh is redundant —
+# the device list doesn't change within a process — so skip it.
+_GPU_CONFIGURED = False
+
+
 def configure_gpu():
     """Enable Cycles GPU rendering: OPTIX if available, else CUDA.
 
@@ -516,14 +569,27 @@ def configure_gpu():
     when NEITHER OPTIX nor CUDA devices exist.
 
     Must be called after the Cycles addon is available (it is, by default).
+    Idempotent: the second call in a Blender process reuses the device list
+    rather than re-querying the driver (the `prefs.refresh_devices()` driver
+    probe is the most likely place for a multi-process GPU init deadlock on
+    headless containers, so we want it run once per process, not twice).
     """
     import bpy
+    global _GPU_CONFIGURED
     try:
         prefs = bpy.context.preferences.addons["cycles"].preferences
     except KeyError:
         raise SystemExit("FAIL: Cycles addon not found — cannot use GPU rendering.")
 
-    prefs.refresh_devices()
+    if not _GPU_CONFIGURED:
+        print("[GPU] refreshing devices...", flush=True)
+        prefs.refresh_devices()
+        # D10: echo what Blender saw — a silent "no devices" leaves the user
+        # with an unhelpful "Found devices: " message on the next branch.
+        names = [f"{d.name}({d.type})" for d in prefs.devices]
+        print(f"[GPU] {len(prefs.devices)} device(s): {', '.join(names)}",
+              flush=True)
+        _GPU_CONFIGURED = True
 
     optix_devs = [d for d in prefs.devices if d.type == "OPTIX"]
     if optix_devs:
@@ -546,7 +612,7 @@ def configure_gpu():
 
     gpu_devs = [d for d in prefs.devices if d.type == backend]
     names = ", ".join(d.name for d in gpu_devs if d.use)
-    print(f"[GPU] Cycles {backend} enabled: {names}")
+    print(f"[GPU] Cycles {backend} enabled: {names}", flush=True)
     return gpu_devs
 
 
@@ -554,7 +620,7 @@ def configure_gpu():
 # Render settings
 # ---------------------------------------------------------------------------
 
-def setup_render(env_lights: dict = None):
+def setup_render(env_lights: dict = None, samples: int = None):
     """Configure Cycles GPU rendering at 1080p, 30 fps, PNG sequence.
 
     The denoiser follows the compute backend selected by ``configure_gpu``:
@@ -563,6 +629,10 @@ def setup_render(env_lights: dict = None):
     CUDA-only devices (e.g. Kaggle T4-as-CUDA or P100) where the OptiX
     denoiser enum assigns cleanly but has no OptiX context to execute in.
 
+    ``samples`` (optional int) overrides the module-level CYCLES_SAMPLES so
+    callers (render.py --samples) can trade quality for speed without editing
+    this file.  None/0 keeps the default (48).
+
     If ``env_lights`` (the env file's ``lights`` block) is given, the Sun
     light's rotation/energy are overridden from it.
     """
@@ -570,7 +640,10 @@ def setup_render(env_lights: dict = None):
     # Engine: Cycles (EEVEE cannot use the GPU in headless -b mode).
     scene.render.engine = "CYCLES"
     scene.cycles.device = "GPU"
-    scene.cycles.samples = CYCLES_SAMPLES
+    # M9: honor --samples override (None → default 48). Lower sample counts
+    # (16-24) let users iterate ~2-3× faster; the denoiser compensates for
+    # the extra noise so the visual difference is modest.
+    scene.cycles.samples = samples if samples else CYCLES_SAMPLES
     scene.cycles.use_denoising = True
     # Denoiser follows the active compute backend so a CUDA-only device
     # (Kaggle T4-as-CUDA / P100) doesn't crash at render time trying to use
@@ -589,6 +662,24 @@ def setup_render(env_lights: dict = None):
             scene.cycles.denoiser = "OPENIMAGEDENOISE"
         except Exception:
             pass
+    # D9: read back the actually-active denoiser and echo it. If assignment
+    # silently failed (Blender build without OIDN/OptiX support), the readback
+    # won't match `want_denoiser` — warn so the user knows the render may be
+    # noisy, and disable denoising rather than rendering with an unknown state.
+    try:
+        actual = str(scene.cycles.denoiser)
+    except Exception:
+        actual = "<unreadable>"
+    if actual != want_denoiser:
+        print(f"  [denoiser] WARNING: wanted {want_denoiser} but got {actual} "
+              f"— disabling denoising (render will be noisier at low samples)",
+              flush=True)
+        try:
+            scene.cycles.use_denoising = False
+        except Exception:
+            pass
+    else:
+        print(f"  [denoiser] {actual} active", flush=True)
     # Resolution / fps / output format
     scene.render.resolution_x = RES_X
     scene.render.resolution_y = RES_Y
@@ -647,6 +738,9 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
     scene_objs = []
     motions = []
     frame_end = scenario["duration_frames"]
+    n_visible_candidates = 0
+    print(f"  [build] placing vehicles for {camera_tag} "
+          f"(scanning {len(scenario['vehicles'])} total)...", flush=True)
     for veh in scenario["vehicles"]:
         if is_in:
             if veh["approach"] != approach.value:
@@ -658,7 +752,19 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
             if ex_dir != approach:
                 continue
             anchor_lane = ex_lane
+        n_visible_candidates += 1
+        # D2: progress every 5th vehicle so a 100-vehicle scenario doesn't
+        # look frozen during the place+keyframe loop. Report id/approach/
+        # lane/turn so a stuck vehicle is identifiable in the log.
+        if n_visible_candidates % 5 == 0 or n_visible_candidates == 1:
+            print(f"    [{camera_tag}] V{n_visible_candidates}: "
+                  f"{veh['id']} {veh['approach']}/{veh.get('lane')}/"
+                  f"{veh.get('turn')}", flush=True)
         anchor_loc, anchor_rot_z = ENV.lane_default_anchor(env, anchor_lane)
+        # Structural failures (missing .blend, plan_motion error, bpy parenting
+        # error) MUST propagate — a silently-dropped vehicle is a correctness
+        # bug, not data quality. Plate/color failures are caught inside
+        # make_vehicle_instance (data-quality: vehicle renders without plate).
         empty, motion = make_vehicle_instance(
             veh, veh_manifest, plates_dir,
             anchor_loc=anchor_loc, anchor_rot_z=anchor_rot_z,

@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -208,12 +209,44 @@ def _nvenc_available() -> bool:
     return _NVENC_AVAILABLE
 
 
-def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float) -> bool:
+def _print_ffmpeg_stderr(encoder: str, rc: int, stderr: str):
+    """Print the head + tail of an ffmpeg stderr dump for diagnosis.
+
+    The full ffmpeg log can be thousands of lines of per-frame progress. The
+    useful diagnostics are at the very top (NVENC init / format negotiation /
+    "no capable devices found") and the very bottom (the final error summary
+    + the encode-stats line). Print both, labelled, instead of either claiming
+    "full stderr" while truncating or dumping the whole multi-thousand-line log.
+    """
+    lines = stderr.splitlines()
+    print(f"  [ffmpeg] {encoder} failed (rc={rc}):", flush=True)
+    # Short logs: print whole thing. Long logs (real ffmpeg failure dumps can
+    # be thousands of per-frame lines): print the first + last 20 with an
+    # omitted-count marker. The 40-line boundary avoids the head/tail overlap
+    # that would otherwise duplicate lines and print a negative omit count.
+    if len(lines) <= 40:
+        for line in lines:
+            print(f"    | {line}", flush=True)
+    else:
+        for line in lines[:20]:
+            print(f"    | {line}", flush=True)
+        print(f"    | ... ({len(lines) - 40} lines omitted) ...", flush=True)
+        for line in lines[-20:]:
+            print(f"    | {line}", flush=True)
+
+
+def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float,
+                   timeout_s: int = 1800) -> bool:
     """Encode the PNG frame sequence to mp4. Prefers GPU NVENC (frees the CPU
     for other parallel render workers); falls back to CPU libx264 if NVENC
     is unavailable or fails at runtime. Inherits CUDA_VISIBLE_DEVICES from
     the parent process environment (set per-worker by run_pipeline.py), so
     NVENC binds to the same GPU this Blender instance rendered on.
+
+    ``timeout_s`` bounds the encode (default 30 min) — ffmpeg can itself hang
+    on NVENC init contention or a malformed PNG sequence, and without a
+    timeout the worker silently stalls (the 8h-silent-hang scenario). On
+    timeout the process is killed and full stderr is printed for diagnosis.
     """
     import subprocess
     import os as _os
@@ -226,22 +259,45 @@ def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float) -> bool:
         "-i", _os.path.join(frames_dir, "f_%04d.png"),
     ]
 
+    def _run(cmd, tag):
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=timeout_s)
+            return p
+        except subprocess.TimeoutExpired:
+            print(f"  [ffmpeg] {tag} encode timed out after {timeout_s}s "
+                  f"— process killed.", flush=True)
+            return None
+        except Exception as e:
+            print(f"  [ffmpeg] {tag} encode raised {type(e).__name__}: {e}",
+                  flush=True)
+            return None
+
     if _nvenc_available():
         cmd = base + [
             "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p",
             "-cq", "20", video_path,
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode == 0:
+        proc = _run(cmd, "NVENC")
+        if proc is not None and proc.returncode == 0:
             return True
-        print(f"  [ffmpeg] NVENC encode failed, falling back to CPU: "
-              f"{proc.stderr[-200:]}")
+        # Print the head (root cause — NVENC init / format negotiation) and
+        # the tail (summary line) of stderr. The full log can be thousands of
+        # lines of frame-by-frame progress; the useful diagnostics are at the
+        # very top and very bottom.
+        if proc is not None and proc.stderr:
+            _print_ffmpeg_stderr("NVENC", proc.returncode, proc.stderr)
+        print(f"  [ffmpeg] falling back to CPU libx264", flush=True)
 
     cmd = base + [
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-crf", "20", video_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = _run(cmd, "libx264")
+    if proc is None:
+        return False
+    if proc.returncode != 0 and proc.stderr:
+        _print_ffmpeg_stderr("libx264", proc.returncode, proc.stderr)
     return proc.returncode == 0
 
 
@@ -249,23 +305,87 @@ def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float) -> bool:
 # Rendering loop
 # ---------------------------------------------------------------------------
 
+# Module-level render-samples override. Set from --samples on the render.py
+# CLI (when invoked by run_pipeline.py); falls back to build_scene's
+# CYCLES_SAMPLES constant if None (preserves the default-48 behaviour when
+# render.py is invoked directly without --samples).
+RENDER_SAMPLES = None
+
+# Per-frame progress: emit a progress line every N frames during the Cycles
+# animation render (the single longest operation). Without this, headless
+# Blender produces zero stdout during the render, which — combined with a
+# block-buffered stdout under non-TTY — is the root cause of the multi-hour
+# silent-hang scenario. The handler prints to stdout (flush=True) so the
+# parent process's `for line in proc.stdout` gets a regular heartbeat and
+# the watchdog knows we're alive.
+RENDER_PROGRESS_EVERY = 10  # frames
+
+
+def _install_render_progress_handler(scene):
+    """Register a bpy.app.handlers callback that prints per-frame progress.
+
+    Called once before bpy.ops.render.render(animation=True) in render_one.
+    The handler is unregistered after the render to avoid leaking across
+    multiple camera renders in a single Blender process.
+
+    Headless Blender emits nothing to stdout during Cycles animation render
+    by default — this is the single biggest debug-visibility gap in the
+    pipeline (a 25,000-frame render at 0.006 s/frame = 150s of silence).
+    The handler emits `frame N/M (elapsed Xs)` every RENDER_PROGRESS_EVERY
+    frames, giving the watchdog a heartbeat and the user a progress bar.
+    """
+    import bpy as _bpy
+    try:
+        import bpy as _bpy
+        # Clear any prior install (idempotent across multiple render_one
+        # calls in the same Blender process).
+        _bpy.app.handlers.frame_change_post.clear()
+    except Exception:
+        pass
+
+    frame_start = _bpy.context.scene.frame_start
+    frame_end = _bpy.context.scene.frame_end
+    t_start = time.time()
+
+    def _on_frame_change(scene, depsgraph):
+        f = scene.frame_current
+        if f % RENDER_PROGRESS_EVERY == 0:
+            elapsed = time.time() - t_start
+            print(f"  frame {f}/{frame_end} ({elapsed:.1f}s)", flush=True)
+
+    _bpy.app.handlers.frame_change_post.append(_on_frame_change)
+
+
 def render_one(scenario: dict, camera_tag: str, out_dir: str):
     """Build + render one camera shot to <out_dir>/video_<tag>.mp4.
 
     Renders a PNG frame sequence into a temp subdir, then encodes to mp4 with
     ffmpeg (Blender's built-in FFMPEG container can be finicky across builds).
+
+    Emits explicit phase markers (D1) so each long step (buildshot → GPU →
+    render → encode) is visible in the parent's streamed output, and a
+    per-frame progress handler (C2) so the Cycles render itself is not a
+    multi-minute silent gap.
     """
     import shutil
     import subprocess
     import build_scene as BS  # requires bpy (only available inside Blender)
 
+    print(f"  [{camera_tag}] building scene...", flush=True)
     scene_blend = os.path.join(out_dir, f"scene_{camera_tag}.blend")
     BS.build_shot(scenario, camera_tag, scene_blend)
 
     # Re-configure GPU here too: Cycles addon prefs live in user preferences,
     # not the .blend, so they must be set in the active session before render.
+    print(f"  [{camera_tag}] configuring GPU...", flush=True)
     BS.configure_gpu()
-    BS.setup_render()
+    # M9: pass --samples through to setup_render (which sets scene.cycles.samples).
+    # Done here, AFTER configure_gpu, so the override is applied to the live
+    # scene in one place rather than patched in after the fact.
+    samples_override = RENDER_SAMPLES if RENDER_SAMPLES is not None else None
+    BS.setup_render(samples=samples_override)
+    if samples_override is not None:
+        print(f"  [{camera_tag}] Cycles samples = {samples_override}", flush=True)
 
     scene = bpy.context.scene
     duration = scenario["duration_frames"]
@@ -282,23 +402,40 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
     scene.render.filepath = os.path.join(frames_dir, "f_")  # produces f_0001.png ...
     scene.render.image_settings.file_format = "PNG"
 
-    bpy.ops.render.render(animation=True)
+    # Install per-frame progress handler before the long render (C2).
+    print(f"  [{camera_tag}] rendering frames 0..{duration} "
+          f"({scene.cycles.samples} samples)...", flush=True)
+    _install_render_progress_handler(scene)
+    try:
+        bpy.ops.render.render(animation=True)
+    finally:
+        # Unregister handler so the next render_one in the same Blender
+        # process starts clean (we render one camera per Blender subprocess
+        # via run_pipeline.py, but render.py:main loops all cameras when
+        # invoked directly).
+        try:
+            bpy.app.handlers.frame_change_post.clear()
+        except Exception:
+            pass
 
     # encode to mp4 (GPU NVENC when available, else CPU libx264 fallback —
     # keeps encoding off the CPU so it doesn't bottleneck/contend with
     # parallel Blender-GPU render workers).
+    print(f"  [{camera_tag}] encoding...", flush=True)
     video_path = os.path.join(out_dir, f"video_{camera_tag}.mp4")
     fps = scenario["fps"]
     ok = _ffmpeg_encode(frames_dir, video_path, fps)
     if ok:
-        print(f"  rendered: {video_path}")
+        print(f"  [{camera_tag}] rendered: {video_path}", flush=True)
     else:
-        print(f"  ffmpeg FAILED for {camera_tag}")
-    # optionally clean up frames dir to save space
+        print(f"  [{camera_tag}] ffmpeg FAILED", flush=True)
+    # optionally clean up frames dir to save space — D6: warn on failure
+    # (silent pass here hides NFS/permission issues that eat disk space).
     try:
         shutil.rmtree(frames_dir)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [{camera_tag}] [WARN] rmtree frames_dir failed: {e}",
+              flush=True)
     return video_path
 
 
@@ -315,7 +452,15 @@ def main():
                     help="skip metadata compute (used in parallel render workers)")
     ap.add_argument("--metadata-only", action="store_true",
                     help="write metadata.json from scenario + existing videos (no render)")
+    ap.add_argument("--samples", type=int, default=None,
+                    help="Cycles render samples (default: build_scene.CYCLES_SAMPLES=48; "
+                         "lower = faster, noisier — denoiser compensates. "
+                         "Use 16-24 for quick test runs, 48 for production.")
     ns = ap.parse_args(post)
+
+    # Apply --samples override to the module global so render_one picks it up.
+    global RENDER_SAMPLES
+    RENDER_SAMPLES = ns.samples
 
     with open(ns.scenario) as f:
         scenario = json.load(f)
@@ -340,7 +485,13 @@ def main():
             p = render_one(scenario, tag, ns.out)
             rendered.append(p)
         except Exception as e:
-            print(f"  FAILED {tag}: {e}")
+            # D5: full traceback so the parent forwards the cause. The old
+            # one-liner discarded the stack, leaving "FAILED <tag>: <e>"
+            # with no clue which of build_shot / configure_gpu / render / encode
+            # raised (hours of compute lost to a one-line error message).
+            import traceback
+            traceback.print_exc()
+            print(f"  FAILED {tag}: {e}", flush=True)
 
     if not ns.no_metadata:
         _write_metadata(scenario, ns.out)

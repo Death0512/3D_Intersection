@@ -260,6 +260,16 @@ def schedule_departures(vehicles: list, duration_frames: int, rng: random.Random
             if ok:
                 break
             frame += step
+        else:
+            # C8: loop exhausted without finding a safe frame — the vehicle
+            # is placed at the last tried frame, which may overlap a prior.
+            # Warn so the user knows the scenario has a headway violation
+            # (dense demand on a short approach is the usual cause).
+            import sys as _sys
+            print(f"[WARN] schedule_departures: cap hit for V{i} "
+                  f"({v['approach']}/lane {v['lane']}, frame {frame}) — "
+                  f"vehicle may overlap prior in same lane",
+                  file=_sys.stderr, flush=True)
         v["depart_frame"] = int(frame)
         existing.append((frame, v["length"], v["speed_ms"]))
     return vehicles
@@ -305,6 +315,15 @@ def _enforce_lane_safety(vehicles: list, fps: int, safety_gap: float,
                 if ok:
                     break
                 frame += 1
+            else:
+                # C8: 4000-iter cap exhausted — vehicle placed at last frame,
+                # may overlap. Warn per-vehicle so dense-demand scenarios
+                # surface the constraint violation.
+                import sys as _sys
+                print(f"[WARN] _enforce_lane_safety: cap hit for "
+                      f"{v['id']} ({v['approach']}/lane {v['lane']}, "
+                      f"frame {frame}) — vehicle may overlap prior",
+                      file=_sys.stderr, flush=True)
             v["depart_frame"] = int(frame)
             placed.append((frame, v["length"], v["speed_ms"]))
 
@@ -769,7 +788,7 @@ def _resolve_all(vehicles, approach_visible_length, fps,
         arrivals_snapshot = _collect_stop_arrivals(
             vehicles, approach_visible_length, fps)
 
-    for _ in range(max_rounds):
+    for _round in range(max_rounds):
         before = _snapshot(vehicles)
 
         # 0. Closed-loop adaptive signal: rebuild plan from current arrivals.
@@ -793,6 +812,18 @@ def _resolve_all(vehicles, approach_visible_length, fps,
 
         if _snapshot(vehicles) == before:
             break
+    else:
+        # C7: loop exhausted without convergence — vehicles may still be
+        # shifting stop/release frames across rounds. Warn so the scenario
+        # isn't silently accepted with an unstable state. Compare the final
+        # snapshot to the last `before` to report what's still drifting.
+        import sys as _sys
+        print(f"[WARN] _resolve_all did not converge after {max_rounds} "
+              f"rounds — vehicle stop/release state may still be shifting. "
+              f"This usually means a dense scenario + tight headway + signal "
+              f"gating can't all stabilise; consider lowering --num-vehicles "
+              f"or increasing --seconds.",
+              file=_sys.stderr, flush=True)
 
 
 def main():

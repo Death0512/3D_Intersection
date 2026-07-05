@@ -413,6 +413,14 @@ class AdaptiveSignalPlan:
             self.cycle_frames = self.intervals[-1][1]
         else:
             self.cycle_frames = self.min_green_f + self.yellow_f + self.all_red_f
+        # M4: emit a progress line so the adaptive-plan build (which can take
+        # a noticeable fraction of scenario-gen time on dense demand) isn't
+        # silent. Helps diagnose "scenario_gen is slow" without profiling.
+        import sys as _sys
+        print(f"[signal] adaptive timeline built: "
+              f"{len(self.intervals)} intervals, "
+              f"cycle_frames={self.cycle_frames}",
+              file=_sys.stderr, flush=True)
 
     # ---- query API (same surface as SignalPlan) -------------------------------
 

@@ -50,6 +50,8 @@ DEMAND=""
 BLENDER_BIN=""
 PYTHON_BIN=""
 JOBS=0   # 0 = auto-detect from free VRAM
+SILENCE_TIMEOUT=0   # 0 = use run_pipeline.py default (600s)
+SAMPLES=0           # 0 = use build_scene default (48)
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -74,6 +76,8 @@ while [[ $# -gt 0 ]]; do
         --blender)        BLENDER_BIN="$2";   shift 2 ;;
         --python)         PYTHON_BIN="$2";    shift 2 ;;
         --jobs)           JOBS="$2";          shift 2 ;;
+        --silence-timeout) SILENCE_TIMEOUT="$2"; shift 2 ;;
+        --samples)        SAMPLES="$2";       shift 2 ;;
         -h|--help)        usage ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -177,6 +181,14 @@ PIPELINE_ARGS=(
 [[ "$SIGNAL" -eq 1 ]]        && PIPELINE_ARGS+=(--signal)
 [[ "$SIGNAL" -eq 1 ]]        && PIPELINE_ARGS+=(--signal-mode "$SIGNAL_MODE")
 [[ -n "$DEMAND" ]]           && PIPELINE_ARGS+=(--demand "$DEMAND")
+[[ "$SILENCE_TIMEOUT" -gt 0 ]] && PIPELINE_ARGS+=(--silence-timeout "$SILENCE_TIMEOUT")
+[[ "$SAMPLES" -gt 0 ]]       && PIPELINE_ARGS+=(--samples "$SAMPLES")
+
+# C5: force Python stdout unbuffered so every print(..., flush=True) in
+# render.py / build_scene.py / run_pipeline.py reaches the terminal/log
+# immediately. Without this, Python block-buffers stdout (4 KB) when not a
+# TTY, and a long render appears silent for minutes even when progressing.
+export PYTHONUNBUFFERED=1
 
 # Pass blender/python overrides to the pipeline via env so subprocesses pick
 # them up without needing extra flags on run_pipeline.py.

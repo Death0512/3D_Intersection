@@ -46,36 +46,67 @@ VRAM_PER_JOB_MIB = 1600
 MIN_FREE_VRAM_MIB = 1200
 
 
-def run(cmd: list, cwd=ROOT, check=True):
-    print(f"\n$ {' '.join(cmd)}")
+def run(cmd: list, cwd=ROOT, check=True, timeout=None):
+    """Run a subprocess step, streaming stdout+stderr live.
+
+    Replaces the buffered `capture_output=True` pattern (which hid all output
+    until exit, leaving long steps like scenario-gen / validate-assets silent
+    for their whole duration when run under a non-TTY). Now each line is
+    forwarded to stdout immediately, prefixed with 2 spaces, so the user can
+    see progress in real time regardless of buffering.
+
+    ``timeout`` (seconds) kills the subprocess and aborts the pipeline if
+    exceeded — pass concrete values per caller (e.g. 120s for asset-validate,
+    600s for scenario-gen) to bound headless-Blender / driver hangs.
+    """
+    print(f"\n$ {' '.join(cmd)}", flush=True)
     t0 = time.time()
-    proc = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=cwd, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+    except FileNotFoundError as e:
+        raise SystemExit(f"FAIL: command not found: {cmd[0]} ({e})")
+    last_lines = []
+    try:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line:
+                print(" ", line, flush=True)
+                last_lines.append(line)
+                if len(last_lines) > 50:
+                    last_lines.pop(0)
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        dt = time.time() - t0
+        raise SystemExit(
+            f"FAIL: command timed out after {timeout}s (killed): {' '.join(cmd)}\n"
+            f"  last output:\n    " + "\n    ".join(last_lines[-10:]))
     dt = time.time() - t0
-    if proc.stdout:
-        for line in proc.stdout.splitlines()[-15:]:
-            print("  ", line)
     if proc.returncode != 0 and check:
-        print("STDERR:", proc.stderr[-1500:])
-        raise SystemExit(f"Command failed (code {proc.returncode}) after {dt:.1f}s: {' '.join(cmd)}")
-    print(f"  (ok, {dt:.1f}s)")
+        raise SystemExit(
+            f"Command failed (code {proc.returncode}) after {dt:.1f}s: {' '.join(cmd)}\n"
+            f"  last output:\n    " + "\n    ".join(last_lines[-15:]))
+    print(f"  (ok, {dt:.1f}s)", flush=True)
     return proc
 
 
 def step_assets_validate():
-    """Run asset validation (fast)."""
-    run([BLENDER, "-b", "--python", os.path.join(HERE, "validate_assets.py")])
+    """Run asset validation (fast). Bounded to 120s — headless Blender should
+    start and exit within seconds; a hang here means a corrupt .blend / driver."""
+    run([BLENDER, "-b", "--python", os.path.join(HERE, "validate_assets.py")],
+        timeout=120)
 
 
 def step_scenario(seed, num_vehicles, seconds, out_dir, fps=None,
                    signal=False, signal_mode="fixed", demand=None):
-    """Run scenario_gen.py.
-
-    ``signal_mode`` is forwarded only when ``signal`` is True (mirrors
-    scenario_gen.py, where --signal-mode is meaningful only together with
-    --signal).  ``demand`` is forwarded as-is: ``None`` → default demand
-    model, a path → custom JSON, the string ``"none"`` → legacy uniform
-    scheduler.
-    """
+    """Run scenario_gen.py. Bounded to 600s — the `_resolve_all` fixpoint is
+    capped at 20 rounds, so even with 200 vehicles this stays well under 60s;
+    a hang here means a non-converging signal/exit loop."""
     cmd = [PYTHON, os.path.join(HERE, "scenario_gen.py"),
            "--seed", str(seed),
            "--num-vehicles", str(num_vehicles),
@@ -88,12 +119,13 @@ def step_scenario(seed, num_vehicles, seconds, out_dir, fps=None,
         cmd += ["--signal-mode", str(signal_mode)]
     if demand is not None:
         cmd += ["--demand", str(demand)]
-    run(cmd)
+    run(cmd, timeout=600)
     return os.path.join(out_dir, "scenario.json")
 
 
 def step_plates(scenario_path, out_dir):
-    """Pre-generate all plate PNGs in conda python (Pillow available)."""
+    """Pre-generate all plate PNGs in conda python (Pillow available).
+    Bounded to 300s — plate rendering is fast per plate (~10ms)."""
     plates_dir = os.path.join(out_dir, "plates")
     os.makedirs(plates_dir, exist_ok=True)
     script = (
@@ -103,7 +135,7 @@ def step_plates(scenario_path, out_dir):
         "pregenerate_plates([v['plate'] for v in d['vehicles']], "
         f"{plates_dir!r}); print('plates done')"
     )
-    run([PYTHON, "-c", script])
+    run([PYTHON, "-c", script], timeout=300)
 
 
 def _gpu_count():
@@ -111,8 +143,29 @@ def _gpu_count():
     return len(_gpu_info())
 
 
+# Module-level cache: `_detect_jobs` calls _gpu_info up to 3× otherwise; cache
+# the result of the first probe for the whole process lifetime. nvidia-smi is
+# cheap (~50 ms) but redundant 3× adds latency + multiplies driver-hiccup risk.
+_GPU_INFO_CACHE = None
+
+
 def _gpu_info():
-    """Return a list of (index, free_mib) tuples for all GPUs, or empty list."""
+    """Return a list of (index, free_mib) tuples for all GPUs, or empty list.
+
+    Single source of truth for both GPU count and per-GPU free VRAM. Cache is
+    safe for a single pipeline run (VRAM only changes across render launches).
+    Distinguishes "nvidia-smi binary missing" (silent fallback) from "binary
+    exists but output parse failed" (warns loudly so a silent serial-fallback
+    doesn't eat 8× wall time with no clue why).
+    """
+    global _GPU_INFO_CACHE
+    if _GPU_INFO_CACHE is not None:
+        return _GPU_INFO_CACHE
+    # Cache miss → probe.
+    import shutil as _sh
+    if _sh.which("nvidia-smi") is None:
+        _GPU_INFO_CACHE = []
+        return []
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,memory.free",
@@ -126,8 +179,20 @@ def _gpu_info():
                 free = int(parts[1].strip())
                 if free > 0:
                     result.append((idx, free))
+        _GPU_INFO_CACHE = result
         return result
-    except Exception:
+    except subprocess.TimeoutExpired:
+        print(f"[WARN] nvidia-smi timed out (>10s) — defaulting to serial",
+              file=sys.stderr, flush=True)
+        _GPU_INFO_CACHE = []
+        return []
+    except (ValueError, OSError) as e:
+        # Binary present but parse failed — the most insidious case: silent
+        # fallback to --jobs 1 with no clue why. Warn loudly.
+        print(f"[WARN] nvidia-smi output parse failed ({type(e).__name__}: {e}) "
+              f"— defaulting to serial render. raw stdout: {out.stdout!r}",
+              file=sys.stderr, flush=True)
+        _GPU_INFO_CACHE = []
         return []
 
 
@@ -135,16 +200,20 @@ def _free_vram_mib():
     """Query free GPU VRAM from nvidia-smi.  Returns integer MiB or None.
 
     Uses the first GPU (index 0) for single-GPU compat — the multi-GPU path
-    in _detect_jobs uses _gpu_info() instead.
+    in _detect_jobs uses _gpu_info() instead. If GPU 0 is filtered out (free=
+    0), warns rather than silently returning a different GPU's VRAM (which
+    would underbook the real GPU 0 and oversubscribe it).
     """
     info = _gpu_info()
     if not info:
         return None
-    # Find GPU 0 specifically (backward compat with single-GPU query).
     for idx, free in info:
         if idx == 0:
             return free
-    return info[0][1]  # fallback: first GPU, whatever its index
+    print(f"[WARN] GPU 0 not in nvidia-smi free-VRAM list (it may be full); "
+          f"available GPUs: {info} — using {info[0][1]} MiB budget on GPU {info[0][0]}",
+          file=sys.stderr, flush=True)
+    return info[0][1]  # fallback: first available GPU, whatever its index
 
 
 def _detect_jobs(camera_count: int, explicit: int = 0):
@@ -156,14 +225,16 @@ def _detect_jobs(camera_count: int, explicit: int = 0):
     gpu_assignment is a list of GPU-id integers, length == job_count.
 
     ``explicit`` > 0 overrides auto-detection — all workers share GPU 0
-    (user-chosen parallelism, not per-GPU).
+    (user-chosen parallelism, not per-GPU).  Calls ``_gpu_info`` exactly once
+    (cached), so the prior 3× nvidia-smi spawn is gone.
     """
     assignment: list[int] = []
     if explicit and explicit > 0:
         n = min(explicit, camera_count)
         return n, [0] * n
 
-    n_gpu = _gpu_count()
+    info = _gpu_info()
+    n_gpu = len(info)
     if n_gpu == 0:
         print("[GPU] nvidia-smi unavailable — defaulting to --jobs 1")
         return 1, [0]
@@ -171,7 +242,6 @@ def _detect_jobs(camera_count: int, explicit: int = 0):
     # Multi-GPU: pack multiple workers per GPU (VRAM-limited, no fixed cap),
     # interleaved so capping by camera_count spreads load evenly across GPUs.
     if n_gpu >= 2:
-        info = _gpu_info()
         # Per-GPU worker slots based on VRAM budget.
         per_gpu_slots: list[tuple[int, int]] = []  # (gpu_id, n_slots)
         for gid, free in info:
@@ -180,7 +250,7 @@ def _detect_jobs(camera_count: int, explicit: int = 0):
             w = max(1, free // VRAM_PER_JOB_MIB)
             per_gpu_slots.append((gid, int(w)))
         if len(per_gpu_slots) < 2:
-            print(f"[GPU] {len(info)} GPU(s) detected but only "
+            print(f"[GPU] {n_gpu} GPU(s) detected but only "
                   f"{len(per_gpu_slots)} meet the {MIN_FREE_VRAM_MIB} MiB "
                   f"VRAM floor → serial render")
             return 1, [0]
@@ -203,7 +273,7 @@ def _detect_jobs(camera_count: int, explicit: int = 0):
         return n, assignment
 
     # Single GPU: VRAM-budget job count (original behaviour).
-    free = _free_vram_mib()
+    free = info[0][1] if info[0][0] == 0 else _free_vram_mib()
     if free is None:
         print("[GPU] nvidia-smi unavailable — defaulting to --jobs 1")
         return 1, [0]
@@ -219,16 +289,36 @@ def _detect_jobs(camera_count: int, explicit: int = 0):
     return jobs, assignment
 
 
-def _render_worker(args):
+# ---------------------------------------------------------------------------
+# Render workers + watchdog
+# ---------------------------------------------------------------------------
+
+# Default silence timeout: if a Blender worker produces no stdout for this
+# many seconds, the pipeline is assumed hung (Cycles stuck on a black frame,
+# GPU init deadlock, driver timeout, NVENC init hang) and is aborted with
+# diagnostics. Tunable via --silence-timeout.
+DEFAULT_SILENCE_TIMEOUT_S = 600  # 10 min
+
+
+def _render_worker(args, watchdog_state=None, samples=None):
     """Run one Blender render worker for a single camera. Blocks.
 
     ``args`` is (scenario_path, out_dir, tag, gpu_id).  ``gpu_id`` is the
     NVIDIA GPU index this worker should bind to via CUDA_VISIBLE_DEVICES,
     so multi-GPU hosts run one Blender per physical GPU.
 
+    ``samples`` (optional int) threads the --samples flag through to render.py
+    so Cycles uses the user's sample count (lower = faster, noisier).
+
     Output is streamed in real-time (prefixed by [tag]) so the user can see
     progress during long renders.  Returns (camera_tag, success, wall_s).
     Metadata is deferred to a separate pass.
+
+    ``watchdog_state`` is an optional shared-dict slot used by the watchdog
+    in ``step_render_parallel`` to detect silent workers: this function updates
+    ``watchdog_state['last_output_time']`` and ``watchdog_state['last_line']``
+    on every received stdout line, so a separate thread can detect "no output
+    for N seconds" and abort the whole pool (hard-kill policy chosen by user).
     """
     import sys as _sys
 
@@ -238,8 +328,15 @@ def _render_worker(args):
         "--scenario", scenario_path, "--out", out_dir,
         "--only", tag, "--no-metadata",
     ]
+    if samples is not None:
+        cmd += ["--samples", str(samples)]
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    # Force Python-level stdout unbuffered in the Blender child so every
+    # `print(..., flush=True)` from render.py / build_scene.py reaches the
+    # OS pipe immediately. Without this, the 8-hour silent-hang scenario
+    # (block-buffered stdout under non-TTY) reappears.
+    env["PYTHONUNBUFFERED"] = "1"
     tag_label = f"[{tag}]"
     print(f"\n{tag_label} $ {' '.join(cmd)}  (GPU {gpu_id})", flush=True)
     t0 = time.time()
@@ -250,6 +347,11 @@ def _render_worker(args):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         bufsize=1,
     ) as proc:
+        if watchdog_state is not None:
+            watchdog_state["proc"] = proc
+            watchdog_state["last_output_time"] = time.time()
+            watchdog_state["last_line"] = ""
+            watchdog_state["started_at"] = t0
         for line in proc.stdout:
             line = line.rstrip("\n")
             if line:
@@ -258,26 +360,104 @@ def _render_worker(args):
                     continue
                 _sys.stdout.write(f"  {tag_label} {line}\n")
                 _sys.stdout.flush()
+                if watchdog_state is not None:
+                    watchdog_state["last_output_time"] = time.time()
+                    watchdog_state["last_line"] = line
         proc.wait()
         dt = time.time() - t0
         ok = proc.returncode == 0
     status = "OK" if ok else "FAILED"
     print(f"{tag_label} {status} ({dt:.1f}s)", flush=True)
+    if watchdog_state is not None:
+        watchdog_state["done"] = True
     return tag, ok, dt
 
 
+def _watchdog(workers_state, silence_timeout_s, stop_event):
+    """Background thread that aborts the pool if any worker goes silent.
+
+    ``workers_state`` is a dict tag → state-dict (with keys: last_output_time,
+    last_line, started_at, proc, optional 'done').  If any *non-done* worker's
+    ``time.time() - last_output_time`` exceeds ``silence_timeout_s``, the
+    watchdog kills ALL worker procs and signals the main thread via
+    ``stop_event``, which causes ``step_render_parallel`` to raise SystemExit
+    with a diagnostic banner (hard-kill policy per user choice).
+
+    Also times out workers whose TOTAL wall time exceeds 6× the silence
+    timeout (catches the case where a worker emits periodic short lines but
+    takes punitively long).
+    """
+    while not stop_event.is_set():
+        now = time.time()
+        for tag, st in workers_state.items():
+            if st.get("done"):
+                continue
+            last_t = st.get("last_output_time", st.get("started_at", now))
+            silent_for = now - last_t
+            if silent_for > silence_timeout_s:
+                # Hard-kill whole pool. Kill every live proc.
+                for _, st2 in workers_state.items():
+                    p = st2.get("proc")
+                    if p and p.poll() is None:
+                        try:
+                            p.terminate()
+                        except Exception:
+                            pass
+                # Give procs 5s to terminate, then SIGKILL.
+                time.sleep(5)
+                for _, st2 in workers_state.items():
+                    p = st2.get("proc")
+                    if p and p.poll() is None:
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
+                stop_event.set()
+                print("\n" + "=" * 70, file=sys.stderr, flush=True)
+                print(f"PIPELINE ABORTED — worker [{tag}] silent for "
+                      f"{silent_for:.0f}s (> {silence_timeout_s}s timeout)",
+                      file=sys.stderr, flush=True)
+                for t, s in workers_state.items():
+                    last = s.get("last_line", "")[:80]
+                    print(f"  [{t}] last: {last!r}", file=sys.stderr, flush=True)
+                print("=" * 70, file=sys.stderr, flush=True)
+                return
+        time.sleep(5)
+
+
 def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
-                         only=None):
+                         only=None, silence_timeout_s=DEFAULT_SILENCE_TIMEOUT_S,
+                         samples=None):
     """Render all 8 (or ``only``) cameras. If ``gpu_assignment`` is set, each
     worker binds to a different GPU via CUDA_VISIBLE_DEVICES (round-robins
     when there are more cameras than GPUs). Otherwise all workers share GPU 0.
+
+    ``samples`` threads --samples through to render.py (None = use the
+    build_scene default of 48).
+
+    A background watchdog kills the entire pool (hard-kill policy) if any
+    worker is silent for ``silence_timeout_s`` seconds — converts a
+    multi-hour silent hang into a fast, diagnosable abort.
     """
     camera_tags = G.camera_names()
     if only:
         camera_tags = [only]
     n_cams = len(camera_tags)
-    n_gpus = len(gpu_assignment) if gpu_assignment else 0
 
+    # D12: short-circuit BEFORE building the parallel banner, so a single-
+    # camera render doesn't print a misleading "N parallel workers" line.
+    if jobs <= 1 or n_cams == 1:
+        print(f"[render] serial/single-camera render — 1 worker")
+        results = {}
+        for tag in camera_tags:
+            args = (scenario_path, out_dir, tag,
+                    gpu_assignment[0] if gpu_assignment else 0)
+            tag_r, ok, dt = _render_worker(args, samples=samples)
+            results[tag_r] = (ok, dt)
+        _print_render_summary(results, camera_tags)
+        return
+
+    n_gpus = len(gpu_assignment) if gpu_assignment else 0
     # gpu_assignment is the exact per-worker GPU id list (length == jobs);
     # pair each camera tag with its GPU id in order. If we have more cameras
     # than assignments, fall back to GPU 0 for the overflow.
@@ -286,21 +466,65 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
              for i, tag in enumerate(camera_tags)]
     results = {}
 
-    # Serial fallback for 1 job or 1 camera — avoid thread overhead.
-    if jobs <= 1 or n_cams == 1:
-        for args in tasks:
-            tag, ok, dt = _render_worker(args)
-            results[tag] = (ok, dt)
-    else:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=jobs) as pool:
-            futs = {pool.submit(_render_worker, t): i for i, t in enumerate(tasks)}
-            for fut in as_completed(futs):
-                tag, ok, dt = fut.result()
-                results[tag] = (ok, dt)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
 
+    # Shared watchdog state: tag → mutable dict of progress markers.
+    workers_state = {tag: {} for tag in camera_tags}
+    stop_event = threading.Event()
+    wd = threading.Thread(
+        target=_watchdog,
+        args=(workers_state, silence_timeout_s, stop_event),
+        daemon=True,
+        name="render-watchdog",
+    )
+    wd.start()
+    aborted = False
+    try:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futs = {}
+            for i, t in enumerate(tasks):
+                tag = t[2]
+                # Pass the per-tag watchdog slot so the worker updates it.
+                futs[pool.submit(_render_worker, t, workers_state[tag],
+                                 samples)] = i
+            try:
+                for fut in as_completed(futs, timeout=None):
+                    if stop_event.is_set():
+                        aborted = True
+                        break
+                    try:
+                        tag, ok, dt = fut.result(timeout=5)
+                        results[tag] = (ok, dt)
+                    except Exception:
+                        # Worker raised (e.g. proc killed by watchdog). Mark
+                        # the corresponding tag FAILED; don't abort the pool
+                        # mid-collection (the watchdog already decided).
+                        i = futs[fut]
+                        tag = tasks[i][2]
+                        results[tag] = (False, 0.0)
+            except Exception:
+                aborted = True
+    finally:
+        stop_event.set()
+        wd.join(timeout=2)
+
+    if aborted:
+        # Any worker not yet recorded as a result is presumed killed.
+        for tag in camera_tags:
+            if tag not in results:
+                results[tag] = (False, 0.0)
+        _print_render_summary(results, camera_tags)
+        raise SystemExit(
+            f"PIPELINE ABORTED — render watchdog killed the pool (see stderr "
+            f"above for which worker went silent and its last line). "
+            f"Partial renders may exist in {out_dir}.")
+    _print_render_summary(results, camera_tags)
+
+
+def _print_render_summary(results, camera_tags):
     print()
-    print(f"  Render summary ({len(results)}/{n_cams} cameras):")
+    print(f"  Render summary ({len(results)}/{len(camera_tags)} cameras):")
     for tag in camera_tags:
         ok, dt = results.get(tag, (False, 0))
         print(f"    {tag:6s} {'OK' if ok else 'FAILED'}  ({dt:.1f}s)")
@@ -310,14 +534,21 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
 
 
 def step_metadata(scenario_path, out_dir):
+    """Generate metadata.json. FATAL — the whole point of the run is the
+    metadata ground-truth; a silent partial write here wastes all the render
+    compute. Bounded to 600s (pure-Python per-frame pose loop, bounded by
+    vehicles × visible frames)."""
     cmd = [PYTHON, os.path.join(HERE, "render.py"), "--",
            "--scenario", scenario_path, "--out", out_dir,
            "--metadata-only"]
-    run(cmd, check=False)
+    run(cmd, check=True, timeout=600)
 
 
 def step_validate_run(out_dir):
-    run([PYTHON, os.path.join(HERE, "validate_run.py"), "--out", out_dir], check=False)
+    """Validate the run output. FATAL — a partial dataset (missing metadata,
+    missing videos, malformed JSON) must bail rather than print "complete"."""
+    run([PYTHON, os.path.join(HERE, "validate_run.py"), "--out", out_dir],
+        check=True, timeout=120)
 
 
 def main():
@@ -333,6 +564,15 @@ def main():
     ap.add_argument("--only", help="render only this camera (debug)")
     ap.add_argument("--jobs", type=int, default=0,
                     help="parallel render workers (0 = auto-detect from free VRAM)")
+    ap.add_argument("--silence-timeout", type=int,
+                    default=DEFAULT_SILENCE_TIMEOUT_S,
+                    help=f"seconds a render worker may go silent before the "
+                         f"watchdog kills the whole pool (default "
+                         f"{DEFAULT_SILENCE_TIMEOUT_S})")
+    ap.add_argument("--samples", type=int, default=48,
+                    help="Cycles render samples per frame (default 48; lower "
+                         "= faster, noisier — denoiser compensates. Use 16-24 "
+                         "for quick test runs, 48 for production.")
     ap.add_argument("--skip-asset-check", action="store_true")
     ap.add_argument("--signal", action="store_true",
                     help="enable traffic signal SPaT gating + queue")
@@ -379,7 +619,8 @@ def main():
     print("\n[4/5] Render cameras (parallel)")
     n_jobs, gpu_assign = _detect_jobs(8 if not args.only else 1, explicit=args.jobs)
     step_render_parallel(scn, out_dir, jobs=n_jobs, gpu_assignment=gpu_assign,
-                         only=args.only)
+                         only=args.only, silence_timeout_s=args.silence_timeout,
+                         samples=args.samples)
 
     print("\n[5/5] Metadata + run validation")
     step_metadata(scn, out_dir)
