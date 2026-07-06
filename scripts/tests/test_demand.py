@@ -86,7 +86,7 @@ def test_demand_make_vehicle_respects_lane_turn_restrictions():
     # never produce a left or right — the legal-turn filter renormalises.
     dm = S.DemandModel(
         flows={d: 400.0 for d in G.Direction},
-        turn_split={"left": 0.5, "straight": 0.0, "right": 0.5})
+        turn_split={"left": 0.5, "straight": 0.3, "right": 0.5})
     rng = random.Random(2)
     for _ in range(500):
         v = S.make_vehicle("v", rng, demand=dm)
@@ -282,6 +282,59 @@ def _run_all():
             print(f"  [ERR ] {fn.__name__}: {type(e).__name__}: {e}")
     print(f"\n{passed}/{len(fns)} tests passed")
     return passed == len(fns)
+
+
+def test_demand_validation_rejects_negative_flow():
+    try:
+        S.DemandModel(flows={"N": -1, "E": 400, "S": 400, "W": 400})
+    except ValueError as e:
+        assert "negative" in str(e) or "must be" in str(e)
+    else:
+        raise AssertionError("expected ValueError for negative flow")
+
+
+def test_demand_validation_rejects_zero_total_flow():
+    try:
+        S.DemandModel(flows={d: 0 for d in G.Direction})
+    except ValueError as e:
+        assert "zero" in str(e).lower()
+    else:
+        raise AssertionError("expected ValueError for zero total flow")
+
+
+def test_demand_validation_rejects_negative_turn_split():
+    try:
+        S.DemandModel(turn_split={"left": -0.1, "straight": 0.8, "right": 0.3})
+    except ValueError as e:
+        assert "turn_split" in str(e)
+    else:
+        raise AssertionError("expected ValueError for negative turn split")
+
+
+def test_demand_validation_rejects_all_zero_turn_split():
+    try:
+        S.DemandModel(turn_split={"left": 0.0, "straight": 0.0, "right": 0.0})
+    except ValueError as e:
+        assert "all-zero" in str(e).lower()
+    else:
+        raise AssertionError("expected ValueError for all-zero turn split")
+
+
+def test_demand_validation_accepts_valid_model():
+    dm = S.DemandModel(
+        flows={d: 400.0 for d in G.Direction},
+        turn_split={"left": 0.15, "straight": 0.70, "right": 0.15})
+    S.make_vehicle("V", random.Random(1), demand=dm)
+
+
+def test_demand_from_dict_rejects_bad_flow():
+    try:
+        S.DemandModel.from_dict({"flows": {"N": -10, "E": 400, "S": 400, "W": 400},
+                                 "turn_split": {"left": 0.1, "straight": 0.8, "right": 0.1}})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("from_dict should validate negative flow")
 
 
 if __name__ == "__main__":

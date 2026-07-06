@@ -449,6 +449,7 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
         print(f"  [{camera_tag}] rendered: {video_path}", flush=True)
     else:
         print(f"  [{camera_tag}] ffmpeg FAILED", flush=True)
+        raise RuntimeError(f"ffmpeg encode failed for {camera_tag}")
     # optionally clean up frames dir to save space — D6: warn on failure
     # (silent pass here hides NFS/permission issues that eat disk space).
     try:
@@ -500,22 +501,24 @@ def main():
         cameras = [ns.only]
 
     rendered = []
+    failed = []
     for tag in cameras:
         try:
             p = render_one(scenario, tag, ns.out)
             rendered.append(p)
         except Exception as e:
-            # D5: full traceback so the parent forwards the cause. The old
-            # one-liner discarded the stack, leaving "FAILED <tag>: <e>"
-            # with no clue which of build_shot / configure_gpu / render / encode
-            # raised (hours of compute lost to a one-line error message).
             import traceback
             traceback.print_exc()
             print(f"  FAILED {tag}: {e}", flush=True)
+            failed.append(tag)
 
     if not ns.no_metadata:
         _write_metadata(scenario, ns.out)
     print(f"Rendered {len(rendered)}/{len(cameras)} videos")
+    if failed:
+        raise SystemExit(
+            f"FAILED cameras ({len(failed)}/{len(cameras)}): "
+            f"{', '.join(failed)}")
 
 
 def _write_metadata(scenario, out_dir):

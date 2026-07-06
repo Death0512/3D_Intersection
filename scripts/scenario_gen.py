@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -86,10 +87,20 @@ class DemandModel:
                  flows: Optional[dict] = None,
                  turn_split: Optional[dict] = None,
                  turn_splits: Optional[dict] = None):
-        self.flows = dict(flows) if flows else {}
-        # per-approach turn split overrides turn_split when provided
-        self.turn_splits = turn_splits or {}
+        # Normalise direction keys to G.Direction so all downstream code
+        # (to_dict, turn_fraction, flow_vph) works with a single key type.
+        self.flows = {}
+        if flows:
+            for k, v in flows.items():
+                d = G.Direction(k) if isinstance(k, str) else k
+                self.flows[d] = v
+        self.turn_splits = {}
+        if turn_splits:
+            for k, s in turn_splits.items():
+                d = G.Direction(k) if isinstance(k, str) else k
+                self.turn_splits[d] = dict(s)
         self.turn_split = dict(turn_split) if turn_split else dict(DEFAULT_TURN_SPLIT)
+        self._validate()
 
     @classmethod
     def default(cls) -> "DemandModel":
@@ -102,6 +113,41 @@ class DemandModel:
     def turn_fraction(self, approach: G.Direction, turn: G.Turn) -> float:
         split = self.turn_splits.get(approach, self.turn_split)
         return split.get(turn.value, 0.0)
+
+    def _validate(self):
+        def _raise(msg):
+            raise ValueError(f"DemandModel: {msg}")
+
+        def _dir_name(d):
+            return d.value if isinstance(d, G.Direction) else str(d)
+
+        # flows: every supplied flow must be a finite, non-negative number;
+        # total across all supplied approaches must be > 0.
+        for d, v in self.flows.items():
+            if not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+                _raise(f"flow {_dir_name(d)}={v!r} must be a finite non-negative float")
+        if self.flows and all(v == 0 for v in self.flows.values()):
+            _raise("total flow is zero — no vehicles can be produced")
+
+        # turn_split: every value must be finite non-negative; at least one
+        # value in the split must be > 0 (otherwise vehicle generation is
+        # impossible on any lane).
+        for k, v in self.turn_split.items():
+            if not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+                _raise(f"turn_split[{k!r}]={v!r} must be a finite non-negative float")
+        if self.turn_split and all(v == 0 for v in self.turn_split.values()):
+            _raise("turn_split all-zero — no vehicle generation possible")
+
+        # turn_splits: same rules per-approach.
+        for d, split in self.turn_splits.items():
+            for k, v in split.items():
+                if not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+                    _raise(
+                        f"turn_splits[{_dir_name(d)}][{k!r}]={v!r} "
+                        f"must be a finite non-negative float")
+            if split and all(v == 0 for v in split.values()):
+                _raise(f"turn_splits[{_dir_name(d)}] all-zero — "
+                       f"no vehicles produced for approach {_dir_name(d)}")
 
     def to_dict(self) -> dict:
         return {
@@ -143,10 +189,11 @@ def _approach_turn_from_demand(demand: DemandModel, rng: random.Random,
     fracs = [demand.turn_fraction(approach, t) for t in legal]
     total = sum(fracs)
     if total <= 0:
-        # all-zero split for this lane's legal turns — fall back to equal
-        weights_t = [1.0] * len(legal)
-    else:
-        weights_t = [f / total for f in fracs]
+        raise SystemExit(
+            f"DemandModel: all-zero turn fraction for lane {lane} "
+            f"on approach {approach.value} "
+            f"(legal turns: {[t.value for t in legal]})")
+    weights_t = [f / total for f in fracs]
     turn = rng.choices(legal, weights=weights_t, k=1)[0]
     return approach, turn
 

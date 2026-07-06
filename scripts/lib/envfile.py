@@ -170,38 +170,50 @@ def _fail(msg: str):
 
 
 def require_env_fields(env: dict, tag: str) -> None:
-    """Hard-fail if any required field is missing or null in ``env``."""
+    """Hard-fail if any required field is missing, null, or non-numeric in ``env``."""
     def need(cond, msg):
         if not cond:
             _fail(f"env {tag}: {msg}")
 
+    def _finite_vec3(v, label):
+        """require a list of at least 3 finite numbers."""
+        if v is None or not isinstance(v, (list, tuple)):
+            _fail(f"{label}: missing/not a list")
+        if len(v) < 3:
+            _fail(f"{label}: expected >=3 elements, got {len(v)}")
+        for i in range(3):
+            val = v[i]
+            if not isinstance(val, (int, float)) or not math.isfinite(val):
+                _fail(f"{label}[{i}]={val!r}: must be a finite number")
+
+    def _finite_positive(val, label):
+        if val is None:
+            _fail(f"{label}: missing")
+        if not isinstance(val, (int, float)) or not math.isfinite(val):
+            _fail(f"{label}={val!r}: must be a finite number")
+        if val <= 0:
+            _fail(f"{label}={val}: must be > 0")
+
     cam = env.get("camera") or {}
-    need(cam.get("location") is not None and len(cam["location"]) >= 3,
-         "camera.location missing")
-    need(cam.get("look_at") is not None and len(cam["look_at"]) >= 3,
-         "camera.look_at missing")
-    need(cam.get("lens_mm") is not None, "camera.lens_mm missing")
-    need(cam.get("sensor_mm") is not None, "camera.sensor_mm missing")
+    _finite_vec3(cam.get("location"), "camera.location")
+    _finite_vec3(cam.get("look_at"), "camera.look_at")
+    _finite_positive(cam.get("lens_mm"), "camera.lens_mm")
+    _finite_positive(cam.get("sensor_mm"), "camera.sensor_mm")
 
     road = env.get("road") or {}
-    need(road.get("location") is not None and len(road["location"]) >= 3,
-         "road.location missing")
-    need(road.get("rotation_euler") is not None and len(road["rotation_euler"]) >= 3,
-         "road.rotation_euler missing")
+    _finite_vec3(road.get("location"), "road.location")
+    _finite_vec3(road.get("rotation_euler"), "road.rotation_euler")
 
     sun = (env.get("lights") or {}).get("Sun") or {}
-    need(sun.get("rotation_euler") is not None and len(sun["rotation_euler"]) >= 3,
-         "lights.Sun.rotation_euler missing")
-    need(sun.get("energy") is not None, "lights.Sun.energy missing")
+    _finite_vec3(sun.get("rotation_euler"), "lights.Sun.rotation_euler")
+    _finite_positive(sun.get("energy"), "lights.Sun.energy")
 
     defaults = (env.get("vehicles") or {}).get("lane_defaults") or {}
     for i in range(G.NUM_LANES):
         need(str(i) in defaults, f"vehicles.lane_defaults[{i}] missing")
         e = defaults[str(i)] or {}
-        need(e.get("location") is not None and len(e["location"]) >= 3,
-             f"lane_defaults[{i}].location missing")
-        need(e.get("rotation_euler") is not None and len(e["rotation_euler"]) >= 3,
-             f"lane_defaults[{i}].rotation_euler missing")
+        _finite_vec3(e.get("location"), f"lane_defaults[{i}].location")
+        _finite_vec3(e.get("rotation_euler"), f"lane_defaults[{i}].rotation_euler")
 
 
 def load_env(tag: str, root: str) -> dict:

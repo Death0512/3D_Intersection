@@ -488,6 +488,11 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
             tag_r, ok, dt = _render_worker(args, samples=samples)
             results[tag_r] = (ok, dt)
         _print_render_summary(results, camera_tags)
+        failed = sum(1 for ok, _ in results.values() if not ok)
+        if failed:
+            raise SystemExit(
+                f"PIPELINE ABORTED — {failed} render worker(s) failed. "
+                f"Partial renders may exist in {out_dir}.")
         return
 
     n_gpus = len(gpu_assignment) if gpu_assignment else 0
@@ -553,6 +558,11 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
             f"above for which worker went silent and its last line). "
             f"Partial renders may exist in {out_dir}.")
     _print_render_summary(results, camera_tags)
+    failed = sum(1 for ok, _ in results.values() if not ok)
+    if failed:
+        raise SystemExit(
+            f"PIPELINE ABORTED — {failed} render worker(s) failed. "
+            f"Partial renders may exist in {out_dir}.")
 
 
 def _print_render_summary(results, camera_tags):
@@ -563,7 +573,7 @@ def _print_render_summary(results, camera_tags):
         print(f"    {tag:6s} {'OK' if ok else 'FAILED'}  ({dt:.1f}s)")
     failed = sum(1 for ok, _ in results.values() if not ok)
     if failed:
-        print(f"  {failed} camera(s) FAILED — metadata will be partial")
+        print(f"  {failed} camera(s) FAILED — pipeline will abort")
 
 
 def step_metadata(scenario_path, out_dir):

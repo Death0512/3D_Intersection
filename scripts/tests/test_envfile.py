@@ -386,5 +386,54 @@ def _run_all():
     return passed == len(fns)
 
 
+def test_env_validation_rejects_nan_location():
+    env = ENV.compute_env("in_N", ROAD_META)
+    env["camera"]["location"] = [float("nan"), 0.0, 7.0]
+    try:
+        ENV.require_env_fields(env, "in_N")
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("expected failure for NaN camera.location")
+
+
+def test_env_validation_rejects_negative_lens():
+    env = ENV.compute_env("in_N", ROAD_META)
+    env["camera"]["lens_mm"] = -60.0
+    try:
+        ENV.require_env_fields(env, "in_N")
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("expected failure for negative lens_mm")
+
+
+def test_env_validation_rejects_zero_energy():
+    env = ENV.compute_env("in_N", ROAD_META)
+    env["lights"]["Sun"]["energy"] = 0.0
+    try:
+        ENV.require_env_fields(env, "in_N")
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("expected failure for zero sun energy")
+
+
+def test_env_validation_rejects_string_in_vector():
+    env = ENV.compute_env("in_N", ROAD_META)
+    env["road"]["location"] = ["a", "b", 0.0]
+    try:
+        ENV.require_env_fields(env, "in_N")
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("expected failure for string in road.location")
+
+
+def test_env_validation_accepts_valid_computed_env():
+    env = ENV.compute_env("in_N", ROAD_META)
+    ENV.require_env_fields(env, "in_N")
+
+
 if __name__ == "__main__":
     sys.exit(0 if _run_all() else 1)
