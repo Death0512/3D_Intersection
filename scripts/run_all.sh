@@ -62,7 +62,7 @@ set -euo pipefail
 SEED=42
 NUM_VEHICLES=120
 FPS=30
-SECONDS_VAL=5
+SECONDS_VAL=12
 OUT_DIR=""            # empty → auto-selected per host (see below)
 ONLY=""
 SKIP_ASSET_CHECK=0  
