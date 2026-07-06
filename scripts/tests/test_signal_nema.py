@@ -1,5 +1,5 @@
 """Tests for the NEMA 8-phase dual-ring ``AdaptiveSignalPlan``
-(MaxPressure selector) in ``lib/signal.py``.
+(MaxPressure selector) in ``lib/traffic_signal.py``.
 
 Verifies the fundamental NEMA invariants:
   * No two conflicting movements are green simultaneously.
@@ -22,8 +22,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-from lib import signal as SGmod  # noqa: E402
-from lib.signal import (  # noqa: E402
+from lib import traffic_signal as SGmod  # noqa: E402
+from lib.traffic_signal import (  # noqa: E402
     AdaptiveSignalPlan, SignalPlan, NEMA_PHASES,
     _NS_COMBOS, _EW_COMBOS, _NS_SIDE, _EW_SIDE,
     _movement_to_phase,
@@ -334,3 +334,23 @@ def test_generate_adaptive_no_conflicting_intervals():
         side2 = "NS" if p2 in _NS_SIDE else "EW"
         assert side1 == side2, (
             f"cross-barrier combo in {iv}: phases {p1},{p2}")
+
+
+def _run_all():
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    passed = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"  [PASS] {fn.__name__}")
+            passed += 1
+        except AssertionError as e:
+            print(f"  [FAIL] {fn.__name__}: {e}")
+        except Exception as e:
+            print(f"  [ERR ] {fn.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{passed}/{len(fns)} tests passed")
+    return passed == len(fns)
+
+
+if __name__ == "__main__":
+    sys.exit(0 if _run_all() else 1)

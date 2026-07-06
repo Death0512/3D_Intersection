@@ -23,6 +23,7 @@ Two signal controllers are provided:
 """
 from __future__ import annotations
 
+import bisect
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -342,12 +343,9 @@ class AdaptiveSignalPlan:
             q: Dict[Tuple[G.Direction, G.Turn], int] = {}
             for mv, ts in arrivals.items():
                 ptr = served_ptr.get(mv, 0)
-                # count arrivals >= ts[ptr] and <= t (unserved + arrived by t)
-                n = 0
-                for i in range(ptr, len(ts)):
-                    if ts[i] <= t:
-                        n += 1
-                q[mv] = n
+                # arrivals are sorted; count unserved arrivals <= t in O(log n)
+                # instead of rescanning the tail every signal decision.
+                q[mv] = bisect.bisect_right(ts, t, lo=ptr) - ptr
             return q
 
         def _discharge_until(combo: Tuple[int, int], t_end: int):
@@ -359,10 +357,8 @@ class AdaptiveSignalPlan:
                         continue
                     ts = arrivals.get(mv, [])
                     ptr = served_ptr[mv]
-                    # advance ptr past all arrivals <= t_end
-                    while ptr < len(ts) and ts[ptr] <= t_end:
-                        ptr += 1
-                    served_ptr[mv] = ptr
+                    # advance ptr past all arrivals <= t_end in O(log n)
+                    served_ptr[mv] = bisect.bisect_right(ts, t_end, lo=ptr)
 
         # Decide which side starts: the side with the earliest arrival runs
         # first; tie-break N/S (deterministic).

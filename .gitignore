@@ -10,3 +10,8 @@ scripts/lib/__pycache__
 scripts/tests/__pycache__
 
 scripts/env.sh
+
+codemap.md
+*/codemap.md
+.slim
+AGENTS.md

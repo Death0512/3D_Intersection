@@ -99,7 +99,7 @@ def test_poisson_arrivals_safety_invariants_hold():
     legacy uniform scheduler: no same-lane headway or catch-up violations,
     and (when a signal plan is present) no red crossings, no exit-lane
     overlaps, queued-release spacing >= 0.5s, fixpoint stability."""
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     dm = S.DemandModel.default()
     rng = random.Random(11)

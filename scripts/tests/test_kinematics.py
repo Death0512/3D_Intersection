@@ -548,7 +548,7 @@ def test_validate_length_axis_respects_forward_offset():
 # -----------------------------------------------------------------------------
 
 def test_signal_phase_boundaries():
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     assert sp.cycle_frames == 2100  # (30+3+2) * 2 * 30
     # NS_GREEN: 0-899
@@ -569,7 +569,7 @@ def test_signal_phase_boundaries():
 
 
 def test_signal_is_green_correctly_distinguishes_phases():
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     # NS_GREEN -> N/S green, E/W red
     assert sp.is_green(G.Direction.N, G.Turn.STRAIGHT, 0) is True
@@ -591,7 +591,7 @@ def test_signal_is_green_correctly_distinguishes_phases():
 
 
 def test_signal_next_green_frame_monotonic():
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     # N/S next green from within NS_GREEN = same frame
     assert sp.next_green_frame(G.Direction.N, G.Turn.STRAIGHT, 0) == 0
@@ -607,14 +607,14 @@ def test_signal_next_green_frame_monotonic():
 
 
 def test_signal_raises_for_never_green():
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     f = sp.next_green_frame(G.Direction.N, G.Turn.STRAIGHT, 5000)
     assert f >= 5000
 
 
 def test_signal_next_red_frame():
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     # N/S red from middle of NS_GREEN = start of NS_YELLOW at 900
     f = sp.next_red_frame(G.Direction.N, G.Turn.STRAIGHT, 100)
@@ -807,7 +807,7 @@ def test_signal_gating_sets_stop_release_on_red():
     are free-flow."""
     import scenario_gen as S
     import random
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     rng = random.Random(1)
     vehicles = [S.make_vehicle("V0", rng)]
@@ -832,7 +832,7 @@ def test_signal_gating_freeflow_on_green():
     """Vehicles arriving on green should NOT queue."""
     import scenario_gen as S
     import random
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     rng = random.Random(2)
     vehicles = [S.make_vehicle("V0", rng)]
@@ -851,7 +851,7 @@ def test_resolve_all_no_red_crossings():
     """After _resolve_all with signal_plan, no vehicle crosses the stop
     line on red."""
     import scenario_gen as S
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     import random
     rng = random.Random(3)
@@ -884,7 +884,7 @@ def test_resolve_all_exit_conflicts_resolved():
     """After _resolve_all, no exit-lane interval overlaps exceed the
     buffer threshold."""
     import scenario_gen as S
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     import random
     rng = random.Random(5)
@@ -918,7 +918,7 @@ def test_resolve_all_headway_maintained():
     """After _resolve_all, same-lane headway and catch-up constraints
     still hold."""
     import scenario_gen as S
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     import random
     rng = random.Random(7)
@@ -942,7 +942,7 @@ def test_scenario_signal_generation_creates_json_with_signal_field():
     """generate() with signal_plan writes signal_cycle_frames to JSON."""
     import scenario_gen as S
     import tempfile
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     with tempfile.TemporaryDirectory() as tmp:
         scn = S.generate(1, 10, 300, tmp, fps=30, signal_plan=sp)
@@ -959,7 +959,7 @@ def test_multi_seed_resolve_all_invariants():
     pass produces no change).  Sweeps seeds 0-19 with 60 vehicles each."""
     import scenario_gen as S
     import random
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     for seed in range(20):
         rng = random.Random(seed)
@@ -1046,7 +1046,7 @@ def test_multi_seed_saturation_invariants():
     standard-density test)."""
     import scenario_gen as S
     import random
-    from lib import signal as SG
+    from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     for seed in range(1000, 1020):
         rng = random.Random(seed)

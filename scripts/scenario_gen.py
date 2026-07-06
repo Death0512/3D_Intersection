@@ -33,17 +33,7 @@ sys.path.insert(0, os.path.join(HERE, "lib"))
 import geometry as G
 import kinematics as K
 import envfile as ENV
-# Import the traffic signal module unambiguously.  Python's stdlib also
-# ships a top-level ``signal`` module (OS signals); plain ``import signal``
-# can resolve to stdlib under pytest/CI runs where ``scripts/lib`` isn't on
-# the path first.  Force-load our local module and register it under a
-# distinct name to guarantee never to import the stdlib one.
-import importlib.util as _ilu
-_sig_spec = _ilu.spec_from_file_location(
-    "traffic_signal_lib", os.path.join(HERE, "lib", "signal.py"))
-SG = _ilu.module_from_spec(_sig_spec)
-sys.modules["traffic_signal_lib"] = SG
-_sig_spec.loader.exec_module(SG)
+import traffic_signal as SG
 from gen_plate import random_plate
 
 ROAD_JSON = os.path.join(HERE, "..", "assets", "road.json")
@@ -860,14 +850,10 @@ def _resolve_all(vehicles, approach_visible_length, fps,
     before and after each round.  Exit resolution and headway only push
     later (monotonic), so the loop converges.
 
-    If ``signal_plan`` is an ``AdaptiveSignalPlan`` the plan is *rebuilt*
-    from the current natural stop-line arrivals at the top of each round
-    (closed loop: signal reacts to demand).  The arrivals snapshot is taken
-    once on the first round and reused on subsequent rounds so the signal
-    plan is a function of *demand* only — feeding gated arrivals back in
-    would cause the plan to oscillate.  The plan stabilises when the arrival
-    snapshot is unchanged across rounds (a direct consequence of the
-    snapshot comparison already used for fixpoint detection).
+    If ``signal_plan`` is an ``AdaptiveSignalPlan`` the plan is built once
+    from the natural stop-line demand snapshot. Rebuilding the same timeline
+    every fixpoint round was pure cost and erased late fallback intervals;
+    feeding gated arrivals back in would make the controller chase itself.
     """
     def _snapshot(vs):
         return [
@@ -882,16 +868,13 @@ def _resolve_all(vehicles, approach_visible_length, fps,
     if is_adaptive:
         arrivals_snapshot = _collect_stop_arrivals(
             vehicles, approach_visible_length, fps)
+        horizon = (
+            max((t for ts in arrivals_snapshot.values() for t in ts),
+                default=0) + 20 * signal_plan.max_green_f)
+        signal_plan.rebuild(arrivals_snapshot, horizon_frames=horizon)
 
     for _round in range(max_rounds):
         before = _snapshot(vehicles)
-
-        # 0. Closed-loop adaptive signal: rebuild plan from current arrivals.
-        if is_adaptive:
-            horizon = (
-                max((t for ts in arrivals_snapshot.values() for t in ts),
-                    default=0) + 20 * signal_plan.max_green_f)
-            signal_plan.rebuild(arrivals_snapshot, horizon_frames=horizon)
 
         # 1. Same-lane headway (re-check after exit shifts)
         _check_headway_fixpoint(vehicles, approach_visible_length, fps)
