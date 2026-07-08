@@ -178,7 +178,7 @@ def compute_metadata(scenario: dict, root: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# ffmpeg encoding — GPU (NVENC) with CPU (libx264) fallback
+# ffmpeg encoding — GPU-only NVENC
 # ---------------------------------------------------------------------------
 _NVENC_AVAILABLE = None  # cached probe result (None = not yet probed)
 
@@ -237,9 +237,9 @@ def _print_ffmpeg_stderr(encoder: str, rc: int, stderr: str):
 
 def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float,
                    timeout_s: int = 1800) -> bool:
-    """Encode the PNG frame sequence to mp4. Prefers GPU NVENC (frees the CPU
-    for other parallel render workers); falls back to CPU libx264 if NVENC
-    is unavailable or fails at runtime. Inherits CUDA_VISIBLE_DEVICES from
+    """Encode the PNG frame sequence to mp4 with GPU NVENC only.
+
+    Inherits CUDA_VISIBLE_DEVICES from
     the parent process environment (set per-worker by run_pipeline.py), so
     NVENC binds to the same GPU this Blender instance rendered on.
 
@@ -273,31 +273,19 @@ def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float,
                   flush=True)
             return None
 
-    if _nvenc_available():
-        cmd = base + [
-            "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p",
-            "-cq", "20", video_path,
-        ]
-        proc = _run(cmd, "NVENC")
-        if proc is not None and proc.returncode == 0:
-            return True
-        # Print the head (root cause — NVENC init / format negotiation) and
-        # the tail (summary line) of stderr. The full log can be thousands of
-        # lines of frame-by-frame progress; the useful diagnostics are at the
-        # very top and very bottom.
-        if proc is not None and proc.stderr:
-            _print_ffmpeg_stderr("NVENC", proc.returncode, proc.stderr)
-        print(f"  [ffmpeg] falling back to CPU libx264", flush=True)
-
+    if not _nvenc_available():
+        print("  [ffmpeg] h264_nvenc unavailable — GPU encoding required; "
+              "no CPU fallback.", flush=True)
+        return False
     cmd = base + [
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-crf", "20", video_path,
+        "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p",
+        "-cq", "20", video_path,
     ]
-    proc = _run(cmd, "libx264")
+    proc = _run(cmd, "NVENC")
     if proc is None:
         return False
     if proc.returncode != 0 and proc.stderr:
-        _print_ffmpeg_stderr("libx264", proc.returncode, proc.stderr)
+        _print_ffmpeg_stderr("NVENC", proc.returncode, proc.stderr)
     return proc.returncode == 0
 
 
@@ -438,9 +426,7 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
         except Exception:
             pass
 
-    # encode to mp4 (GPU NVENC when available, else CPU libx264 fallback —
-    # keeps encoding off the CPU so it doesn't bottleneck/contend with
-    # parallel Blender-GPU render workers).
+    # encode to mp4 with GPU NVENC only; fail fast instead of CPU fallback.
     print(f"  [{camera_tag}] encoding...", flush=True)
     video_path = os.path.join(out_dir, f"video_{camera_tag}.mp4")
     fps = scenario["fps"]

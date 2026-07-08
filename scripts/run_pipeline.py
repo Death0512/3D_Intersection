@@ -13,7 +13,7 @@ The scenario duration auto-extends to fit all vehicles (``--seconds`` is the
 minimum floor).
 
 Run (from the project root, with venv python):
-    python3 scripts/run_pipeline.py --seed 42 --num-vehicles 10 --seconds 12.0 --out output/run1
+    python3 scripts/run_pipeline.py --seed 42 --seconds 12.0 --out output/run1
 
 Blender is invoked via subprocess; the python interpreter with Pillow is
 resolved from the DOAN_PYTHON env var (set by scripts/env.sh).
@@ -45,21 +45,10 @@ VRAM_PER_JOB_MIB = 1600
 # Minimum free VRAM to attempt any GPU rendering (MiB).
 MIN_FREE_VRAM_MIB = 1200
 
-# Hard cap on Blender render workers per GPU. VRAM is not the only constraint
-# on per-GPU packing: each Cycles+OptiX context also contends for the GPU's
-# compute units, the host-side texture upload bandwidth, and the CPU-side
-# denoiser (OIDN runs on the CPU when the OptiX-denox weights file
-# /usr/share/nvidia/nvoptix.bin is unavailable — the case on Kaggle's T4
-# container). The prior packing used only VRAM (free // VRAM_PER_JOB_MIB) and
-# on a 15 GB T4 could schedule 4+ heavy scenes (40+ vehicle scenes, each with
-# hundreds of remapped textures — see the `in_E` build of 42 vehicles / 378
-# textures in run 1) onto one card. That exhausted VRAM and stalled the OptiX
-# render on frame 0 — silent for 600 s until the watchdog aborted the pool
-# (see PIPELINE ABORTED — worker silent for Ns). 2 per GPU keeps each Cycles
-# context at ~7 GB headroom on a 15 GB card and prevents the stall while still
-# using every GPU. Override with --max-workers-per-gpu for denser/lighter
-# scenes; the working n=50 baseline ran at 2/GPU on Kaggle 2×T4 without issue.
-MAX_WORKERS_PER_GPU = 2
+# Hard cap on Blender render workers per GPU.  One worker per GPU keeps each
+# Cycles context with full VRAM headroom and avoids compute/denoiser contention.
+# Override with --max-workers-per-gpu for very light scenes if needed.
+MAX_WORKERS_PER_GPU = 1
 
 
 def run(cmd: list, cwd=ROOT, check=True, timeout=None):
@@ -118,15 +107,14 @@ def step_assets_validate():
         timeout=120)
 
 
-def step_scenario(seed, num_vehicles, seconds, out_dir, fps=None,
+def step_scenario(seed, seconds, out_dir, fps=None,
                    signal=False, signal_mode="fixed", demand=None,
                    demand_scale=None):
     """Run scenario_gen.py. Bounded to 600s — the `_resolve_all` fixpoint is
-    capped at 20 rounds, so even with 200 vehicles this stays well under 60s;
+    capped at 20 rounds, so even with dense demand this stays well under 60s;
     a hang here means a non-converging signal/exit loop."""
     cmd = [PYTHON, os.path.join(HERE, "scenario_gen.py"),
            "--seed", str(seed),
-           "--num-vehicles", str(num_vehicles),
            "--seconds", str(seconds),
            "--out", out_dir]
     if fps is not None:
@@ -169,13 +157,12 @@ _GPU_INFO_CACHE = None
 
 
 def _gpu_info():
-    """Return a list of (index, free_mib) tuples for all GPUs, or empty list.
+    """Return a list of (index, free_mib) tuples for all GPUs, or raise
+    SystemExit if no NVIDIA GPU is available. Fail-fast — this pipeline
+    cannot render on CPU.
 
     Single source of truth for both GPU count and per-GPU free VRAM. Cache is
     safe for a single pipeline run (VRAM only changes across render launches).
-    Distinguishes "nvidia-smi binary missing" (silent fallback) from "binary
-    exists but output parse failed" (warns loudly so a silent serial-fallback
-    doesn't eat 8× wall time with no clue why).
     """
     global _GPU_INFO_CACHE
     if _GPU_INFO_CACHE is not None:
@@ -183,8 +170,10 @@ def _gpu_info():
     # Cache miss → probe.
     import shutil as _sh
     if _sh.which("nvidia-smi") is None:
-        _GPU_INFO_CACHE = []
-        return []
+        raise SystemExit(
+            "FAIL: nvidia-smi not found — no NVIDIA GPU detected. "
+            "This pipeline requires an NVIDIA GPU (OptiX or CUDA) for Cycles rendering. "
+            "CPU rendering is not supported.")
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,memory.free",
@@ -198,41 +187,38 @@ def _gpu_info():
                 free = int(parts[1].strip())
                 if free > 0:
                     result.append((idx, free))
+        if not result:
+            raise SystemExit(
+                "FAIL: nvidia-smi returned but no GPUs with free VRAM > 0. "
+                "GPU rendering cannot proceed.")
         _GPU_INFO_CACHE = result
         return result
     except subprocess.TimeoutExpired:
-        print(f"[WARN] nvidia-smi timed out (>10s) — defaulting to serial",
-              file=sys.stderr, flush=True)
-        _GPU_INFO_CACHE = []
-        return []
+        raise SystemExit(
+            "FAIL: nvidia-smi timed out (>10s). NVIDIA GPU probe failed — "
+            "rendering cannot proceed.")
     except (ValueError, OSError) as e:
-        # Binary present but parse failed — the most insidious case: silent
-        # fallback to --jobs 1 with no clue why. Warn loudly.
-        print(f"[WARN] nvidia-smi output parse failed ({type(e).__name__}: {e}) "
-              f"— defaulting to serial render. raw stdout: {out.stdout!r}",
-              file=sys.stderr, flush=True)
-        _GPU_INFO_CACHE = []
-        return []
+        raise SystemExit(
+            f"FAIL: nvidia-smi output parse failed ({type(e).__name__}: {e}). "
+            f"raw stdout: {out.stdout!r}. NVIDIA GPU probe failed — "
+            f"rendering cannot proceed.")
 
 
 def _free_vram_mib():
-    """Query free GPU VRAM from nvidia-smi.  Returns integer MiB or None.
+    """Query free GPU VRAM from nvidia-smi.  Returns integer MiB.
 
     Uses the first GPU (index 0) for single-GPU compat — the multi-GPU path
-    in _detect_jobs uses _gpu_info() instead. If GPU 0 is filtered out (free=
-    0), warns rather than silently returning a different GPU's VRAM (which
-    would underbook the real GPU 0 and oversubscribe it).
+    in _detect_jobs uses _gpu_info() instead.
     """
     info = _gpu_info()
-    if not info:
-        return None
     for idx, free in info:
         if idx == 0:
             return free
-    print(f"[WARN] GPU 0 not in nvidia-smi free-VRAM list (it may be full); "
-          f"available GPUs: {info} — using {info[0][1]} MiB budget on GPU {info[0][0]}",
+    # GPU 0 not in the list (unusual but possible) — use first available.
+    print(f"[WARN] GPU 0 not in nvidia-smi free-VRAM list; "
+          f"using GPU {info[0][0]} with {info[0][1]} MiB",
           file=sys.stderr, flush=True)
-    return info[0][1]  # fallback: first available GPU, whatever its index
+    return info[0][1]
 
 
 def _detect_jobs(camera_count: int, explicit: int = 0,
@@ -240,7 +226,7 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     """Determine how many parallel Blender jobs to run AND which GPU each binds to.
 
     Multi-GPU hosts (e.g. Kaggle T4×2): each GPU runs up to
-    ``max_workers_per_gpu`` Blender workers (default 2 — see MAX_WORKERS_PER_GPU
+    ``max_workers_per_gpu`` Blender workers (default 1 — see MAX_WORKERS_PER_GPU
     for the rationale), giving good throughput without exhausting VRAM /
     compute on dense scenes. Single-GPU: same cap applies (avoids oversubscribing
     one card). Returns (job_count, gpu_assignment) where gpu_assignment is a
@@ -266,9 +252,6 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
 
     info = _gpu_info()
     n_gpu = len(info)
-    if n_gpu == 0:
-        print("[GPU] nvidia-smi unavailable — defaulting to --jobs 1")
-        return 1, [0]
 
     # Multi-GPU: pack up to max_workers_per_gpu workers per GPU (VRAM-limited
     # AND cap-limited), interleaved so capping by camera_count spreads load
@@ -307,14 +290,12 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     # Single GPU: VRAM-budget job count, capped per-GPU (original behaviour
     # plus the cap so a huge single card doesn't oversubscribe).
     free = info[0][1] if info[0][0] == 0 else _free_vram_mib()
-    if free is None:
-        print("[GPU] nvidia-smi unavailable — defaulting to --jobs 1")
-        return 1, [0]
     jobs = max(1, min(free // VRAM_PER_JOB_MIB, max_workers_per_gpu))
     jobs = min(jobs, camera_count)
     if free < MIN_FREE_VRAM_MIB:
-        print(f"[GPU] free VRAM {free} MiB < {MIN_FREE_VRAM_MIB} — forcing --jobs 1")
-        jobs = 1
+        raise SystemExit(
+            f"FAIL: free VRAM {free} MiB < {MIN_FREE_VRAM_MIB} MiB minimum. "
+            f"GPU rendering cannot proceed with insufficient VRAM.")
     assignment = [0] * jobs
     print(f"[GPU] free VRAM {free} MiB, cap={max_workers_per_gpu}/GPU → "
           f"{jobs} parallel render job{'' if jobs==1 else 's'} "
@@ -597,15 +578,12 @@ def step_validate_run(out_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--num-vehicles", type=int, default=10)
     ap.add_argument("--fps", type=int, default=None,
                     help="frames per second (default: geometry.FPS)")
     ap.add_argument("--seconds", type=float, default=12.0,
-                    help="MINIMUM video length in seconds. The actual video "
-                         "auto-extends to fit all vehicles (it can be longer "
-                         "than this, never shorter). At default demand "
-                         "(400 veh/h/approach), ~25 vehicles fit in 12s; "
-                         "100+ vehicles will spread across minutes.")
+                    help="video length in seconds (HARD ceiling). At default demand "
+                         "(400 veh/h/approach), ~5-7 vehicles appear in 12s; "
+                         "increase --demand-scale for denser traffic.")
     ap.add_argument("--out", type=str, default=os.path.join(ROOT, "output", "run1"))
     ap.add_argument("--only", help="render only this camera (debug)")
     ap.add_argument("--jobs", type=int, default=0,
@@ -614,11 +592,8 @@ def main():
     ap.add_argument("--max-workers-per-gpu", type=int,
                     default=MAX_WORKERS_PER_GPU,
                     help=f"cap on Blender render workers per GPU regardless of "
-                         f"free VRAM (default {MAX_WORKERS_PER_GPU}). The VRAM "
-                         f"budget alone over-packs big cards (a 15 GB T4 lets "
-                         f"~9 jobs fit by VRAM, but 4+ heavy Cycles+OptiX "
-                         f"contexts stall the render — silent hang). Raise for "
-                         f"light scenes (few vehicles / no signal) only.")
+                         f"free VRAM (default {MAX_WORKERS_PER_GPU}). One worker "
+                         f"per GPU avoids VRAM/context contention.")
     ap.add_argument("--silence-timeout", type=int,
                     default=DEFAULT_SILENCE_TIMEOUT_S,
                     help=f"seconds a render worker may go silent before the "
@@ -639,15 +614,15 @@ def main():
                          "on realised arrivals)")
     ap.add_argument("--demand", type=str, default=None,
                     help="path to a demand JSON (per-approach flow veh/h + "
-                         "turning split). When omitted, the default demand "
-                         "model is used. Pass 'none' to disable demand and "
-                         "use the legacy uniform-random scheduler.")
+                          "turning split). When omitted, the default demand "
+                         "model is used.")
     ap.add_argument("--demand-scale", type=float, default=None,
                     help="density multiplier on the default demand model "
                          "(default: 1.0 when --demand is not given). E.g. "
                          "--demand-scale 3 makes ~1200 veh/h/approach -> denser "
-                         "on-screen traffic, no JSON file needed. Ignored when "
-                         "--demand is a path or 'none'.")
+                         "on-screen traffic, no JSON file needed. "
+                         "Scale <= 0 produces zero vehicles. "
+                         "Ignored when --demand is a path.")
     args = ap.parse_args()
 
     fps = args.fps
@@ -656,8 +631,8 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     fps_label = f"{fps} fps" if fps else "default fps"
     print("=" * 60)
-    print(f"PIPELINE  seed={args.seed} n={args.num_vehicles}  "
-          f"min={seconds}s ({fps_label})  out={out_dir}")
+    print(f"PIPELINE  seed={args.seed}  "
+          f"seconds={seconds}s ({fps_label})  out={out_dir}")
     print(f"  python : {PYTHON}")
     print(f"  blender: {BLENDER}")
     print("=" * 60)
@@ -670,7 +645,7 @@ def main():
         step_assets_validate()
 
     print("\n[2/5] Scenario generation")
-    scn = step_scenario(args.seed, args.num_vehicles, seconds, out_dir, fps=fps,
+    scn = step_scenario(args.seed, seconds, out_dir, fps=fps,
                         signal=args.signal, signal_mode=args.signal_mode,
                         demand=args.demand, demand_scale=args.demand_scale)
 

@@ -42,7 +42,6 @@ def test_pipeline_metadata_validate_smoke():
         _run([
             sys.executable, "scripts/scenario_gen.py",
             "--seed", "123",
-            "--num-vehicles", "4",
             "--seconds", "12",
             "--demand", demand_path,
             "--out", td,

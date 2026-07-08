@@ -16,8 +16,6 @@ import sys
 import itertools
 import random
 
-import pytest
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -305,7 +303,7 @@ def test_generate_adaptive_writes_signal_timeline():
     import scenario_gen as S
     import json
     with tempfile.TemporaryDirectory() as td:
-        scn = S.generate(7, 12, 20.0, td, fps=FPS,
+        scn = S.generate(7, 20.0, td, fps=FPS,
                           signal_mode="adaptive",
                           demand=S.DemandModel.default())
         with open(os.path.join(td, "scenario.json")) as f:
@@ -323,7 +321,7 @@ def test_generate_adaptive_no_conflicting_intervals():
     import scenario_gen as S
     import json
     with tempfile.TemporaryDirectory() as td:
-        S.generate(11, 18, 20.0, td, fps=FPS,
+        S.generate(11, 20.0, td, fps=FPS,
                     signal_mode="adaptive",
                     demand=S.DemandModel.default())
         with open(os.path.join(td, "scenario.json")) as f:

@@ -256,10 +256,10 @@ echo "  env     : $ENV_FILE"
 echo ""
 echo "Quick start:"
 echo "  source $ENV_FILE"
-echo "  python3 scripts/scenario_gen.py --seed 42 --num-vehicles 2 --seconds 5 --out output/test"
+echo "  python3 scripts/scenario_gen.py --seed 42 --seconds 5 --demand-scale 3 --out output/test"
 echo ""
 echo "Or run the full pipeline:"
-echo "  bash scripts/run_all.sh --num-vehicles 2 --seconds 5 --out output/test"
+echo "  bash scripts/run_all.sh --seconds 5 --demand-scale 3 --out output/test"
 echo ""
 
 # ---- GPU tuning (opt-in, --gpu-tune flag required) --------------------------
@@ -297,7 +297,7 @@ if [[ "$GPU_TUNE" -eq 1 ]]; then
     fi
     echo ""
     echo "  GPU tuning complete.  Run the pipeline with:"
-    echo "    bash scripts/run_all.sh --num-vehicles 80 --seconds 60"
+    echo "    bash scripts/run_all.sh --seconds 60 --demand-scale 3"
   fi
 fi
 

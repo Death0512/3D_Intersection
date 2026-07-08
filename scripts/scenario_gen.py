@@ -7,13 +7,13 @@ Each vehicle gets: id, class, color, unique plate, approach, lane, turn,
 speed, depart_frame. Departures are scheduled so that no two vehicles in the
 same (approach, lane) overlap (min-headway enforced).
 
-The output ``duration_frames`` is auto-sized to fit all scheduled vehicles:
-the requested ``--seconds`` is treated as a minimum floor; the actual duration
-is extended so every vehicle completes its full appear→box-edge→disappear
-arc on screen (no frozen mid-road cars).
+Vehicles are generated from Poisson arrivals within [0, --seconds] based on
+a DemandModel. ``duration_frames`` is exactly ``int(round(seconds*fps))``;
+vehicles whose computed ``leave_frame`` would exceed it are discarded
+(``--seconds`` is a HARD ceiling, not a minimum floor).
 
 Usage:
-    python3 scripts/scenario_gen.py --seed 42 --num-vehicles 20 --seconds 12.0
+    python3 scripts/scenario_gen.py --seed 42 --seconds 12.0
 """
 from __future__ import annotations
 
@@ -116,8 +116,7 @@ class DemandModel:
         for d, v in self.flows.items():
             if not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
                 _raise(f"flow {_dir_name(d)}={v!r} must be a finite non-negative float")
-        if self.flows and all(v == 0 for v in self.flows.values()):
-            _raise("total flow is zero — no vehicles can be produced")
+        # All-zero demand is valid: it intentionally produces an empty scenario.
 
         # turn_split: every value must be finite non-negative; at least one
         # value in the split must be > 0 (otherwise vehicle generation is
@@ -190,7 +189,6 @@ def _approach_turn_from_demand(demand: DemandModel, rng: random.Random,
 
 # ---- defaults ---------------------------------------------------------------
 DEFAULT_SEED = 42
-DEFAULT_NUM_VEHICLES = 20
 DEFAULT_SECONDS = 12.0
 VEHICLE_CLASSES = ["car"]
 # representative lengths for headway (m)
@@ -483,12 +481,41 @@ def _compute_max_leave_frame(vehicles: list, road_meta: dict, fps: int) -> int:
     return max_lf
 
 
-def generate(seed: int, num_vehicles: int, seconds: float,
+def _discard_overrunning(vehicles: list, road_meta: dict, fps: int,
+                         duration_frames: int) -> list:
+    """Return vehicles whose ``leave_frame`` fits within ``duration_frames``."""
+    envs = {tag: ENV.load_env(tag, ROOT) for tag in G.camera_names()}
+    kept = []
+    for veh in vehicles:
+        approach = G.Direction(veh["approach"])
+        turn = G.Turn(veh["turn"])
+        ex_dir, ex_lane = G.exit_lane_for_movement(approach, veh["lane"], turn)
+        in_anchor, _ = ENV.lane_default_anchor(envs[f"in_{approach.value}"], veh["lane"])
+        out_anchor, _ = ENV.lane_default_anchor(envs[f"out_{ex_dir.value}"], ex_lane)
+        motion = K.plan_motion(
+            veh["id"], approach, veh["lane"], turn,
+            veh["speed_ms"], veh["depart_frame"], fps=fps,
+            appear_anchor=in_anchor[:2],
+            reappear_anchor=out_anchor[:2],
+            road_meta=road_meta,
+            stop_frame=veh.get("stop_frame"),
+            release_frame=veh.get("release_frame"))
+        if motion.leave_frame <= duration_frames:
+            kept.append(veh)
+    return kept
+
+
+def generate(seed: int, seconds: float,
              out_dir: str, fps: int = G.FPS,
              signal_plan: Optional[SG.SignalPlan] = None,
              demand: Optional[DemandModel] = None,
              signal_mode: str = "fixed") -> dict:
     """Generate a scenario and write ``scenario.json``.
+
+    Vehicles are generated from Poisson arrivals within [0, ``seconds``]
+    based on ``demand``. Vehicles whose computed ``leave_frame`` would exceed
+    ``int(round(seconds*fps))`` are discarded. ``duration_frames`` is exactly
+    that value — ``--seconds`` is a HARD ceiling.
 
     Args:
         signal_plan: pre-built signal plan (overrides ``signal_mode``).
@@ -499,14 +526,13 @@ def generate(seed: int, num_vehicles: int, seconds: float,
             ``AdaptiveSignalPlan`` — closed-loop, rebuilds inside the
             ``_resolve_all`` fixpoint from realised arrivals).  Ignored when
             ``signal_plan`` is given explicitly.
-        demand: Poisson per-approach flow + turning-movement split.  None
-            falls back to the legacy uniform scheduler.
+        demand: Poisson per-approach flow + turning-movement split. If
+            None, the default ``DemandModel`` is used.
     """
-    min_duration_frames = int(round(seconds * fps))
+    duration_frames = int(round(seconds * fps))
 
     rng = random.Random(seed)
-    vehicles = [make_vehicle(f"V{i:03d}", rng, demand=demand)
-                for i in range(num_vehicles)]
+    demand = demand if demand is not None else DemandModel.default()
 
     road_meta = {}
     approach_len = 40.0
@@ -515,14 +541,38 @@ def generate(seed: int, num_vehicles: int, seconds: float,
             road_meta = json.load(f)
             approach_len = road_meta.get("approach_length", 40.0)
 
-    if demand is not None:
-        vehicles = schedule_departures_poisson(
-            vehicles, min_duration_frames, fps, demand, rng,
-            approach_visible_length=approach_len)
-    else:
-        vehicles = schedule_departures(
-            vehicles, min_duration_frames, rng,
-            approach_visible_length=approach_len)
+    # Generate per-approach Poisson arrivals within [0, seconds].
+    fps_f = float(fps)
+    arrivals_by_approach: dict = {}
+    vehicle_idx = 0
+    vehicles: list = []
+    for approach in G.Direction:
+        rate_ps = demand.flow_vph(approach) / 3600.0
+        arrivals = []
+        t = 0.0
+        while t < seconds:
+            t += rng.expovariate(rate_ps) if rate_ps > 0 else seconds
+            if t < seconds:
+                frame = int(round(t * fps_f))
+                # ponytail: clamp to duration_frames-1 so no out-of-bounds
+                frame = min(frame, max(0, duration_frames - 1))
+                arrivals.append(frame)
+        arrivals_by_approach[approach] = arrivals
+        # Create vehicles for each arrival on this approach.
+        for af in arrivals:
+            v = make_vehicle(f"V{vehicle_idx:03d}", rng, demand=demand)
+            vehicle_idx += 1
+            # Force approach to match the Poisson clock.
+            v["approach"] = approach.value
+            v["depart_frame"] = af
+            vehicles.append(v)
+
+    # Sort by depart_frame, approach, id for reproducibility.
+    vehicles.sort(key=lambda v: (v["depart_frame"], v["approach"], v["id"]))
+
+    # Enforce lane safety (push-later-only).
+    _enforce_lane_safety(vehicles, fps, safety_gap=2.0,
+                         approach_visible_length=approach_len, rng=rng)
 
     # Construct signal plan from mode if not supplied explicitly.
     if signal_plan is None and signal_mode == "adaptive":
@@ -537,29 +587,13 @@ def generate(seed: int, num_vehicles: int, seconds: float,
 
     _resolve_all(vehicles, approach_len, fps, signal_plan=signal_plan)
 
-    required = _compute_max_leave_frame(vehicles, road_meta, fps)
-    tail = fps  # 1 s of empty road after the last car leaves
-    duration_frames = max(min_duration_frames, required + tail)
-
-    # Surface a large mismatch between the requested --seconds floor and the
-    # actual rendered duration. The video auto-extends to fit every vehicle
-    # (it can be longer than the minimum, never shorter — that's by design),
-    # but a 12s request that becomes a ~490s render is almost always a user
-    # mistake (too many vehicles for the requested window). Warn loudly so the
-    # user can Ctrl-C BEFORE the render step spends an hour producing a much
-    # longer clip than intended. Print to both stdout (visible in terminal)
-    # and the scenario line below echoes it in the log.
-    actual_seconds = duration_frames / fps
-    if actual_seconds > seconds * 1.5 and duration_frames > min_duration_frames * 2:
-        import sys as _sys
-        print(f"\n[WARN] --seconds={seconds:g} is a MINIMUM. The actual video "
-              f"will be {actual_seconds:.1f}s ({duration_frames} frames) because "
-              f"{num_vehicles} vehicles cannot fit in {seconds:g}s and auto-extend to "
-              f"{required} frames (required) + {tail} (tail). Rendering "
-              f"{duration_frames} frames per camera.", file=_sys.stderr, flush=True)
-        print(f"[WARN] For a ~{seconds:g}s clip, use ~{int(seconds * 1600 / 3600 * 4)} "
-              f"vehicles at default demand; for {num_vehicles} vehicles, expect "
-              f"a ~{actual_seconds:.0f}s video.", file=_sys.stderr, flush=True)
+    # Discard vehicles whose computed leave_frame exceeds duration_frames.
+    # ponytail: _resolve_all may push depart/release frames late; recompute
+    # leave_frames and drop any vehicle that overruns, then re-resolve.
+    kept = _discard_overrunning(vehicles, road_meta, fps, duration_frames)
+    if len(kept) != len(vehicles):
+        vehicles = kept
+        _resolve_all(vehicles, approach_len, fps, signal_plan=signal_plan)
 
     scenario = {
         "seed": seed,
@@ -598,8 +632,7 @@ def generate(seed: int, num_vehicles: int, seconds: float,
     with open(out_path, "w") as f:
         json.dump(scenario, f, indent=2)
     print(f"Wrote scenario: {out_path}  ({len(vehicles)} vehicles, {fps} fps, "
-          f"duration_frames={duration_frames}f"
-          f" (floor={min_duration_frames}f, required={required}f, tail=+{tail}f))")
+          f"duration_frames={duration_frames}f)")
     return scenario
 
 
@@ -899,20 +932,19 @@ def _resolve_all(vehicles, approach_visible_length, fps,
         print(f"[WARN] _resolve_all did not converge after {max_rounds} "
               f"rounds — vehicle stop/release state may still be shifting. "
               f"This usually means a dense scenario + tight headway + signal "
-              f"gating can't all stabilise; consider lowering --num-vehicles "
-              f"or increasing --seconds.",
+              f"gating can't all stabilise; consider increasing --seconds "
+              f"or lowering --demand-scale.",
               file=_sys.stderr, flush=True)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    ap.add_argument("--num-vehicles", type=int, default=DEFAULT_NUM_VEHICLES)
     ap.add_argument("--fps", type=int, default=G.FPS,
                     help="frames per second (default: %(default)s)")
     ap.add_argument("--seconds", type=float, default=DEFAULT_SECONDS,
-                    help="minimum video length in seconds (default: %(default)s); "
-                         "the actual duration auto-extends to fit all vehicles")
+                    help="video length in seconds (default: %(default)s); "
+                         "HARD ceiling — duration_frames = int(round(seconds*fps))")
     ap.add_argument("--signal", action="store_true",
                     help="enable traffic signal SPaT gating + queue")
     ap.add_argument("--signal-mode", type=str, default="fixed",
@@ -924,16 +956,15 @@ def main():
     ap.add_argument("--demand", type=str, default=None,
                     help="path to a demand JSON (per-approach flow veh/h + turning "
                          "split). When omitted, the default demand model "
-                         f"({DEFAULT_APPROACH_FLOW_VPH:g} veh/h/approach) is used. "
-                         "Pass 'none' to disable demand and use the legacy "
-                         "uniform-random scheduler.")
+                         f"({DEFAULT_APPROACH_FLOW_VPH:g} veh/h/approach) is used, "
+                         "scaled by --demand-scale.")
     ap.add_argument("--demand-scale", type=float, default=1.0,
                     help="convenience density multiplier applied to the default "
                          "demand model when --demand is not given (default: "
                          "%(default)s). E.g. --demand-scale 3 makes ~1200 "
                          "veh/h/approach — denser on-screen traffic without "
-                         "authoring a JSON. Ignored when --demand is a path or "
-                         "'none'.")
+                         "authoring a JSON. Ignored when --demand is a path. "
+                         "Scale <= 0 produces zero vehicles.")
     ap.add_argument("--out", type=str, default=os.path.join(HERE, "..", "output", "run1"))
     args = ap.parse_args()
     if args.signal:
@@ -943,24 +974,20 @@ def main():
             signal_plan = SG.SignalPlan(fps=args.fps)
     else:
         signal_plan = None
-    if args.demand and args.demand.lower() == "none":
-        demand = None
-    elif args.demand:
+    if args.demand:
         demand = DemandModel.from_file(args.demand)
     else:
-        # --demand-scale multiplies the default per-approach flow for a one-flag
-        # density knob without authoring a JSON. Scale of 1.0 leaves the default
-        # untouched.
         scale = max(0.0, args.demand_scale)
-        if scale == 1.0:
-            demand = DemandModel.default()
-        elif scale == 0.0:
-            demand = None  # treat 0 as "no demand" (legacy uniform scheduler)
+        if scale <= 0.0:
+            # ponytail: zero demand → zero vehicles, still write scenario.json
+            demand = DemandModel(
+                flows={d: 0.0 for d in G.Direction},
+                turn_split=DEFAULT_TURN_SPLIT)
         else:
             demand = DemandModel(
                 flows={d: DEFAULT_APPROACH_FLOW_VPH * scale for d in G.Direction},
                 turn_split=DEFAULT_TURN_SPLIT)
-    generate(args.seed, args.num_vehicles, args.seconds, args.out, fps=args.fps,
+    generate(args.seed, args.seconds, args.out, fps=args.fps,
              signal_plan=signal_plan, demand=demand,
              signal_mode=args.signal_mode)
 

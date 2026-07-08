@@ -945,7 +945,7 @@ def test_scenario_signal_generation_creates_json_with_signal_field():
     from lib import traffic_signal as SG
     sp = SG.SignalPlan(fps=30)
     with tempfile.TemporaryDirectory() as tmp:
-        scn = S.generate(1, 10, 300, tmp, fps=30, signal_plan=sp)
+        scn = S.generate(1, 300, tmp, fps=30, signal_plan=sp)
         assert "signal_cycle_frames" in scn
         assert scn["signal_cycle_frames"] == 2100
         # seed written to dict
