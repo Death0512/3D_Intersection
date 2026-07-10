@@ -9,8 +9,9 @@ same (approach, lane) overlap (min-headway enforced).
 
 Vehicles are generated from Poisson arrivals within [0, --seconds] based on
 a DemandModel. ``duration_frames`` is exactly ``int(round(seconds*fps))``;
-vehicles whose computed ``leave_frame`` would exceed it are discarded
-(``--seconds`` is a HARD ceiling, not a minimum floor).
+the video stops at that frame, but vehicles are not discarded just because
+their computed ``leave_frame`` is later. A traffic clip is a time window into
+continuous traffic, so vehicles may still be on-screen when recording ends.
 
 Usage:
     python3 scripts/scenario_gen.py --seed 42 --seconds 12.0
@@ -193,8 +194,8 @@ DEFAULT_SECONDS = 12.0
 VEHICLE_CLASSES = ["car"]
 # representative lengths for headway (m)
 VEHICLE_LENGTH = {"car": 4.47}
-# common CCTV-ish speeds (km/h) in free flow
-SPEED_KMH_RANGE = (30, 60)
+# common CCTV-ish urban/arterial speeds (km/h) in free flow
+SPEED_KMH_RANGE = (30, 80)
 COLOR_LIST = [
     ((0.8, 0.1, 0.1, 1.0), "red"),
     ((0.1, 0.2, 0.8, 1.0), "blue"),
@@ -456,55 +457,6 @@ def schedule_departures_poisson(vehicles: list, duration_frames: int,
     return vehicles
 
 
-def _compute_max_leave_frame(vehicles: list, road_meta: dict, fps: int) -> int:
-    """Compute the maximum ``leave_frame`` across all vehicles using the
-    identical env-anchor + plan_motion path as ``render.compute_metadata``.
-    Returns 0 if the list is empty."""
-    envs = {tag: ENV.load_env(tag, ROOT) for tag in G.camera_names()}
-    max_lf = 0
-    for veh in vehicles:
-        approach = G.Direction(veh["approach"])
-        turn = G.Turn(veh["turn"])
-        ex_dir, ex_lane = G.exit_lane_for_movement(approach, veh["lane"], turn)
-        in_anchor, _ = ENV.lane_default_anchor(envs[f"in_{approach.value}"], veh["lane"])
-        out_anchor, _ = ENV.lane_default_anchor(envs[f"out_{ex_dir.value}"], ex_lane)
-        motion = K.plan_motion(
-            veh["id"], approach, veh["lane"], turn,
-            veh["speed_ms"], veh["depart_frame"], fps=fps,
-            appear_anchor=in_anchor[:2],
-            reappear_anchor=out_anchor[:2],
-            road_meta=road_meta,
-            stop_frame=veh.get("stop_frame"),
-            release_frame=veh.get("release_frame"))
-        if motion.leave_frame > max_lf:
-            max_lf = motion.leave_frame
-    return max_lf
-
-
-def _discard_overrunning(vehicles: list, road_meta: dict, fps: int,
-                         duration_frames: int) -> list:
-    """Return vehicles whose ``leave_frame`` fits within ``duration_frames``."""
-    envs = {tag: ENV.load_env(tag, ROOT) for tag in G.camera_names()}
-    kept = []
-    for veh in vehicles:
-        approach = G.Direction(veh["approach"])
-        turn = G.Turn(veh["turn"])
-        ex_dir, ex_lane = G.exit_lane_for_movement(approach, veh["lane"], turn)
-        in_anchor, _ = ENV.lane_default_anchor(envs[f"in_{approach.value}"], veh["lane"])
-        out_anchor, _ = ENV.lane_default_anchor(envs[f"out_{ex_dir.value}"], ex_lane)
-        motion = K.plan_motion(
-            veh["id"], approach, veh["lane"], turn,
-            veh["speed_ms"], veh["depart_frame"], fps=fps,
-            appear_anchor=in_anchor[:2],
-            reappear_anchor=out_anchor[:2],
-            road_meta=road_meta,
-            stop_frame=veh.get("stop_frame"),
-            release_frame=veh.get("release_frame"))
-        if motion.leave_frame <= duration_frames:
-            kept.append(veh)
-    return kept
-
-
 def generate(seed: int, seconds: float,
              out_dir: str, fps: int = G.FPS,
              signal_plan: Optional[SG.SignalPlan] = None,
@@ -513,9 +465,10 @@ def generate(seed: int, seconds: float,
     """Generate a scenario and write ``scenario.json``.
 
     Vehicles are generated from Poisson arrivals within [0, ``seconds``]
-    based on ``demand``. Vehicles whose computed ``leave_frame`` would exceed
-    ``int(round(seconds*fps))`` are discarded. ``duration_frames`` is exactly
-    that value — ``--seconds`` is a HARD ceiling.
+    based on ``demand``. ``duration_frames`` is exactly
+    ``int(round(seconds*fps))``. The rendered/metadata time window is capped at
+    that frame, but vehicles are kept even if their computed ``leave_frame`` is
+    later; they are simply mid-road when the clip ends.
 
     Args:
         signal_plan: pre-built signal plan (overrides ``signal_mode``).
@@ -586,14 +539,6 @@ def generate(seed: int, seconds: float,
         signal_mode = "fixed"
 
     _resolve_all(vehicles, approach_len, fps, signal_plan=signal_plan)
-
-    # Discard vehicles whose computed leave_frame exceeds duration_frames.
-    # ponytail: _resolve_all may push depart/release frames late; recompute
-    # leave_frames and drop any vehicle that overruns, then re-resolve.
-    kept = _discard_overrunning(vehicles, road_meta, fps, duration_frames)
-    if len(kept) != len(vehicles):
-        vehicles = kept
-        _resolve_all(vehicles, approach_len, fps, signal_plan=signal_plan)
 
     scenario = {
         "seed": seed,
@@ -944,7 +889,8 @@ def main():
                     help="frames per second (default: %(default)s)")
     ap.add_argument("--seconds", type=float, default=DEFAULT_SECONDS,
                     help="video length in seconds (default: %(default)s); "
-                         "HARD ceiling — duration_frames = int(round(seconds*fps))")
+                         "duration_frames = int(round(seconds*fps)); vehicles "
+                         "may continue past the final frame")
     ap.add_argument("--signal", action="store_true",
                     help="enable traffic signal SPaT gating + queue")
     ap.add_argument("--signal-mode", type=str, default="fixed",

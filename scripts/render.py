@@ -61,6 +61,7 @@ def compute_metadata(scenario: dict, root: str) -> dict:
     """
     fps = scenario["fps"]
     duration = scenario["duration_frames"]
+    last_frame = max(0, duration - 1)
     envs = {tag: ENV.load_env(tag, root) for tag in G.camera_names()}
 
     road_path = os.path.join(root, "assets", "road.json")
@@ -90,7 +91,7 @@ def compute_metadata(scenario: dict, root: str) -> dict:
         frames = []
         # In segment — rot_z is the env anchor heading (true vehicle heading;
         # equals approach_rotation for an unedited file).
-        for f in range(motion.appear_frame, min(motion.disappear_frame, duration) + 1):
+        for f in range(motion.appear_frame, min(motion.disappear_frame, last_frame) + 1):
             p = G.sample_track(motion.track_in, f)
             if p is None:
                 continue
@@ -100,7 +101,7 @@ def compute_metadata(scenario: dict, root: str) -> dict:
                          "rot_z": round(in_rot_z, 4)},
             })
         # Out segment — rot_z is the env anchor heading for the exit lane.
-        for f in range(max(motion.reappear_frame, 0), min(motion.leave_frame, duration) + 1):
+        for f in range(max(motion.reappear_frame, 0), min(motion.leave_frame, last_frame) + 1):
             p = G.sample_track(motion.track_out, f)
             if p is None:
                 continue
@@ -397,8 +398,9 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
 
     scene = bpy.context.scene
     duration = scenario["duration_frames"]
+    last_frame = max(0, duration - 1)
     scene.frame_start = 0
-    scene.frame_end = duration
+    scene.frame_end = last_frame
 
     # PNG sequence into a frames subdir
     frames_dir = os.path.join(out_dir, f"frames_{camera_tag}")
@@ -411,7 +413,7 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
     scene.render.image_settings.file_format = "PNG"
 
     # Install per-frame progress handler before the long render (C2).
-    print(f"  [{camera_tag}] rendering frames 0..{duration} "
+    print(f"  [{camera_tag}] rendering frames 0..{last_frame} "
           f"({scene.cycles.samples} samples)...", flush=True)
     _install_render_progress_handler(scene)
     try:

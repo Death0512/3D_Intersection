@@ -337,7 +337,8 @@ def keyframe_motion(empty, motion: G.VehicleMotion, is_in_camera: bool,
 
     If ``frame_end`` is given and the segment ends after it (vehicle cannot
     complete before the window), an extra ``hide_render=True`` keyframe is
-    inserted at ``frame_end + 1`` so the vehicle vanishes instead of freezing
+    inserted at ``frame_end + 1`` so the vehicle remains visible through the
+    final rendered frame, then vanishes instead of freezing
     mid-road.
     """
     obj = empty
@@ -623,11 +624,11 @@ def configure_gpu():
 def setup_render(env_lights: dict = None, samples: int = None):
     """Configure Cycles GPU rendering at 1080p, 30 fps, PNG sequence.
 
-    The denoiser follows the compute backend selected by ``configure_gpu``:
-    OPTIX denoiser when running on OPTIX (uses RT cores), OpenImageDenoise
-    (OIDN, GPU-accelerated) when on CUDA. This avoids a render-time crash on
-    CUDA-only devices (e.g. Kaggle T4-as-CUDA or P100) where the OptiX
-    denoiser enum assigns cleanly but has no OptiX context to execute in.
+    Denoising is GPU-only: use the OPTIX denoiser only when Blender selected
+    the OPTIX backend and the NVIDIA OptiX weights file exists. On CUDA-only
+    devices (e.g. Kaggle P100, or T4 exposed only as CUDA), denoising is
+    disabled instead of falling back to OpenImageDenoise, which can silently
+    consume CPU time and caused very slow Kaggle renders.
 
     ``samples`` (optional int) overrides the module-level CYCLES_SAMPLES so
     callers (render.py --samples) can trade quality for speed without editing
@@ -641,45 +642,32 @@ def setup_render(env_lights: dict = None, samples: int = None):
     scene.render.engine = "CYCLES"
     scene.cycles.device = "GPU"
     # M9: honor --samples override (None → default 48). Lower sample counts
-    # (16-24) let users iterate ~2-3× faster; the denoiser compensates for
-    # the extra noise so the visual difference is modest.
+    # (16-24) let users iterate faster; denoising remains GPU-only below.
     scene.cycles.samples = samples if samples else CYCLES_SAMPLES
-    scene.cycles.use_denoising = True
-    # Denoiser follows the active compute backend so a CUDA-only device
-    # (Kaggle T4-as-CUDA / P100) doesn't crash at render time trying to use
-    # the OptiX denoiser without an OptiX context. Even on an OPTIX backend
-    # we prefer OIDN when the OptiX denoiser weights file is absent (common
-    # in stripped-down containers like Kaggle's, where /usr/share/nvidia/
-    # nvoptix.bin is missing) — the OptiX denoiser then fails to initialise
-    # at render time and aborts the whole frame.
+    scene.cycles.use_denoising = False
+    # GPU-only denoise policy. Do NOT fall back to OpenImageDenoise: on Kaggle
+    # that may run on CPU and dominate render time. If OptiX denoise is not
+    # definitely available, render without denoising and let sample count/scene
+    # settings control quality/performance.
     backend = bpy.context.preferences.addons["cycles"].preferences.compute_device_type
     optix_weights_ok = os.path.exists("/usr/share/nvidia/nvoptix.bin")
-    want_denoiser = "OPTIX" if (backend == "OPTIX" and optix_weights_ok) else "OPENIMAGEDENOISE"
-    try:
-        scene.cycles.denoiser = want_denoiser
-    except Exception:
+    if backend == "OPTIX" and optix_weights_ok:
         try:
-            scene.cycles.denoiser = "OPENIMAGEDENOISE"
+            scene.cycles.denoiser = "OPTIX"
+            actual = str(scene.cycles.denoiser)
+            if actual == "OPTIX":
+                scene.cycles.use_denoising = True
+                print("  [denoiser] OPTIX active", flush=True)
+            else:
+                print(f"  [denoiser] disabled: wanted OPTIX but got {actual}",
+                      flush=True)
         except Exception:
-            pass
-    # D9: read back the actually-active denoiser and echo it. If assignment
-    # silently failed (Blender build without OIDN/OptiX support), the readback
-    # won't match `want_denoiser` — warn so the user knows the render may be
-    # noisy, and disable denoising rather than rendering with an unknown state.
-    try:
-        actual = str(scene.cycles.denoiser)
-    except Exception:
-        actual = "<unreadable>"
-    if actual != want_denoiser:
-        print(f"  [denoiser] WARNING: wanted {want_denoiser} but got {actual} "
-              f"— disabling denoising (render will be noisier at low samples)",
-              flush=True)
-        try:
-            scene.cycles.use_denoising = False
-        except Exception:
-            pass
+            print("  [denoiser] disabled: OPTIX denoiser assignment failed",
+                  flush=True)
     else:
-        print(f"  [denoiser] {actual} active", flush=True)
+        reason = "CUDA backend" if backend != "OPTIX" else "missing nvoptix.bin"
+        print(f"  [denoiser] disabled ({reason}; no CPU/OIDN fallback)",
+              flush=True)
     # Resolution / fps / output format
     scene.render.resolution_x = RES_X
     scene.render.resolution_y = RES_Y
@@ -737,7 +725,7 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
     #    lane_defaults[lane] anchor, then drives forward by the kinematics.
     scene_objs = []
     motions = []
-    frame_end = scenario["duration_frames"]
+    frame_end = max(0, scenario["duration_frames"] - 1)
     n_visible_candidates = 0
     print(f"  [build] placing vehicles for {camera_tag} "
           f"(scanning {len(scenario['vehicles'])} total)...", flush=True)
@@ -785,7 +773,7 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
     configure_gpu()
     setup_render(env_lights=env.get("lights"))
     bpy.context.scene.frame_start = 0
-    bpy.context.scene.frame_end = scenario["duration_frames"]
+    bpy.context.scene.frame_end = max(0, scenario["duration_frames"] - 1)
 
     # 4. Save
     os.makedirs(os.path.dirname(out_blend), exist_ok=True)
