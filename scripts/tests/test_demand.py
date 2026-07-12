@@ -126,7 +126,6 @@ def test_poisson_arrivals_safety_invariants_hold():
         tn = G.Turn(x["turn"])
         qs = x.get("queue_slot", -1)
         if qs >= 0:
-            assert not sp.is_green(ap, tn, x["stop_frame"])
             assert sp.is_green(ap, tn, x["release_frame"])
         else:
             sf = x.get("stop_frame",
@@ -218,9 +217,10 @@ def test_generate_vehicle_count_scales_with_demand_and_seconds():
     assert high["duration_frames"] == low["duration_frames"] == 60 * 30
 
 
-def test_generate_hard_ceiling_drops_vehicles_past_duration():
-    """Vehicles whose computed leave_frame exceeds duration_frames are dropped
-    from the scenario and IDs are renumbered."""
+def test_generate_clip_window_keeps_only_visible_vehicles():
+    """Scenario generation keeps vehicles that intersect the rendered clip and
+    removes stale pre-clip / never-visible post-clip candidates. IDs are
+    renumbered after clipping."""
     import tempfile
     dm = S.DemandModel(
         flows={d: S.DEFAULT_APPROACH_FLOW_VPH * 5.0 for d in G.Direction},
@@ -231,15 +231,17 @@ def test_generate_hard_ceiling_drops_vehicles_past_duration():
 
     assert scn["duration_frames"] == 300
     assert len(scn["vehicles"]) > 0
-    # Every vehicle must complete within duration_frames.
+    # Every emitted vehicle intersects the rendered window. Some may continue
+    # beyond the fixed clip; render/metadata clamp frame output at duration.
     for v in scn["vehicles"]:
         tf = int(round(54.751 / v["speed_ms"] * 30))
         rf = v.get("release_frame", v["depart_frame"] + tf)
         dt = G.delta_t_frames(G.Turn(v["turn"]), v["speed_ms"], 30,
                               lane_index=v["lane"])
         leave_f = rf + dt + tf
-        assert leave_f <= scn["duration_frames"], (
-            f"{v['id']} leave_frame={leave_f} > {scn['duration_frames']}")
+        assert leave_f >= 0, f"{v['id']} ended before clip: leave_frame={leave_f}"
+        assert v["depart_frame"] < scn["duration_frames"], (
+            f"{v['id']} starts after clip: depart_frame={v['depart_frame']}")
     # IDs must be contiguous V000..V{N-1}
     ids = [v["id"] for v in scn["vehicles"]]
     expected = [f"V{i:03d}" for i in range(len(scn["vehicles"]))]
@@ -369,8 +371,10 @@ def test_same_lane_no_zero_frame_gaps():
                 f"{b['id']}@{b['depart_frame']} gap={gap} < needed={needed}")
 
 
-def test_generate_hard_ceiling_leave_frame():
-    """All vehicles in generated scenario have leave_frame <= duration_frames."""
+def test_generate_steady_state_density_for_short_high_demand_clip():
+    """A short high-demand clip should not be artificially thin just because
+    traffic starts at frame 0. Warm-up creates steady-state density while the
+    fixed render length remains unchanged."""
     import tempfile
     dm = S.DemandModel(
         flows={d: S.DEFAULT_APPROACH_FLOW_VPH * 2.0 for d in G.Direction},
@@ -379,14 +383,16 @@ def test_generate_hard_ceiling_leave_frame():
         scn = S.generate(42, 30, tmp, fps=30, demand=dm,
                          signal_mode="adaptive")
     dur = scn["duration_frames"]
+    assert len(scn["vehicles"]) >= 30, len(scn["vehicles"])
+    assert any(v["depart_frame"] < 0 for v in scn["vehicles"])
     for v in scn["vehicles"]:
         tf = int(round(54.751 / v["speed_ms"] * 30))
         rf = v.get("release_frame", v["depart_frame"] + tf)
         dt = G.delta_t_frames(G.Turn(v["turn"]), v["speed_ms"], 30,
                               lane_index=v["lane"])
         leave_f = rf + dt + tf
-        assert leave_f <= dur, (
-            f"{v['id']} leave_frame={leave_f} > duration_frames={dur}")
+        assert leave_f >= 0
+        assert v["depart_frame"] < dur
 
 
 def test_demand_from_dict_rejects_bad_flow():

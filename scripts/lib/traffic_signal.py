@@ -378,10 +378,14 @@ class AdaptiveSignalPlan:
 
         # Skip the dead initial period: don't serve greens before the first
         # arrival — a real controller stays dark until demand exists, and
-        # serving zero-pressure phases at min_green wastes the opening.
+        # serving zero-pressure phases at min_green wastes the opening.  The
+        # first arrival may be negative when scenario generation uses a warm-up
+        # window before the rendered clip; start the adaptive timeline there so
+        # warm-up demand is served before frame 0 instead of being dumped into a
+        # huge queue at the first rendered frame.
         first_arrival = min(
             (x for x in (ns_first, ew_first) if x is not None), default=0)
-        t = first_arrival if first_arrival > 0 else 0
+        t = first_arrival
         max_rounds = 5000
         while t < horizon_frames and max_rounds > 0:
             max_rounds -= 1

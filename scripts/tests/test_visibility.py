@@ -230,7 +230,8 @@ def test_keyframe_motion_hide_end_clamps_to_frame_end(build_scene_module):
 def test_keyframe_motion_vis_start_never_negative(build_scene_module):
     """vis_start = max(0, start_frame); a track starting at a negative frame
     (shouldn't normally happen, but the clamp guards against Blender refusing
-    a negative keyframe) still yields a 0 visible-frame keyframe on children."""
+    a negative keyframe) is already visible at frame 0 and should not receive a
+    hidden@0 keyframe followed by visible@0."""
     BS = build_scene_module
     child = _FakeObject("Body")
     parent = _FakeObject("VEH_003", children=[child])
@@ -249,4 +250,4 @@ def test_keyframe_motion_vis_start_never_negative(build_scene_module):
     for o in (parent, child):
         hr = _visibility_inserts(o, "hide_render")
         # vis_start = max(0, -5) = 0; hide_end = 40+1 = 41
-        assert hr == [0, 0, 41], f"{o.name} vis_start not clamped to 0: {hr}"
+        assert hr == [0, 41], f"{o.name} warm-up visibility wrong: {hr}"

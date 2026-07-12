@@ -92,7 +92,8 @@ def compute_metadata(scenario: dict, root: str) -> dict:
         frames = []
         # In segment — rot_z is the env anchor heading (true vehicle heading;
         # equals approach_rotation for an unedited file).
-        for f in range(motion.appear_frame, min(motion.disappear_frame, last_frame) + 1):
+        for f in range(max(motion.appear_frame, 0),
+                       min(motion.disappear_frame, last_frame) + 1):
             p = G.sample_track(motion.track_in, f)
             if p is None:
                 continue

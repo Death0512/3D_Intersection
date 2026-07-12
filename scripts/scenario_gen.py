@@ -7,10 +7,11 @@ Each vehicle gets: id, class, color, unique plate, approach, lane, turn,
 speed, depart_frame. Departures are scheduled so that no two vehicles in the
 same (approach, lane) overlap (min-headway enforced).
 
-Vehicles are generated from Poisson arrivals within [0, --seconds] based on
-a DemandModel. ``duration_frames`` is exactly ``int(round(seconds*fps))``;
-vehicles whose computed ``leave_frame`` exceeds ``duration_frames`` are
-dropped, so all vehicles in the scenario fully complete within the clip.
+Vehicles are generated from a steady-state Poisson stream with a warm-up period
+before frame 0. ``duration_frames`` is exactly ``int(round(seconds*fps))``;
+only vehicles that are visible during the rendered clip are emitted. This
+avoids an artificially empty opening and avoids discarding dense but valid
+traffic that is still on screen when the fixed-length clip ends.
 
 Usage:
     python3 scripts/scenario_gen.py --seed 42 --seconds 12.0
@@ -58,6 +59,12 @@ DEFAULT_TURN_SPLIT = {"left": 0.15, "straight": 0.70, "right": 0.15}
 # with very high probability — making the consecutive-frame "leftover cramming"
 # path a rare safety net instead of the norm.
 POISSON_HORIZON_MARGIN = 1.5
+
+# Generate traffic before frame 0 so short clips begin in steady state instead
+# of an empty-road cold start.  One clip-length of warm-up is enough to populate
+# entry roads, stop-line queues, and early out-camera exits for 30s/60s clips;
+# the lower bound keeps very short test clips from looking empty.
+MIN_WARMUP_SECONDS = 30.0
 
 
 class DemandModel:
@@ -217,9 +224,17 @@ def _vehicle_leave_frame(v: dict, approach_visible_length: float, fps: int) -> i
 
 def _filter_to_duration(vehicles: list, duration_frames: int,
                         approach_visible_length: float, fps: int) -> int:
-    """Remove vehicles that cannot complete within the clip; return count."""
+    """Remove vehicles outside the rendered clip; return count.
+
+    A vehicle is admitted when its full motion intersects the clip.  This
+    supports steady-state warm-up traffic that may have a negative
+    ``depart_frame`` (already on the approach at frame 0) and dense traffic that
+    is still visible when the fixed-length clip ends.  Rendering/metadata clamp
+    per-frame outputs to [0, duration_frames), so no out-of-clip frames leak.
+    """
     keep = [v for v in vehicles
-            if _vehicle_leave_frame(v, approach_visible_length, fps) <= duration_frames]
+            if _vehicle_leave_frame(v, approach_visible_length, fps) >= 0
+            and v["depart_frame"] < duration_frames]
     dropped = len(vehicles) - len(keep)
     if dropped:
         vehicles[:] = keep
@@ -412,9 +427,8 @@ def schedule_departures_poisson(vehicles: list, duration_frames: int,
 
     This low-level scheduler assigns all provided vehicles and may push some
     past ``duration_frames``. The high-level ``generate`` entry point applies
-    the project contract: ``--seconds`` is a hard ceiling, so vehicles whose
-    computed leave frame exceeds the clip are removed before writing the
-    scenario.
+    the project contract: ``--seconds`` is the fixed rendered clip, so vehicles
+    that never intersect that clip are removed before writing the scenario.
     """
     fps_f = float(fps)
     floor_horizon_s = duration_frames / fps_f
@@ -486,11 +500,11 @@ def generate(seed: int, seconds: float,
              signal_mode: str = "fixed") -> dict:
     """Generate a scenario and write ``scenario.json``.
 
-    Vehicles are generated from Poisson arrivals within [0, ``seconds``]
-    based on ``demand``. ``duration_frames`` is exactly
-    ``int(round(seconds*fps))``. All vehicles in the output must complete
-    within the clip; those whose computed ``leave_frame`` exceeds
-    ``duration_frames`` are dropped.
+    Vehicles are generated from a steady-state Poisson stream that starts
+    before frame 0, then clipped to the rendered window. ``duration_frames`` is
+    exactly ``int(round(seconds*fps))``. All vehicles in the output intersect
+    the clip; stale pre-clip vehicles and never-visible post-clip vehicles are
+    dropped.
 
     Args:
         signal_plan: pre-built signal plan (overrides ``signal_mode``).
@@ -516,8 +530,13 @@ def generate(seed: int, seconds: float,
             road_meta = json.load(f)
             approach_len = road_meta.get("approach_length", 40.0)
 
-    # Generate per-approach Poisson arrivals within [0, seconds].
+    # Generate per-approach Poisson arrivals from a warm-up period before frame
+    # 0 through the end of the clip.  Starting empty at frame 0 made short,
+    # high-demand clips look artificially thin because there were no vehicles
+    # already on screen or queued at the opening.  Warm-up creates the normal
+    # steady-state condition: vehicles/queues may already be visible at frame 0.
     fps_f = float(fps)
+    warmup_seconds = max(MIN_WARMUP_SECONDS, seconds)
     # Stable base speeds per (approach, lane) so same-lane vehicles share a
     # platoon speed and avoid arbitrary 50-behind-80 gaps. Base is sampled
     # uniformly in [50,80]; each vehicle jitters ±5 km/h, clamped.
@@ -528,12 +547,11 @@ def generate(seed: int, seconds: float,
     for approach in G.Direction:
         rate_ps = demand.flow_vph(approach) / 3600.0
         arrivals = []
-        t = 0.0
+        t = -warmup_seconds
         while t < seconds:
             t += rng.expovariate(rate_ps) if rate_ps > 0 else seconds
             if t < seconds:
                 frame = int(round(t * fps_f))
-                frame = min(frame, max(0, duration_frames - 1))
                 arrivals.append(frame)
         arrivals_by_approach[approach] = arrivals
         # Create vehicles for each arrival on this approach.
@@ -573,10 +591,11 @@ def generate(seed: int, seconds: float,
 
     _resolve_all(vehicles, approach_len, fps, signal_plan=signal_plan)
 
-    # Hard ceiling admission: remove impossible vehicles and re-resolve because
-    # taking late vehicles out can change queue slots/exit conflicts for the
-    # remaining feasible set.  Iterate to a fixed point so scenario.json only
-    # contains compliant vehicles from the start.
+    # Clip-window admission: remove vehicles that never appear in the rendered
+    # interval and re-resolve because taking invisible vehicles out can change
+    # queue slots/exit conflicts for the remaining visible set.  Iterate to a
+    # fixed point so scenario.json only contains vehicles that actually
+    # contribute to the clip.
     dropped = 0
     while True:
         n = _filter_to_duration(vehicles, duration_frames, approach_len, fps)
@@ -586,9 +605,9 @@ def generate(seed: int, seconds: float,
         _resolve_all(vehicles, approach_len, fps, signal_plan=signal_plan)
     if dropped:
         import sys as _sys
-        print(f"[INFO] --seconds ceiling: admitted {len(vehicles)} feasible "
-              f"vehicles; skipped {dropped} infeasible candidates "
-              f"(leave_frame > {duration_frames})",
+        print(f"[INFO] clip window: admitted {len(vehicles)} visible "
+              f"vehicles; skipped {dropped} invisible candidates "
+              f"(outside 0..{duration_frames - 1})",
               file=_sys.stderr, flush=True)
     # Renumber IDs so the output is contiguous 0..N-1.
     for i, v in enumerate(vehicles):
@@ -652,10 +671,13 @@ def _apply_signal_gating(vehicles, approach_visible_length, signal_plan, fps):
     becomes free-flow (green arrival).  Exit-conflict resolution is the only
     writer of non-zero values.
 
-    Queue slots are ordered by ``stop_arrival`` (actual stop-line arrival)
-    within each contiguous red batch so the ``slot * reaction_per_slot``
-    stagger reflects true physical arrival order.
+    Queueing is lane-physical, not just signal-color based: a vehicle also
+    joins the queue if it reaches the approach while an earlier same-lane
+    vehicle is still stopped/releasing ahead.  This prevents a later vehicle
+    from free-flowing over an upstream stopped queue just because its own
+    natural stop-line arrival happens during green.
     """
+    assert signal_plan is not None
     reaction_per_slot = int(round(0.5 * fps))
     groups: dict = {}
     for v in vehicles:
@@ -675,56 +697,75 @@ def _apply_signal_gating(vehicles, approach_visible_length, signal_plan, fps):
             is_green = signal_plan.is_green(approach, turn, stop_arrival)
             tagged.append((v, stop_arrival, is_green))
 
-        # Walk tagged list, grouping red vehicles into batches.
-        i = 0
-        n = len(tagged)
-        while i < n:
-            # Green vehicle — free-flow (reset queue).
-            if tagged[i][2]:  # is_green
-                v = tagged[i][0]
+        # Walk vehicles in physical arrival order.  The old implementation
+        # grouped only consecutive red arrivals; a green-arriving vehicle right
+        # behind an unreleased red queue was marked free-flow and could pass
+        # through stopped cars.  Keep an active same-lane queue instead.
+        active_queue: list = []
+        last_queued_release = None
+        for v, stop_arrival, is_green in sorted(
+                tagged, key=lambda tup: (tup[1], tup[0]["depart_frame"], tup[0]["id"])):
+            turn = G.Turn(v["turn"])
+
+            # Vehicles whose release time has passed no longer occupy a queue
+            # slot on the approach.  Remaining entries are still stopped or
+            # launching ahead of the current vehicle.
+            active_queue = [q for q in active_queue
+                            if q["release_frame"] > stop_arrival]
+            if not active_queue:
+                last_queued_release = None
+            blocked_by_queue = bool(active_queue)
+
+            if is_green and not blocked_by_queue:
                 v["extra_stagger_frames"] = 0
-                v["stop_frame"] = tagged[i][1]
-                v["release_frame"] = tagged[i][1]
+                v["stop_frame"] = stop_arrival
+                v["release_frame"] = stop_arrival
                 v["queue_slot"] = -1
                 v["wait_frames"] = 0
-                i += 1
                 continue
 
-            # Red batch: collect all consecutive red vehicles.
-            batch_start = i
-            while i < n and not tagged[i][2]:
-                i += 1
-            red_vehicles = tagged[batch_start:i]
+            # Red arrival OR green arrival blocked by a queue ahead: stop at
+            # the next physical queue slot and release FIFO with reaction gap.
+            slot = len(active_queue)
+            base_release = stop_arrival if is_green else signal_plan.next_green_frame(
+                approach, turn, stop_arrival)
+            release = base_release + v["extra_stagger_frames"]
+            if last_queued_release is not None:
+                release = max(release, last_queued_release + reaction_per_slot)
 
-            # Sort red batch by stop_arrival → true arrival order at stop line.
-            red_vehicles.sort(key=lambda tup: (tup[1], tup[0]["depart_frame"], tup[0]["id"]))
+            # Preserve later release pushes made by exit-conflict resolution in
+            # the previous fixpoint step.  Those pushes are safety constraints;
+            # recomputing from signal state alone must not pull the car earlier
+            # and re-create an exit overlap.
+            old_release = v.get("release_frame")
+            if old_release is not None and old_release > release:
+                release = old_release
 
-            for slot, (v, stop_arrival, _) in enumerate(red_vehicles):
-                turn = G.Turn(v["turn"])
-                next_green = signal_plan.next_green_frame(approach, turn, stop_arrival)
-                release = next_green + slot * reaction_per_slot + v["extra_stagger_frames"]
-                # Rebase if extra_stagger pushes the release past the green window.
-                if not signal_plan.is_green(approach, turn, release):
-                    rebased = signal_plan.next_green_frame(approach, turn, release)
-                    rb_delta = rebased - release
-                    v["extra_stagger_frames"] = v.get("extra_stagger_frames", 0) + rb_delta
-                    release = rebased
-                v["stop_frame"] = stop_arrival
-                v["release_frame"] = release
-                v["queue_slot"] = slot
-                v["wait_frames"] = release - stop_arrival
+            # Rebase if the queue/reaction/extra stagger pushes release outside
+            # a legal green window for this movement.
+            if not signal_plan.is_green(approach, turn, release):
+                rebased = signal_plan.next_green_frame(approach, turn, release)
+                rb_delta = rebased - release
+                v["extra_stagger_frames"] = v.get("extra_stagger_frames", 0) + rb_delta
+                release = rebased
+
+            v["stop_frame"] = stop_arrival
+            v["release_frame"] = release
+            v["queue_slot"] = slot
+            v["wait_frames"] = release - stop_arrival
+            active_queue.append(v)
+            last_queued_release = release
 
         # --- Post-hoc release-gap guard on queued vehicles in this group ---
         # ``extra_stagger_frames`` from exit-conflict resolution can reorder or
         # collapse release times relative to the pure ``slot * reaction``
         # pattern.  Ensure every queued pair releases ≥ reaction_per_slot apart.
         qs = [v for v in group if v.get("queue_slot", -1) >= 0]
-        # Preserve physical queue order.  Sorting by release_frame lets a rear
+        # Preserve physical arrival order.  Sorting by release_frame lets a rear
         # vehicle with a large exit-conflict stagger invert ahead of the front
-        # vehicle; the next signal pass then chases the conflict.  queue_slot is
-        # assigned from stop-arrival order within the red batch, so it is the
-        # correct ordering for same-lane platoon release spacing.
-        qs.sort(key=lambda v: (v.get("queue_slot", 0), v["stop_frame"], v["id"]))
+        # vehicle; sorting by queue_slot alone can also mix separate platoons
+        # because queue_slot resets after a queue has cleared.
+        qs.sort(key=lambda v: (v["stop_frame"], v.get("queue_slot", 0), v["id"]))
         last_release = None
         last_leave_by_exit: dict = {}
         for v in qs:
@@ -918,7 +959,7 @@ def _collect_stop_arrivals(vehicles: list, approach_visible_length: float,
 
 
 def _resolve_all(vehicles, approach_visible_length, fps,
-                 signal_plan=None, max_rounds=60):
+                 signal_plan=None, max_rounds=120):
     """Unified fixpoint: iterate headway → signal → exit until all
     constraints are satisfied and the full vehicle state is stable.
 
@@ -983,13 +1024,10 @@ def _resolve_all(vehicles, approach_visible_length, fps,
               f"gating can't all stabilise; consider increasing --seconds "
               f"or lowering --demand-scale.",
               file=_sys.stderr, flush=True)
-        # Leave canonical signal fields even if the dense fixed point is still
-        # drifting. Exit/headway resolution may have updated extra_stagger in
-        # the final round; recompute stop/release from it so a standalone
-        # signal pass is idempotent for render/metadata consumers.
-        if signal_plan is not None:
-            _apply_signal_gating(vehicles, approach_visible_length,
-                                 signal_plan, fps)
+        # Do not run another standalone signal pass here: the final fixpoint
+        # round ends with exit-conflict resolution, and a signal-only pass can
+        # undo those last release-frame shifts in saturated scenarios.  Keep the
+        # safer post-exit state and surface the warning instead.
 
 
 def main():
@@ -1000,9 +1038,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=DEFAULT_SECONDS,
                     help="video length in seconds (default: %(default)s); "
                          "duration_frames = int(round(seconds*fps)); "
-                         "vehicles must complete within this window — any "
-                         "whose computed leave_frame exceeds duration_frames "
-                         "are dropped")
+                         "steady-state traffic is clipped to this rendered "
+                         "window")
     ap.add_argument("--signal", action="store_true",
                     help="enable traffic signal SPaT gating + queue")
     ap.add_argument("--signal-mode", type=str, default="fixed",

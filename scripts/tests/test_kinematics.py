@@ -887,6 +887,53 @@ def test_signal_gating_freeflow_on_green():
     assert v["wait_frames"] == 0
 
 
+def test_signal_gating_green_arrival_waits_behind_active_queue():
+    """A same-lane vehicle must not free-flow over stopped queue traffic.
+
+    Regression for the stop/run logic: if one vehicle is stopped at red and a
+    later vehicle naturally reaches the stop line after the signal turns green
+    but before the front vehicle has released, the later vehicle is still
+    physically blocked by the queue and must receive its own queue slot.
+    """
+    import scenario_gen as S
+    from lib import traffic_signal as SG
+
+    sp = SG.SignalPlan(fps=30)
+    fps = 30
+    approach_len = 54.751
+    speed = K.speed_kmh_to_ms(60)
+    travel_f = int(round(approach_len / speed * fps))
+
+    front = S.make_vehicle("V0", __import__("random").Random(10))
+    rear = S.make_vehicle("V1", __import__("random").Random(11))
+    for v in (front, rear):
+        v.update({
+            "approach": G.Direction.N.value,
+            "lane": 1,
+            "turn": G.Turn.STRAIGHT.value,
+            "speed_kmh": 60.0,
+            "speed_ms": speed,
+            "length": 4.5,
+        })
+
+    # Fixed plan: NS green 0..899, all-red 900..959, EW green/yellow, then
+    # next NS green at the cycle wrap (2100).
+    # Front reaches stop line during all-red and queues until 1920.  Rear's own
+    # natural arrival is green at 100, but it is behind the still-active queue.
+    front["depart_frame"] = 930 - travel_f
+    rear["depart_frame"] = 1000 - travel_f
+
+    vehicles = [front, rear]
+    S._apply_signal_gating(vehicles, approach_len, sp, fps)
+
+    assert front["queue_slot"] == 0
+    assert front["release_frame"] == sp.cycle_frames
+    assert rear["stop_frame"] == 1000
+    assert rear["queue_slot"] == 1
+    assert rear["release_frame"] >= front["release_frame"] + int(0.5 * fps)
+    assert rear["wait_frames"] > 0
+
+
 def test_resolve_all_no_red_crossings():
     """After _resolve_all with signal_plan, no vehicle crosses the stop
     line on red."""
@@ -901,13 +948,10 @@ def test_resolve_all_no_red_crossings():
     S._resolve_all(vehicles, 54.751, 30, signal_plan=sp)
     for v in vehicles:
         if v.get("queue_slot", -1) >= 0:
-            # Queued: arrives at stop line on red, waits, enters on green
+            # Queued: arrives on red OR is blocked behind an active same-lane
+            # queue; in either case it must enter the box on green.
             approach = G.Direction(v["approach"])
             turn = G.Turn(v["turn"])
-            # stop_frame should be red
-            assert not sp.is_green(approach, turn, v["stop_frame"]), (
-                f"{v['id']} stop_frame {v['stop_frame']} should be red")
-            # release_frame should be green
             assert sp.is_green(approach, turn, v["release_frame"]), (
                 f"{v['id']} release_frame {v['release_frame']} should be green")
         else:
@@ -1023,8 +1067,6 @@ def test_multi_seed_resolve_all_invariants():
             tn = G.Turn(x["turn"])
             qs = x.get("queue_slot", -1)
             if qs >= 0:
-                assert not sp.is_green(ap, tn, x["stop_frame"]), (
-                    f"seed {seed} {x['id']}: queued stop {x['stop_frame']} is green")
                 assert sp.is_green(ap, tn, x["release_frame"]), (
                     f"seed {seed} {x['id']}: queued release {x['release_frame']} not green")
             else:
@@ -1110,8 +1152,6 @@ def test_multi_seed_saturation_invariants():
             tn = G.Turn(x["turn"])
             qs = x.get("queue_slot", -1)
             if qs >= 0:
-                assert not sp.is_green(ap, tn, x["stop_frame"]), (
-                    f"seed {seed} {x['id']}: queued stop {x['stop_frame']} green")
                 assert sp.is_green(ap, tn, x["release_frame"]), (
                     f"seed {seed} {x['id']}: queued release {x['release_frame']} red")
             else:

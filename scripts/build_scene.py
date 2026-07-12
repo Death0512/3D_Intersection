@@ -419,14 +419,16 @@ def keyframe_motion(empty, motion: G.VehicleMotion, is_in_camera: bool,
         hide_end = frame_end + 1
 
     def _keyframe_visibility(o):
-        o.hide_render = True
-        o.hide_viewport = True
+        initial_hidden = vis_start > 0
+        o.hide_render = initial_hidden
+        o.hide_viewport = initial_hidden
         o.keyframe_insert(data_path="hide_render", frame=0)
         o.keyframe_insert(data_path="hide_viewport", frame=0)
         o.hide_render = False
         o.hide_viewport = False
-        o.keyframe_insert(data_path="hide_render", frame=vis_start)
-        o.keyframe_insert(data_path="hide_viewport", frame=vis_start)
+        if vis_start > 0:
+            o.keyframe_insert(data_path="hide_render", frame=vis_start)
+            o.keyframe_insert(data_path="hide_viewport", frame=vis_start)
         o.hide_render = True
         o.hide_viewport = True
         o.keyframe_insert(data_path="hide_render", frame=hide_end)
