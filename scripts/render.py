@@ -86,7 +86,8 @@ def compute_metadata(scenario: dict, root: str) -> dict:
                                reappear_anchor=out_anchor[:2],
                                road_meta=road_meta,
                                stop_frame=veh.get("stop_frame"),
-                               release_frame=veh.get("release_frame"))
+                               release_frame=veh.get("release_frame"),
+                               queue_slot=veh.get("queue_slot", -1))
 
         frames = []
         # In segment — rot_z is the env anchor heading (true vehicle heading;

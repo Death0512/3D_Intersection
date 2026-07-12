@@ -69,6 +69,10 @@ TURN_ACCEL_MS2 = 2.5
 ACCEL_MS2 = 2.0
 DECEL_MS2 = 2.5
 
+# Queue spacing: distance between consecutive queued vehicles stopped at the
+# same stop line.  ~ vehicle length + safety gap, keeps them visually distinct.
+QUEUE_SPACING_M = 6.0
+
 
 class Direction(str, Enum):
     N = "N"; E = "E"; S = "S"; W = "W"
@@ -500,7 +504,8 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
                    reappear_anchor: Optional[Tuple[float, float]] = None,
                    road_meta: Optional[dict] = None,
                    stop_frame: Optional[int] = None,
-                   release_frame: Optional[int] = None) -> VehicleMotion:
+                   release_frame: Optional[int] = None,
+                   queue_slot: int = -1) -> VehicleMotion:
     """Compute the frame numbers and world positions for a vehicle's full
     In -> Black-Box -> Out trajectory.
 
@@ -527,6 +532,10 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
         it enters the box after waiting. When both are provided and
         release_frame > stop_frame, a multi-point IN track with idle segment
         is built.
+
+    queue_slot: ordinal position in the queue (0-based). Queued vehicles at
+        the same stop line are offset upstream by ``queue_slot * QUEUE_SPACING_M``
+        so they don't all stack at the same pixel. -1 = free-flow (no offset).
     """
     # ---- effective visible lengths -------------------------------------------
     _avl = approach_visible_length
@@ -553,6 +562,7 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
     is_queued = (stop_frame is not None and release_frame is not None
                  and release_frame > stop_frame)
     if is_queued:
+        assert release_frame is not None
         disappear_frame = release_frame
     else:
         disappear_frame = free_disappear_frame
@@ -574,6 +584,16 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
         appear_pos = (disappear_pos[0] - fx * _avl,
                       disappear_pos[1] - fy * _avl)
 
+    # Queue slot offset: queued vehicles wait upstream from the true stop line
+    # so they don't all stack at the same pixel.  They still roll forward to
+    # the true box edge and disappear at ``release_frame`` so release/reappear
+    # semantics remain unchanged.
+    queue_stop_pos = disappear_pos
+    if is_queued and queue_slot > 0 and road_meta is not None:
+        offset_m = queue_slot * QUEUE_SPACING_M
+        queue_stop_pos = (disappear_pos[0] - fx * offset_m,
+                          disappear_pos[1] - fy * offset_m)
+
     # ---- positions: EXIT segment ---------------------------------------------
     outbound, ex_lane = exit_lane_for_movement(approach, lane, turn)
     ofx, ofy = outbound.vec
@@ -588,10 +608,13 @@ def compute_motion(vehicle_id: str, approach: Direction, lane: int, turn: Turn,
 
     # ---- build keyframe tracks ------------------------------------------------
     if is_queued and road_meta is not None:
+        assert stop_frame is not None and release_frame is not None
         track_in = _build_queue_track(
             appear_frame, stop_frame, release_frame,
-            appear_pos, disappear_pos, speed_ms=speed_ms, fps=fps)
+            appear_pos, queue_stop_pos, speed_ms=speed_ms, fps=fps,
+            release_pos=disappear_pos)
     else:
+        assert disappear_frame is not None
         track_in = _build_segment_track(
             appear_frame, disappear_frame, appear_pos, disappear_pos,
             turn, road_meta, is_out=False)
@@ -691,13 +714,14 @@ def _build_segment_track(start_frame: int, end_frame: int,
 
 
 def _build_queue_track(start_frame: int, stop_frame: int, release_frame: int,
-                       start_pos: Tuple, stop_pos: Tuple,
-                       speed_ms: float, fps: int = FPS) -> List[TrackPoint]:
+                       start_pos: Tuple[float, float], stop_pos: Tuple[float, float],
+                       speed_ms: float, fps: int = FPS,
+                       release_pos: Optional[Tuple[float, float]] = None) -> List[TrackPoint]:
     """Build a 4-point keyframe track for a queued IN segment with realistic
     deceleration into the stop line.
 
-    Profile: cruise (LINEAR) → BEZIER ease-in decel → idle (stationary at
-    stop line) until release.
+    Profile: cruise (LINEAR) → BEZIER ease-in decel → idle at queue slot →
+    optional roll-forward to the true stop line at release.
 
     Points:
       0. ``start_frame`` at ``start_pos`` — vehicle appears at the env anchor.
@@ -720,6 +744,7 @@ def _build_queue_track(start_frame: int, stop_frame: int, release_frame: int,
     otherwise the legacy constant-speed-then-snap 3-point track is used.
     """
     v = speed_ms
+    release_pos = stop_pos if release_pos is None else release_pos
     approach_dx = stop_pos[0] - start_pos[0]
     approach_dy = stop_pos[1] - start_pos[1]
     approach_len = math.sqrt(approach_dx * approach_dx + approach_dy * approach_dy)
@@ -736,29 +761,49 @@ def _build_queue_track(start_frame: int, stop_frame: int, release_frame: int,
                      or d_brake >= approach_len * 0.95
                      or available_time_s <= 0.0
                      or approach_len <= 0.0)
+    def _with_release_roll(points: List[TrackPoint]) -> List[TrackPoint]:
+        """Append/merge the release point while keeping frames monotonic."""
+        if (abs(release_pos[0] - stop_pos[0]) < 1e-9
+                and abs(release_pos[1] - stop_pos[1]) < 1e-9):
+            return points + [TrackPoint(frame=release_frame, x=stop_pos[0],
+                                        y=stop_pos[1], visible=True,
+                                        interp="LINEAR")]
+        dx = release_pos[0] - stop_pos[0]
+        dy = release_pos[1] - stop_pos[1]
+        roll_dist = math.sqrt(dx * dx + dy * dy)
+        roll_frames = max(1, int(round((roll_dist / max(v, 1e-6)) * fps)))
+        roll_start = max(stop_frame, release_frame - roll_frames)
+        out = list(points)
+        if roll_start > out[-1].frame:
+            out.append(TrackPoint(frame=roll_start, x=stop_pos[0], y=stop_pos[1],
+                                  visible=True, interp="LINEAR"))
+        else:
+            # No room for a separate idle key; roll immediately from stop_frame.
+            out[-1] = TrackPoint(frame=out[-1].frame, x=stop_pos[0], y=stop_pos[1],
+                                 visible=True, interp="LINEAR")
+        out.append(TrackPoint(frame=release_frame, x=release_pos[0],
+                              y=release_pos[1], visible=True, interp="LINEAR"))
+        return out
+
     if use_full_ramp:
         # Whole approach is one BEZIER ease-in (decel from v to 0).
         cp1, cp2 = _bezier_ease_in(start_pos, stop_pos, ease_in_frac=0.50)
-        return [
+        return _with_release_roll([
             TrackPoint(frame=start_frame, x=start_pos[0], y=start_pos[1],
                        visible=True, interp="BEZIER", cp1=cp1, cp2=cp2),
             TrackPoint(frame=stop_frame, x=stop_pos[0], y=stop_pos[1],
                        visible=True, interp="LINEAR"),
-            TrackPoint(frame=release_frame, x=stop_pos[0], y=stop_pos[1],
-                       visible=True, interp="LINEAR"),
-        ]
+        ])
 
     t_brake_frames = int(round(t_brake_s * fps))
     if t_brake_frames < 2:
         # Too few frames to render a decel — keep legacy 3-point snap track.
-        return [
+        return _with_release_roll([
             TrackPoint(frame=start_frame, x=start_pos[0], y=start_pos[1],
                        visible=True, interp="LINEAR"),
             TrackPoint(frame=stop_frame, x=stop_pos[0], y=stop_pos[1],
                        visible=True, interp="LINEAR"),
-            TrackPoint(frame=release_frame, x=stop_pos[0], y=stop_pos[1],
-                       visible=True, interp="LINEAR"),
-        ]
+        ])
 
     # Cruise covers (approach_len - d_brake) at speed v; brake covers d_brake
     # in t_brake_frames. Both anchored so their sum lands on stop_frame.
@@ -782,7 +827,7 @@ def _build_queue_track(start_frame: int, stop_frame: int, release_frame: int,
 
     cp1, cp2 = _bezier_ease_in(cruise_end_pos, stop_pos, ease_in_frac=0.30)
 
-    return [
+    return _with_release_roll([
         # 0 → 1 : cruise at free-flow speed (LINEAR).
         TrackPoint(frame=start_frame, x=start_pos[0], y=start_pos[1],
                    visible=True, interp="LINEAR"),
@@ -791,10 +836,7 @@ def _build_queue_track(start_frame: int, stop_frame: int, release_frame: int,
         # 1 → 2 : decelerate to rest at the stop line (BEZIER ease-in).
         TrackPoint(frame=stop_frame, x=stop_pos[0], y=stop_pos[1],
                    visible=True, interp="LINEAR"),
-        # 2 → 3 : idle at the stop line until release (LINEAR, stationary).
-        TrackPoint(frame=release_frame, x=stop_pos[0], y=stop_pos[1],
-                   visible=True, interp="LINEAR"),
-    ]
+    ])
 
 
 # ---------------------------------------------------------------------------

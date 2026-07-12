@@ -314,6 +314,25 @@ def test_generate_adaptive_writes_signal_timeline():
                     for iv in on_disk["signal_timeline"])
 
 
+def test_generate_fixed_mode_builds_signal_timeline_without_explicit_plan():
+    """Direct Python API calls should match the CLI/pipeline fixed-signal
+    behavior: ``generate(signal_mode='fixed')`` constructs a fixed SignalPlan
+    when no explicit plan is supplied."""
+    import tempfile
+    import scenario_gen as S
+    import json
+    with tempfile.TemporaryDirectory() as td:
+        S.generate(9, 20.0, td, fps=FPS,
+                   signal_mode="fixed",
+                   demand=S.DemandModel.default())
+        with open(os.path.join(td, "scenario.json")) as f:
+            scn = json.load(f)
+    assert scn["signal_mode"] == "fixed"
+    assert scn["signal_timeline"]
+    assert all({"start", "phase"} <= set(iv)
+               for iv in scn["signal_timeline"])
+
+
 def test_generate_adaptive_no_conflicting_intervals():
     """The exported signal timeline has zero cross-barrier conflicting
     combos (a property of the dual-ring controller)."""

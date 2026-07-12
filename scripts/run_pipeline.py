@@ -9,8 +9,9 @@ Orchestrates the full dataset generation:
   [4/5] Render all 8 cameras      (blender headless: render.py, parallel)
   [5/5] Metadata + run validation (conda/venv python)
 
-The scenario duration auto-extends to fit all vehicles (``--seconds`` is the
-minimum floor).
+The scenario duration is a hard ceiling: ``--seconds`` sets the rendered clip
+length, and scenario generation admits only vehicles that can fully complete
+within that window.
 
 Run (from the project root, with venv python):
     python3 scripts/run_pipeline.py --seed 42 --seconds 12.0 --out output/run1

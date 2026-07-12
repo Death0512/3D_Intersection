@@ -290,7 +290,8 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
         reappear_anchor=anchor_xy if not is_in_camera else None,
         road_meta=road_meta,
         stop_frame=veh.get("stop_frame"),
-        release_frame=veh.get("release_frame"))
+        release_frame=veh.get("release_frame"),
+        queue_slot=veh.get("queue_slot", -1))
     fwd_off = meta.get("forward_offset_deg", 0.0)
 
     # Create the parent Empty at the WORLD ORIGIN with no rotation first, then

@@ -798,6 +798,46 @@ def test_out_track_accel_from_stop_when_queued():
     assert m_t.track_out[0].interp == "BEZIER"
 
 
+def test_queue_slot_positions_differ_upstream():
+    """Queued vehicles with different queue_slot values stop at different
+    upstream offsets — they don't all stack at the stop line."""
+    v = K.speed_kmh_to_ms(45)
+    appear_anchor = (-5.25, -75.0)
+    road_meta = {"crosswalk_y": 27.846, "approach_length": 54.751}
+    stop_box_edge = G.lane_entry_box_edge(G.Direction.N, 0)
+
+    # slot 0 (first in queue) → stop at box edge
+    m0 = K.plan_motion("V0", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                       appear_anchor=appear_anchor,
+                       road_meta=road_meta,
+                       stop_frame=100, release_frame=200,
+                       queue_slot=0)
+    assert abs(m0.disappear_pos[0] - stop_box_edge[0]) < 1e-6
+    assert abs(m0.disappear_pos[1] - stop_box_edge[1]) < 1e-6
+
+    # slot 2 (third in queue) → stop QUEUE_SPACING_M * 2 upstream
+    m2 = K.plan_motion("V2", G.Direction.N, 0, G.Turn.STRAIGHT, v, 0,
+                       appear_anchor=appear_anchor,
+                       road_meta=road_meta,
+                       stop_frame=100, release_frame=200,
+                       queue_slot=2)
+    offset = 2 * G.QUEUE_SPACING_M  # 12m upstream
+    assert abs(m2.disappear_pos[0] - stop_box_edge[0]) < 1e-6
+    assert abs(m2.disappear_pos[1] - stop_box_edge[1]) < 1e-6
+
+    # idle track positions differ — each vehicle stationary at its own offset
+    p0_stop = G.sample_track(m0.track_in, 150)
+    p2_stop = G.sample_track(m2.track_in, 150)
+    assert p0_stop is not None and p2_stop is not None
+    # slot 2 is further upstream (behind slot 0)
+    assert p2_stop[1] < p0_stop[1] - (G.QUEUE_SPACING_M - 0.1)
+    assert abs(p2_stop[1] - (stop_box_edge[1] - offset)) < 0.1
+    # by release, slot 2 has advanced to the true box edge and can disappear
+    p2_release = G.sample_track(m2.track_in, 200)
+    assert p2_release is not None
+    assert abs(p2_release[1] - stop_box_edge[1]) < 1e-6
+
+
 # -----------------------------------------------------------------------------
 # Scenario generator integration tests
 # -----------------------------------------------------------------------------
