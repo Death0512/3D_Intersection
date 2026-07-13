@@ -111,9 +111,8 @@ def step_assets_validate():
 def step_scenario(seed, seconds, out_dir, fps=None,
                    signal=False, signal_mode="fixed", demand=None,
                    demand_scale=None):
-    """Run scenario_gen.py. Bounded to 600s — the `_resolve_all` fixpoint is
-    capped at 20 rounds, so even with dense demand this stays well under 60s;
-    a hang here means a non-converging signal/exit loop."""
+    """Run scenario_gen.py. Bounded to 600s; v2 simulation should finish fast,
+    so a hang here means the event loop horizon/queue release logic regressed."""
     cmd = [PYTHON, os.path.join(HERE, "scenario_gen.py"),
            "--seed", str(seed),
            "--seconds", str(seconds),

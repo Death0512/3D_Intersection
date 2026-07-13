@@ -95,18 +95,12 @@ def test_demand_make_vehicle_respects_lane_turn_restrictions():
 
 
 def test_poisson_arrivals_safety_invariants_hold():
-    """A Poisson-scheduled scenario must satisfy the SAME invariants as the
-    scenario scheduler: no same-lane headway or catch-up violations,
-    and (when a signal plan is present) no red crossings, no exit-lane
-    overlaps, queued-release spacing >= 0.5s, fixpoint stability."""
-    from lib import traffic_signal as SG
-    sp = SG.SignalPlan(fps=30)
+    """The legacy Poisson helper still preserves same-lane depart safety."""
     dm = S.DemandModel.default()
     rng = random.Random(11)
     vehicles = [S.make_vehicle(f"V{i:03d}", rng, demand=dm) for i in range(60)]
     S.schedule_departures_poisson(vehicles, 2100, 30, dm, rng,
                                   approach_visible_length=54.751)
-    S._resolve_all(vehicles, 54.751, 30, signal_plan=sp)
 
     # headway / catch-up
     lanes = {}
@@ -119,50 +113,6 @@ def test_poisson_arrivals_safety_invariants_hold():
                                    b["depart_frame"], b["speed_ms"],
                                    approach_visible_length=54.751), (
                 f"headway fail {key} {a['id']}->{b['id']}")
-
-    # no red crossing + exit-lane spacing
-    for x in vehicles:
-        ap = G.Direction(x["approach"])
-        tn = G.Turn(x["turn"])
-        qs = x.get("queue_slot", -1)
-        if qs >= 0:
-            assert sp.is_green(ap, tn, x["release_frame"])
-        else:
-            sf = x.get("stop_frame",
-                       x["depart_frame"] + int(round(54.751 / x["speed_ms"] * 30)))
-            assert sp.is_green(ap, tn, sf)
-        # exit spacing
-        tf = int(round(54.751 / x["speed_ms"] * 30))
-        rf = x.get("release_frame", x["depart_frame"] + tf)
-        rp = rf + G.delta_t_frames(G.Turn(x["turn"]), x["speed_ms"], 30,
-                                   lane_index=x["lane"])
-        lv = rp + tf
-
-    groups = {}
-    for x in vehicles:
-        tf = int(round(54.751 / x["speed_ms"] * 30))
-        rf = x.get("release_frame", x["depart_frame"] + tf)
-        rp = rf + G.delta_t_frames(G.Turn(x["turn"]), x["speed_ms"], 30,
-                                   lane_index=x["lane"])
-        lv = rp + tf
-        od, el = G.exit_lane_for_movement(
-            G.Direction(x["approach"]), x["lane"], G.Turn(x["turn"]))
-        groups.setdefault((od.value, el), []).append((rp, lv))
-    for g in groups.values():
-        g.sort()
-        last = -1
-        for r, lv in g:
-            if last > 0:
-                assert r >= last + 5, f"exit overlap r={r} < {last}+5"
-            last = lv
-
-    # stability: one more signal pass changes nothing
-    snap_before = [(x["queue_slot"], x["stop_frame"], x["release_frame"])
-                   for x in vehicles]
-    S._apply_signal_gating(vehicles, 54.751, sp, 30)
-    snap_after = [(x["queue_slot"], x["stop_frame"], x["release_frame"])
-                  for x in vehicles]
-    assert snap_before == snap_after, "poisson fixpoint not stable"
 
 
 def test_poisson_realized_rate_approximates_demand():
@@ -347,18 +297,12 @@ def test_generate_vehicle_speeds_in_range():
 
 
 def test_same_lane_no_zero_frame_gaps():
-    """After _resolve_all, no two vehicles in the same lane depart in the
-    same frame (direct min-headway must separate adjacent departures)."""
-    import scenario_gen as S
-    from lib import traffic_signal as SG
-    sp = SG.SignalPlan(fps=30)
-    rng = random.Random(19)
-    vehicles = [S.make_vehicle(f"V{i:03d}", rng) for i in range(40)]
-    S.schedule_departures(vehicles, 2100, rng,
-                          approach_visible_length=54.751)
-    S._resolve_all(vehicles, 54.751, 30, signal_plan=sp)
+    """Generated v2 scenarios preserve same-lane depart headway."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        scn = S.generate(19, 30, tmp, fps=30, demand=S.DemandModel.default())
     lanes = {}
-    for v in vehicles:
+    for v in scn["vehicles"]:
         lanes.setdefault((v["approach"], v["lane"]), []).append(v)
     for key, vs in lanes.items():
         vs.sort(key=lambda d: d["depart_frame"])

@@ -8,8 +8,8 @@ Verifies the fundamental NEMA invariants:
   * Heavy demand is served more green time than light demand (MaxPressure).
   * ``next_green_frame`` always returns a frame whose combo serves the
     movement (or appends a correct fallback interval).
-  * Closed-loop integration: ``_resolve_all`` with an adaptive plan leaves
-    no vehicle crossing the stop line on red.
+  * Closed-loop integration: v2 ``scenario_gen.generate`` writes a valid
+    adaptive timeline.
 """
 import os
 import sys
@@ -253,47 +253,40 @@ def test_next_green_frame_within_interval_is_self():
 
 
 # ---------------------------------------------------------------------------
-# Closed-loop integration with scenario_gen._resolve_all
+# Closed-loop integration with v2 scenario generation
 # ---------------------------------------------------------------------------
-def test_resolve_all_adaptive_no_red_crossings():
-    """After ``_resolve_all`` with an adaptive plan, no vehicle's release
-    falls in a red interval — vehicles only cross the stop line on green."""
+def test_generate_adaptive_release_frames_are_in_timeline():
+    """v2 adaptive generation releases every queued vehicle during an exported
+    green interval for its movement."""
+    import tempfile
     import scenario_gen as S
-    rng = random.Random(101)
-    vehicles = [S.make_vehicle(f"V{i:03d}", rng,
-                                demand=S.DemandModel.default())
-                for i in range(40)]
-    S.schedule_departures_poisson(vehicles, 600, FPS, S.DemandModel.default(),
-                                   rng, approach_visible_length=40.0)
-    sp = AdaptiveSignalPlan(fps=FPS)
-    S._resolve_all(vehicles, 40.0, FPS, signal_plan=sp)
-    # Every released vehicle must be green at its release_frame.
+    with tempfile.TemporaryDirectory() as td:
+        scn = S.generate(101, 20.0, td, fps=FPS,
+                         signal_mode="adaptive",
+                         demand=S.DemandModel.default())
+
+    intervals = scn["signal_timeline"]
     bad = []
-    for v in vehicles:
-        if v.get("release_frame") is None:
-            continue
-        ap = G.Direction(v["approach"])
-        turn = G.Turn(v["turn"])
-        if not sp.is_green(ap, turn, v["release_frame"]):
-            bad.append((v["id"], v["release_frame"]))
+    for v in scn["vehicles"]:
+        phase = _movement_to_phase(G.Direction(v["approach"]), G.Turn(v["turn"]))
+        rf = v.get("release_frame")
+        if rf is None:
+            bad.append((v["id"], "unreleased"))
+        elif not any(iv["start"] <= rf < iv["end"] and phase in iv["phases"]
+                     for iv in intervals):
+            bad.append((v["id"], rf))
     assert not bad, f"{len(bad)} vehicles released on red: {bad[:3]}"
 
 
-def test_resolve_all_adaptive_converges_under_iteration_cap():
-    """The closed-loop adaptive fixpoint converges within the default
-    max_rounds (no infinite loop / cap-triggered instability)."""
+def test_generate_adaptive_uses_v2_generator():
     import scenario_gen as S
-    rng = random.Random(202)
-    vehicles = [S.make_vehicle(f"V{i:03d}", rng,
-                                demand=S.DemandModel.default())
-                for i in range(25)]
-    S.schedule_departures_poisson(vehicles, 500, FPS, S.DemandModel.default(),
-                                   rng, approach_visible_length=40.0)
-    sp = AdaptiveSignalPlan(fps=FPS)
-    # Should complete without raising.
-    S._resolve_all(vehicles, 40.0, FPS, signal_plan=sp, max_rounds=20)
-    # Sanity: signal plan has intervals after resolution.
-    assert sp.intervals
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        scn = S.generate(202, 10.0, td, fps=FPS,
+                         signal_mode="adaptive",
+                         demand=S.DemandModel.default())
+    assert scn["generator"] == "v2"
+    assert scn["signal_timeline"]
 
 
 def test_generate_adaptive_writes_signal_timeline():

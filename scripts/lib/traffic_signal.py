@@ -17,9 +17,8 @@ Two signal controllers are provided:
    a mandatory yellow + all-red clearance is inserted.  Selected via
    ``--signal-mode adaptive``.  The plan is built as an explicit
    frame → phase timeline from realised arrivals, so ``is_green`` /
-   ``next_green_frame`` are deterministic lookups (the closed loop is closed
-   by rebuilding the plan from current arrivals inside the ``_resolve_all``
-   fixpoint — see scenario_gen).
+   ``next_green_frame`` are deterministic lookups.  The v2 microsim owns live
+   queue discharge; this class remains the timeline/export oracle.
 """
 from __future__ import annotations
 
@@ -196,9 +195,8 @@ class AdaptiveSignalPlan:
 
     Builds an explicit frame -> active-combo timeline from realised arrivals
     so ``is_green`` / ``next_green_frame`` are deterministic lookups.  The
-    closed-loop behaviour (signal reacts to arrivals) is produced by
-    rebuilding the plan from the *current* arrivals inside the
-    ``_resolve_all`` fixpoint — see scenario_gen.
+    v2 microsim owns live discharge; this class remains useful for exporting
+    and querying an explicit signal timeline after realised arrivals are known.
 
     Args:
         fps: frames per second (must match scenario fps).

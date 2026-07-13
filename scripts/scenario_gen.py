@@ -36,6 +36,7 @@ import kinematics as K
 import envfile as ENV
 import traffic_signal as SG
 from gen_plate import random_plate
+import intersection_sim as IS
 
 ROAD_JSON = os.path.join(HERE, "..", "assets", "road.json")
 
@@ -512,8 +513,8 @@ def generate(seed: int, seconds: float,
             the appropriate plan is constructed here.
         signal_mode: ``"fixed"`` (default fixed-cycle permissive-left
             ``SignalPlan``) or ``"adaptive"`` (NEMA 8-phase MaxPressure
-            ``AdaptiveSignalPlan`` — closed-loop, rebuilds inside the
-            ``_resolve_all`` fixpoint from realised arrivals).  Ignored when
+            ``AdaptiveSignalPlan`` — event-driven v2 microsim builds the
+            realised signal timeline).  Ignored when
             ``signal_plan`` is given explicitly.
         demand: Poisson per-approach flow + turning-movement split. If
             None, the default ``DemandModel`` is used.
@@ -589,27 +590,59 @@ def generate(seed: int, seconds: float,
         # User mixed the two: prefer the explicit plan, switch the mode label.
         signal_mode = "fixed"
 
-    _resolve_all(vehicles, approach_len, fps, signal_plan=signal_plan)
+    # ---- v2 event-driven microsim ------------------------------------------
+    vehicles, sim_meta = IS.simulate(
+        vehicles, approach_len, fps, signal_plan=signal_plan, seed=seed)
+    sim_arrivals = sim_meta.get("arrival_events", {})
 
-    # Clip-window admission: remove vehicles that never appear in the rendered
-    # interval and re-resolve because taking invisible vehicles out can change
-    # queue slots/exit conflicts for the remaining visible set.  Iterate to a
-    # fixed point so scenario.json only contains vehicles that actually
-    # contribute to the clip.
-    dropped = 0
-    while True:
-        n = _filter_to_duration(vehicles, duration_frames, approach_len, fps)
-        dropped += n
-        if n == 0:
+    # Build adaptive signal timeline from realised stop-line arrivals.
+    # For fixed plans the pre-built SignalPlan is_green is used directly.
+    adaptive_intervals = None
+    adaptive_clearances = None
+    if isinstance(signal_plan, SG.AdaptiveSignalPlan):
+        adaptive_intervals = sim_meta.get("adaptive_intervals")
+        adaptive_clearances = sim_meta.get("adaptive_clearances")
+
+    # Clip-window: remove vehicles with no visible footprint. Dropping vehicles
+    # can shift queues earlier, making more warm-up vehicles stale; iterate to a
+    # fixed point (normally one pass, hard-capped as a safety net).
+    total_dropped = 0
+    for _ in range(5):
+        dropped = _filter_to_duration(vehicles, duration_frames, approach_len, fps)
+        if not dropped:
             break
-        _resolve_all(vehicles, approach_len, fps, signal_plan=signal_plan)
-    if dropped:
-        import sys as _sys
+        total_dropped += dropped
+        vehicles, sim_meta = IS.simulate(
+            vehicles, approach_len, fps, signal_plan=signal_plan, seed=seed)
+        sim_arrivals = sim_meta.get("arrival_events", {})
+    else:
+        # Loop exhausted without reaching a fixed point (re-sim after the last
+        # drop can still shift a few vehicles out of window). Guarantee no
+        # out-of-window vehicle ever ships with one final drop-only pass.
+        dropped = _filter_to_duration(vehicles, duration_frames, approach_len, fps)
+        total_dropped += dropped
+
+    # Rebuild adaptive timeline if needed after final clipping/re-sim.
+    if isinstance(signal_plan, SG.AdaptiveSignalPlan):
+        adaptive_intervals = sim_meta.get("adaptive_intervals")
+        adaptive_clearances = sim_meta.get("adaptive_clearances")
+    if total_dropped:
         print(f"[INFO] clip window: admitted {len(vehicles)} visible "
-              f"vehicles; skipped {dropped} invisible candidates "
+              f"vehicles; skipped {total_dropped} invisible candidates "
               f"(outside 0..{duration_frames - 1})",
-              file=_sys.stderr, flush=True)
-    # Renumber IDs so the output is contiguous 0..N-1.
+              file=sys.stderr, flush=True)
+
+    # Soft validation warn
+    if signal_plan is not None:
+        waits = [v.get("wait_frames", 0) for v in vehicles]
+        if waits:
+            mean_w = sum(waits) / len(waits)
+            if mean_w > 2 * duration_frames:
+                print(f"[WARN] mean wait {mean_w:.0f}f > 2*duration "
+                      f"({2*duration_frames}f) — consider lower demand-scale",
+                      file=sys.stderr, flush=True)
+
+    # Renumber IDs
     for i, v in enumerate(vehicles):
         v["id"] = f"V{i:03d}"
 
@@ -622,23 +655,23 @@ def generate(seed: int, seconds: float,
         "lane_centerlines_x": G.LANE_CENTERLINES,
         "cameras": G.camera_names(),
         "vehicles": vehicles,
+        "generator": "v2",
     }
     if signal_plan is not None:
         scenario["signal_mode"] = signal_mode
         scenario["signal_cycle_frames"] = signal_plan.cycle_frames
-        # Emit a per-frame phase timeline for downstream vision/behaviour
-        # labels and for replay/debug.  For adaptive plans this is the
-        # interval list; for fixed plans it is the phase-name boundaries.
-        if isinstance(signal_plan, SG.AdaptiveSignalPlan):
+        if adaptive_intervals is not None:
+            # Adaptive: timeline is built by v2 sim
             scenario["signal_timeline"] = [
                 {"start": s, "end": e, "phases": list(combo)}
-                for (s, e, combo) in signal_plan.intervals
+                for (s, e, combo) in adaptive_intervals
             ]
             scenario["signal_clearances"] = [
                 {"start": s, "end": e}
-                for (s, e) in signal_plan._clearances
+                for (s, e) in adaptive_clearances
             ]
         else:
+            # Fixed plan: use pre-built boundaries
             scenario["signal_timeline"] = [
                 {"start": s, "phase": name}
                 for (s, name) in signal_plan._boundaries
@@ -652,382 +685,6 @@ def generate(seed: int, seconds: float,
     print(f"Wrote scenario: {out_path}  ({len(vehicles)} vehicles, {fps} fps, "
           f"duration_frames={duration_frames}f)")
     return scenario
-
-
-def _apply_signal_gating(vehicles, approach_visible_length, signal_plan, fps):
-    """Set stop_frame / release_frame so queued vehicles stop at the
-    stop line during red and enter the box at green.
-
-    ``stop_frame`` = frame the vehicle would reach the stop line at free-flow
-    (always = depart_frame + travel_time). ``release_frame`` = frame the
-    vehicle enters the box (= stop_frame for free-flow, or next-green + queue
-    slot + extra_stagger_frames for queued).
-
-    Does NOT modify ``depart_frame`` — vehicles appear at their scheduled time
-    and queue visually if they would arrive on red.
-
-    Reads ``extra_stagger_frames`` (set by exit-conflict resolution for queued
-    vehicles).  Initialises the key if absent; resets to 0 when a vehicle
-    becomes free-flow (green arrival).  Exit-conflict resolution is the only
-    writer of non-zero values.
-
-    Queueing is lane-physical, not just signal-color based: a vehicle also
-    joins the queue if it reaches the approach while an earlier same-lane
-    vehicle is still stopped/releasing ahead.  This prevents a later vehicle
-    from free-flowing over an upstream stopped queue just because its own
-    natural stop-line arrival happens during green.
-    """
-    assert signal_plan is not None
-    reaction_per_slot = int(round(0.5 * fps))
-    groups: dict = {}
-    for v in vehicles:
-        key = (v["approach"], v["lane"])
-        groups.setdefault(key, []).append(v)
-        v["extra_stagger_frames"] = v.get("extra_stagger_frames", 0)
-    for key, group in groups.items():
-        group.sort(key=lambda x: x["depart_frame"])
-        approach = G.Direction(key[0])
-
-        # Pre-compute stop_arrival and red/green status for each vehicle
-        tagged = []
-        for v in group:
-            turn = G.Turn(v["turn"])
-            travel_time_f = int(round(approach_visible_length / v["speed_ms"] * fps))
-            stop_arrival = v["depart_frame"] + travel_time_f
-            is_green = signal_plan.is_green(approach, turn, stop_arrival)
-            tagged.append((v, stop_arrival, is_green))
-
-        # Walk vehicles in physical arrival order.  The old implementation
-        # grouped only consecutive red arrivals; a green-arriving vehicle right
-        # behind an unreleased red queue was marked free-flow and could pass
-        # through stopped cars.  Keep an active same-lane queue instead.
-        active_queue: list = []
-        last_queued_release = None
-        for v, stop_arrival, is_green in sorted(
-                tagged, key=lambda tup: (tup[1], tup[0]["depart_frame"], tup[0]["id"])):
-            turn = G.Turn(v["turn"])
-
-            # Vehicles whose release time has passed no longer occupy a queue
-            # slot on the approach.  Remaining entries are still stopped or
-            # launching ahead of the current vehicle.
-            active_queue = [q for q in active_queue
-                            if q["release_frame"] > stop_arrival]
-            if not active_queue:
-                last_queued_release = None
-            blocked_by_queue = bool(active_queue)
-
-            if is_green and not blocked_by_queue:
-                v["extra_stagger_frames"] = 0
-                v["stop_frame"] = stop_arrival
-                v["release_frame"] = stop_arrival
-                v["queue_slot"] = -1
-                v["wait_frames"] = 0
-                continue
-
-            # Red arrival OR green arrival blocked by a queue ahead: stop at
-            # the next physical queue slot and release FIFO with reaction gap.
-            slot = len(active_queue)
-            base_release = stop_arrival if is_green else signal_plan.next_green_frame(
-                approach, turn, stop_arrival)
-            release = base_release + v["extra_stagger_frames"]
-            if last_queued_release is not None:
-                release = max(release, last_queued_release + reaction_per_slot)
-
-            # Preserve later release pushes made by exit-conflict resolution in
-            # the previous fixpoint step.  Those pushes are safety constraints;
-            # recomputing from signal state alone must not pull the car earlier
-            # and re-create an exit overlap.
-            old_release = v.get("release_frame")
-            if old_release is not None and old_release > release:
-                release = old_release
-
-            # Rebase if the queue/reaction/extra stagger pushes release outside
-            # a legal green window for this movement.
-            if not signal_plan.is_green(approach, turn, release):
-                rebased = signal_plan.next_green_frame(approach, turn, release)
-                rb_delta = rebased - release
-                v["extra_stagger_frames"] = v.get("extra_stagger_frames", 0) + rb_delta
-                release = rebased
-
-            v["stop_frame"] = stop_arrival
-            v["release_frame"] = release
-            v["queue_slot"] = slot
-            v["wait_frames"] = release - stop_arrival
-            active_queue.append(v)
-            last_queued_release = release
-
-        # --- Post-hoc release-gap guard on queued vehicles in this group ---
-        # ``extra_stagger_frames`` from exit-conflict resolution can reorder or
-        # collapse release times relative to the pure ``slot * reaction``
-        # pattern.  Ensure every queued pair releases ≥ reaction_per_slot apart.
-        qs = [v for v in group if v.get("queue_slot", -1) >= 0]
-        # Preserve physical arrival order.  Sorting by release_frame lets a rear
-        # vehicle with a large exit-conflict stagger invert ahead of the front
-        # vehicle; sorting by queue_slot alone can also mix separate platoons
-        # because queue_slot resets after a queue has cleared.
-        qs.sort(key=lambda v: (v["stop_frame"], v.get("queue_slot", 0), v["id"]))
-        last_release = None
-        last_leave_by_exit: dict = {}
-        for v in qs:
-            need = v["release_frame"]
-            if last_release is not None:
-                need = max(need, last_release + reaction_per_slot)
-
-            # A later queued vehicle may have a shorter black-box turn time
-            # than ANY earlier queue member that feeds the same exit lane. A
-            # plain adjacent release-frame gap can therefore still let it
-            # reappear before an earlier vehicle has left the out-camera. Track
-            # last leave per exit lane across the whole physical queue order.
-            out_dir, ex_lane = G.exit_lane_for_movement(
-                G.Direction(v["approach"]), v["lane"], G.Turn(v["turn"]))
-            exit_key = (out_dir.value, ex_lane)
-            v_dt = G.delta_t_frames(G.Turn(v["turn"]), v["speed_ms"], fps,
-                                    lane_index=v["lane"])
-            if exit_key in last_leave_by_exit:
-                need = max(need, last_leave_by_exit[exit_key] + 5 - v_dt)
-
-            if v["release_frame"] < need:
-                delta = need - v["release_frame"]
-                v["release_frame"] = need
-                v["wait_frames"] += delta
-                # Accumulate into extra_stagger so the adjustment survives
-                # exit-conflict resolution in later fixpoint rounds.
-                v["extra_stagger_frames"] = v.get("extra_stagger_frames", 0) + delta
-                # If the push leaves the green window, rebase to next green.
-                if signal_plan is not None:
-                    approach = G.Direction(v["approach"])
-                    turn = G.Turn(v["turn"])
-                    if not signal_plan.is_green(approach, turn, v["release_frame"]):
-                        rebased = signal_plan.next_green_frame(
-                            approach, turn, v["release_frame"])
-                        rebase_delta = rebased - v["release_frame"]
-                        v["release_frame"] = rebased
-                        v["wait_frames"] += rebase_delta
-                        v["extra_stagger_frames"] += rebase_delta
-
-            v_tf = int(round(approach_visible_length / v["speed_ms"] * fps))
-            last_release = v["release_frame"]
-            last_leave_by_exit[exit_key] = v["release_frame"] + v_dt + v_tf
-
-
-def _resolve_exit_conflicts(vehicles, approach_visible_length, fps,
-                            signal_plan=None):
-    """Resolve exit-lane interval overlaps across different approaches.
-
-    For **free-flow** vehicles (queue_slot < 0): push depart_frame later
-    (moves the entire timeline forward).
-
-    For **queued** vehicles (queue_slot >= 0): add stagger to
-    ``extra_stagger_frames`` so the release frame shifts within the same
-    green cycle, without moving depart_frame (which can't change the
-    box-entry time, pinned to green).  If the stagger would push the
-    release past the green window, rebase to the next green cycle.
-
-    Returns True if any depart_frame or extra_stagger_frames was changed."""
-    any_changed = False
-    # Dense queues can require many cascading pushes through the same exit lane:
-    # delaying one vehicle may push it into the next platoon/green window, which
-    # then forces later vehicles to move too. Iterate to stability instead of a
-    # small fixed cap so the 5-frame exit buffer is actually guaranteed.
-    for _ in range(100):
-        changed = False
-        groups: dict = {}
-        for v in vehicles:
-            travel_f = int(round(approach_visible_length / v["speed_ms"] * fps))
-            release_f = v.get("release_frame", v["depart_frame"] + travel_f)
-            reappear_f = release_f + G.delta_t_frames(
-                G.Turn(v["turn"]), v["speed_ms"], fps, lane_index=v["lane"])
-            leave_f = reappear_f + travel_f
-            out_dir, ex_lane = G.exit_lane_for_movement(
-                G.Direction(v["approach"]), v["lane"], G.Turn(v["turn"]))
-            key = (out_dir.value, ex_lane)
-            groups.setdefault(key, []).append((v, reappear_f, leave_f))
-        for key, grp in groups.items():
-            grp.sort(key=lambda x: x[1])
-            last_leave = -1
-            for v, r, l in grp:
-                if last_leave > 0 and r < last_leave + 5:
-                    delay = last_leave + 5 - r
-                    if v.get("queue_slot", -1) >= 0:
-                        # Queued: push stagger so release moves within green
-                        old_extra = v.get("extra_stagger_frames", 0)
-                        v["extra_stagger_frames"] = old_extra + delay
-                        # Recompute release and keep within green window
-                        old_release = v.get("release_frame", 0)
-                        new_release = old_release + delay
-                        if signal_plan is not None:
-                            approach = G.Direction(v["approach"])
-                            turn = G.Turn(v["turn"])
-                            if not signal_plan.is_green(approach, turn, new_release):
-                                # Rebases to next green — the extra frames beyond
-                                # the green window are added to the stagger so
-                                # the delay still counts toward exit ordering.
-                                rebased = signal_plan.next_green_frame(
-                                    approach, turn, new_release)
-                                rebase_extra = rebased - new_release
-                                v["extra_stagger_frames"] += rebase_extra
-                                new_release = rebased
-                        v["release_frame"] = new_release
-                        last_leave = new_release + (l - r)
-                        changed = True
-                        any_changed = True
-                    else:
-                        # Free-flow: push depart_frame later
-                        v["depart_frame"] += delay
-                        if "stop_frame" in v:
-                            v["stop_frame"] += delay
-                            v["release_frame"] += delay
-                        last_leave = l + delay
-                        changed = True
-                        any_changed = True
-                else:
-                    last_leave = l
-        if not changed:
-            break
-    return any_changed
-
-
-def _check_headway_fixpoint(vehicles, approach_visible_length, fps):
-    """Check same-lane headway and catch-up safety. Enforces BOTH direct
-    min-headway (no zero-frame same-lane gaps) AND catch-up safety for faster
-    followers. Push depart_frame later for any violating pair. Returns True
-    if any frame was changed."""
-    changed = False
-    lanes: dict = {}
-    for v in vehicles:
-        key = (v["approach"], v["lane"])
-        lanes.setdefault(key, []).append(v)
-    for key, vs in lanes.items():
-        vs.sort(key=lambda x: x["depart_frame"])
-        for i in range(len(vs) - 1):
-            lead = vs[i]
-            follow = vs[i + 1]
-            # 1. Direct min-headway: no zero-frame/instant same-lane gap
-            needed_min = K.min_headway_frames(max(lead["length"], follow["length"]),
-                                              max(lead["speed_ms"], follow["speed_ms"]))
-            if follow["depart_frame"] - lead["depart_frame"] < needed_min:
-                new_f = lead["depart_frame"] + needed_min
-                if new_f > follow["depart_frame"]:
-                    delta = new_f - follow["depart_frame"]
-                    follow["depart_frame"] = new_f
-                    if "stop_frame" in follow:
-                        follow["stop_frame"] += delta
-                        follow["release_frame"] += delta
-                    changed = True
-            # 2. Catch-up: faster follower must not close gap
-            if not K.catchup_safe(lead["depart_frame"], lead["speed_ms"],
-                                   lead["length"],
-                                   follow["depart_frame"], follow["speed_ms"],
-                                   approach_visible_length):
-                # Push follower later to make it safe
-                needed = K.min_follow_depart_frame(
-                    lead["depart_frame"], lead["speed_ms"], lead["length"],
-                    follow["speed_ms"], approach_visible_length)
-                if needed > follow["depart_frame"]:
-                    delta = needed - follow["depart_frame"]
-                    follow["depart_frame"] = needed
-                    if "stop_frame" in follow:
-                        follow["stop_frame"] += delta
-                        follow["release_frame"] += delta
-                    changed = True
-    return changed
-
-
-def _collect_stop_arrivals(vehicles: list, approach_visible_length: float,
-                           fps: int) -> Dict[Tuple[G.Direction, G.Turn], List[int]]:
-    """Compute the natural (un-gated) stop-line arrival frame for every
-    vehicle and group by movement.  This is the *demand* signal an adaptive
-    controller reacts to: arrival = depart_frame + travel_time at free-flow
-    speed, independent of any signal-induced wait.
-
-    Used to rebuild an ``AdaptiveSignalPlan`` from current arrivals inside the
-    ``_resolve_all`` fixpoint, closing the loop (signal reacts to arrivals,
-    release times shift, downstream arrivals change).  Feeding *natural*
-    arrivals (not gated ones) stabilises the fixpoint: the signal plan is a
-    function of demand only, not of itself.
-    """
-    arrivals: Dict[Tuple[G.Direction, G.Turn], List[int]] = {}
-    for v in vehicles:
-        ap = G.Direction(v["approach"])
-        turn = G.Turn(v["turn"])
-        travel_f = int(round(approach_visible_length / v["speed_ms"] * fps))
-        t = v["depart_frame"] + travel_f
-        arrivals.setdefault((ap, turn), []).append(t)
-    for key in arrivals:
-        arrivals[key].sort()
-    return arrivals
-
-
-def _resolve_all(vehicles, approach_visible_length, fps,
-                 signal_plan=None, max_rounds=120):
-    """Unified fixpoint: iterate headway → signal → exit until all
-    constraints are satisfied and the full vehicle state is stable.
-
-    Convergence is detected by comparing a snapshot of
-    ``(depart_frame, stop_frame, release_frame, queue_slot, extra_stagger)``
-    before and after each round.  Exit resolution and headway only push
-    later (monotonic), so the loop converges.
-
-    If ``signal_plan`` is an ``AdaptiveSignalPlan`` the plan is built once
-    from the natural stop-line demand snapshot. Rebuilding the same timeline
-    every fixpoint round was pure cost and erased late fallback intervals;
-    feeding gated arrivals back in would make the controller chase itself.
-    """
-    def _snapshot(vs):
-        return [
-            (v["depart_frame"], v.get("stop_frame"), v.get("release_frame"),
-             v.get("queue_slot"), v.get("extra_stagger_frames"))
-            for v in vs
-        ]
-
-    is_adaptive = SG.AdaptiveSignalPlan is not None and isinstance(
-        signal_plan, SG.AdaptiveSignalPlan)
-    arrivals_snapshot: Optional[Dict] = None
-    if is_adaptive:
-        arrivals_snapshot = _collect_stop_arrivals(
-            vehicles, approach_visible_length, fps)
-        horizon = (
-            max((t for ts in arrivals_snapshot.values() for t in ts),
-                default=0) + 20 * signal_plan.max_green_f)
-        signal_plan.rebuild(arrivals_snapshot, horizon_frames=horizon)
-
-    for _round in range(max_rounds):
-        before = _snapshot(vehicles)
-
-        # 1. Same-lane headway (re-check after exit shifts)
-        _check_headway_fixpoint(vehicles, approach_visible_length, fps)
-
-        # 2. Signal gating (compute stop/release from current depart_frame)
-        if signal_plan is not None:
-            _apply_signal_gating(vehicles, approach_visible_length,
-                                 signal_plan, fps)
-            _resolve_exit_conflicts(vehicles, approach_visible_length, fps,
-                                    signal_plan=signal_plan)
-            _apply_signal_gating(vehicles, approach_visible_length,
-                                 signal_plan, fps)
-
-        # 3. Exit-lane conflicts (may push depart_frame or stagger)
-        _resolve_exit_conflicts(vehicles, approach_visible_length, fps,
-                                signal_plan=signal_plan)
-
-        if _snapshot(vehicles) == before:
-            break
-    else:
-        # C7: loop exhausted without convergence — vehicles may still be
-        # shifting stop/release frames across rounds. Warn so the scenario
-        # isn't silently accepted with an unstable state. Compare the final
-        # snapshot to the last `before` to report what's still drifting.
-        import sys as _sys
-        print(f"[WARN] _resolve_all did not converge after {max_rounds} "
-              f"rounds — vehicle stop/release state may still be shifting. "
-              f"This usually means a dense scenario + tight headway + signal "
-              f"gating can't all stabilise; consider increasing --seconds "
-              f"or lowering --demand-scale.",
-              file=_sys.stderr, flush=True)
-        # Do not run another standalone signal pass here: the final fixpoint
-        # round ends with exit-conflict resolution, and a signal-only pass can
-        # undo those last release-frame shifts in saturated scenarios.  Keep the
-        # safer post-exit state and surface the warning instead.
 
 
 def main():
@@ -1060,8 +717,14 @@ def main():
                          "veh/h/approach — denser on-screen traffic without "
                          "authoring a JSON. Ignored when --demand is a path. "
                          "Scale <= 0 produces zero vehicles.")
+    ap.add_argument("--generator", type=str, default="v2",
+                    choices=["v2"],
+                    help="scheduler version: only v2 (event-driven) "
+                         "supported (default: %(default)s)")
     ap.add_argument("--out", type=str, default=os.path.join(HERE, "..", "output", "run1"))
     args = ap.parse_args()
+    if args.generator != "v2":
+        sys.exit(f"ERROR: --generator '{args.generator}' not supported. Only 'v2'.")
     if args.signal:
         if args.signal_mode == "adaptive":
             signal_plan = SG.AdaptiveSignalPlan(fps=args.fps)
