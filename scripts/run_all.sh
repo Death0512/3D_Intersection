@@ -39,6 +39,8 @@
 #                       for S seconds (default: 600)
 #   --samples N         Cycles render samples (default: 48). Lower = faster,
 #                       noisier (denoiser compensates). Try 16-24 for tests.
+#   --simulator MODE     Simulation engine: 'legacy' (default, event-driven)
+#                        or 'micro' (IDM car-following, interaction-driven).
 #   --blender PATH      Path to blender binary (default: auto-detect)
 #   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
 #   -h, --help          Show this help
@@ -68,6 +70,7 @@ JOBS=0   # 0 = auto-detect from free VRAM
 MAX_WORKERS_PER_GPU=1   # one Blender worker per physical GPU
 SILENCE_TIMEOUT=0   # 0 = use run_pipeline.py default (600s)
 SAMPLES=0           # 0 = use build_scene default (48)
+SIMULATOR=""        # "" = legacy; "micro" = IDM car-following
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -95,6 +98,7 @@ while [[ $# -gt 0 ]]; do
         --max-workers-per-gpu) MAX_WORKERS_PER_GPU="$2"; shift 2 ;;
         --silence-timeout) SILENCE_TIMEOUT="$2"; shift 2 ;;
         --samples)        SAMPLES="$2";       shift 2 ;;
+        --simulator)      SIMULATOR="$2";     shift 2 ;;
         -h|--help)        usage ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -182,6 +186,7 @@ elif [[ -n "$DEMAND_SCALE" ]]; then
 else
     echo "  demand : default model"
 fi
+[[ -n "$SIMULATOR" ]] && echo "  simulator: $SIMULATOR"
 echo "============================================================"
 
 # ---------------------------------------------------------------------------
@@ -203,6 +208,7 @@ PIPELINE_ARGS=(
 [[ -n "$DEMAND_SCALE" ]]    && PIPELINE_ARGS+=(--demand-scale "$DEMAND_SCALE")
 [[ "$SILENCE_TIMEOUT" -gt 0 ]] && PIPELINE_ARGS+=(--silence-timeout "$SILENCE_TIMEOUT")
 [[ "$SAMPLES" -gt 0 ]]       && PIPELINE_ARGS+=(--samples "$SAMPLES")
+[[ -n "$SIMULATOR" ]]        && PIPELINE_ARGS+=(--simulator "$SIMULATOR")
 
 # C5: force Python stdout unbuffered so every print(..., flush=True) in
 # render.py / build_scene.py / run_pipeline.py reaches the terminal/log

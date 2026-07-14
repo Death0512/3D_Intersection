@@ -61,6 +61,7 @@ def main():
         meta = json.load(f)
 
     # scenario headway
+    scn = None
     scn_path = os.path.join(out, "scenario.json")
     if os.path.exists(scn_path):
         with open(scn_path) as f:
@@ -102,6 +103,60 @@ def main():
                      if f["frame"] >= v["reappear_frame"])
         ok &= check(f"{v['id']} in-segment camera tag", in_ok)
         ok &= check(f"{v['id']} out-segment camera tag", out_ok)
+
+    # ---- microsim-specific validation (only when simulator == "micro") --------
+    simulator_mode = scn.get("simulator", "legacy") if scn is not None else "legacy"
+    if simulator_mode == "micro" and scn is not None:
+        print("-" * 60)
+        print("MICROSCOPIC SIMULATION CHECKS")
+        print("-" * 60)
+
+        # Check 1: speed is non-negative for all vehicles
+        for v in scn["vehicles"]:
+            ok &= check(f"{v['id']} speed_ms >= 0",
+                        v["speed_ms"] >= 0,
+                        f"speed_ms={v['speed_ms']}")
+
+        # Check 2: wait_frames >= 0 for all vehicles
+        for v in scn["vehicles"]:
+            wf = v.get("wait_frames", 0)
+            ok &= check(f"{v['id']} wait_frames >= 0",
+                        wf >= 0,
+                        f"wait_frames={wf}")
+
+        # Check 3: release >= stop (FIFO ordering)
+        for v in scn["vehicles"]:
+            sf = v.get("stop_frame")
+            rf = v.get("release_frame")
+            if sf is not None and rf is not None:
+                ok &= check(f"{v['id']} release >= stop",
+                            rf >= sf,
+                            f"stop={sf} release={rf}")
+
+        # Check 4: same-lane FIFO — vehicles released in depart order per lane
+        lane_releases = {}
+        for v in scn["vehicles"]:
+            key = (v["approach"], v["lane"])
+            rf = v.get("release_frame")
+            if rf is not None:
+                lane_releases.setdefault(key, []).append(
+                    (v["depart_frame"], rf, v["id"]))
+        for key, entries in lane_releases.items():
+            entries.sort(key=lambda x: x[0])  # sort by depart_frame
+            for i in range(len(entries) - 1):
+                ok &= check(f"{entries[i][2]}->{entries[i+1][2]} FIFO release",
+                            entries[i][1] <= entries[i+1][1],
+                            f"lane {key}: {entries[i][1]} > {entries[i+1][1]}"
+                            if entries[i][1] > entries[i+1][1] else "")
+
+        # Check 5: queue_slot consistency — queued vehicles have slot >= 0
+        for v in scn["vehicles"]:
+            wf = v.get("wait_frames", 0)
+            qs = v.get("queue_slot", -1)
+            if wf > 0:
+                ok &= check(f"{v['id']} queued has queue_slot >= 0",
+                            qs >= 0,
+                            f"wait={wf} slot={qs}")
 
     print("=" * 60)
     print("OVERALL:", "ALL PASS" if ok else "FAILURES PRESENT")

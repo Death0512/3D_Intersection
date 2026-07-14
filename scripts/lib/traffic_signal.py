@@ -496,6 +496,39 @@ class AdaptiveSignalPlan:
                 return e
         return frame + 1
 
+    # ---- closed-loop interface (for IDM microsim) -----------------------------
+
+    def observe_and_decide(
+        self,
+        tick: int,
+        queue_counts: Dict[Tuple[G.Direction, G.Turn], int],
+        barrier: int,
+    ) -> Tuple[Tuple[int, int], int, int, int]:
+        """Closed-loop phase selection from live lane-state observations.
+
+        Called by the microsim at each tick where a new green phase must be
+        chosen. Selects the highest-pressure combo on the current barrier
+        side, computes green duration, and returns the decision.
+
+        Args:
+            tick: current simulation frame.
+            queue_counts: ``{(approach, turn): count}`` of vehicles currently
+                waiting (queued and not yet released) per movement.
+            barrier: current barrier side (0 = N/S, 1 = E/W).
+
+        Returns:
+            ``(combo, green_end, clearance_end, next_barrier)`` where
+            ``combo`` is the ``(ring1_phase, ring2_phase)`` tuple,
+            ``green_end`` is the exclusive frame where this green expires,
+            ``clearance_end`` is the end of the yellow+all-red clearance,
+            and ``next_barrier`` is the barrier for the next decision.
+        """
+        side = _NS_COMBOS if barrier == 0 else _EW_COMBOS
+        combo = self._select_combo(side, queue_counts)
+        green_end = self._serve_combo(tick, combo, queue_counts)
+        clearance_end = green_end + self.yellow_f + self.all_red_f
+        return combo, green_end, clearance_end, 1 - barrier
+
     # ---- introspection (for metadata + tests) --------------------------------
 
     def phase_at(self, frame: int) -> str:

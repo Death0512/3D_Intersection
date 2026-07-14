@@ -110,7 +110,7 @@ def step_assets_validate():
 
 def step_scenario(seed, seconds, out_dir, fps=None,
                    signal=False, signal_mode="fixed", demand=None,
-                   demand_scale=None):
+                   demand_scale=None, simulator=None):
     """Run scenario_gen.py. Bounded to 600s; v2 simulation should finish fast,
     so a hang here means the event loop horizon/queue release logic regressed."""
     cmd = [PYTHON, os.path.join(HERE, "scenario_gen.py"),
@@ -126,6 +126,8 @@ def step_scenario(seed, seconds, out_dir, fps=None,
         cmd += ["--demand", str(demand)]
     if demand_scale is not None:
         cmd += ["--demand-scale", str(demand_scale)]
+    if simulator is not None:
+        cmd += ["--simulator", str(simulator)]
     run(cmd, timeout=600)
     return os.path.join(out_dir, "scenario.json")
 
@@ -623,6 +625,10 @@ def main():
                          "on-screen traffic, no JSON file needed. "
                          "Scale <= 0 produces zero vehicles. "
                          "Ignored when --demand is a path.")
+    ap.add_argument("--simulator", type=str, default=None,
+                    choices=["legacy", "micro"],
+                    help="simulation engine: 'legacy' (event-driven, default) "
+                         "or 'micro' (IDM car-following, interaction-driven)")
     args = ap.parse_args()
 
     fps = args.fps
@@ -630,11 +636,13 @@ def main():
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
     fps_label = f"{fps} fps" if fps else "default fps"
+    sim_label = args.simulator or "legacy"
     print("=" * 60)
     print(f"PIPELINE  seed={args.seed}  "
           f"seconds={seconds}s ({fps_label})  out={out_dir}")
-    print(f"  python : {PYTHON}")
-    print(f"  blender: {BLENDER}")
+    print(f"  python    : {PYTHON}")
+    print(f"  blender   : {BLENDER}")
+    print(f"  simulator : {sim_label}")
     print("=" * 60)
 
     ENV.validate_all_envs(ROOT)
@@ -647,7 +655,8 @@ def main():
     print("\n[2/5] Scenario generation")
     scn = step_scenario(args.seed, seconds, out_dir, fps=fps,
                         signal=args.signal, signal_mode=args.signal_mode,
-                        demand=args.demand, demand_scale=args.demand_scale)
+                        demand=args.demand, demand_scale=args.demand_scale,
+                        simulator=args.simulator)
 
     print("\n[3/5] Plate pre-generation")
     step_plates(scn, out_dir)

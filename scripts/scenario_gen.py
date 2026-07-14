@@ -37,6 +37,7 @@ import envfile as ENV
 import traffic_signal as SG
 from gen_plate import random_plate
 import intersection_sim as IS
+import micro_sim as MS
 
 ROAD_JSON = os.path.join(HERE, "..", "assets", "road.json")
 
@@ -498,7 +499,8 @@ def generate(seed: int, seconds: float,
              out_dir: str, fps: int = G.FPS,
              signal_plan: Optional[SG.SignalPlan] = None,
              demand: Optional[DemandModel] = None,
-             signal_mode: str = "fixed") -> dict:
+             signal_mode: str = "fixed",
+             simulator: str = "legacy") -> dict:
     """Generate a scenario and write ``scenario.json``.
 
     Vehicles are generated from a steady-state Poisson stream that starts
@@ -590,9 +592,15 @@ def generate(seed: int, seconds: float,
         # User mixed the two: prefer the explicit plan, switch the mode label.
         signal_mode = "fixed"
 
-    # ---- v2 event-driven microsim ------------------------------------------
-    vehicles, sim_meta = IS.simulate(
-        vehicles, approach_len, fps, signal_plan=signal_plan, seed=seed)
+    # ---- microsimulation ---------------------------------------------------
+    def _run_sim(veh_list):
+        if simulator == "micro":
+            return MS.simulate(veh_list, approach_len, fps,
+                               signal_plan=signal_plan, seed=seed)
+        return IS.simulate(veh_list, approach_len, fps,
+                           signal_plan=signal_plan, seed=seed)
+
+    vehicles, sim_meta = _run_sim(vehicles)
     sim_arrivals = sim_meta.get("arrival_events", {})
 
     # Build adaptive signal timeline from realised stop-line arrivals.
@@ -612,8 +620,7 @@ def generate(seed: int, seconds: float,
         if not dropped:
             break
         total_dropped += dropped
-        vehicles, sim_meta = IS.simulate(
-            vehicles, approach_len, fps, signal_plan=signal_plan, seed=seed)
+        vehicles, sim_meta = _run_sim(vehicles)
         sim_arrivals = sim_meta.get("arrival_events", {})
     else:
         # Loop exhausted without reaching a fixed point (re-sim after the last
@@ -656,6 +663,7 @@ def generate(seed: int, seconds: float,
         "cameras": G.camera_names(),
         "vehicles": vehicles,
         "generator": "v2",
+        "simulator": simulator,
     }
     if signal_plan is not None:
         scenario["signal_mode"] = signal_mode
@@ -721,6 +729,11 @@ def main():
                     choices=["v2"],
                     help="scheduler version: only v2 (event-driven) "
                          "supported (default: %(default)s)")
+    ap.add_argument("--simulator", type=str, default="legacy",
+                    choices=["legacy", "micro"],
+                    help="simulation engine: 'legacy' (event-driven queue, "
+                         "default) or 'micro' (IDM car-following model "
+                         "with time-stepped state evolution)")
     ap.add_argument("--out", type=str, default=os.path.join(HERE, "..", "output", "run1"))
     args = ap.parse_args()
     if args.generator != "v2":
@@ -747,7 +760,8 @@ def main():
                 turn_split=DEFAULT_TURN_SPLIT)
     generate(args.seed, args.seconds, args.out, fps=args.fps,
              signal_plan=signal_plan, demand=demand,
-             signal_mode=args.signal_mode)
+             signal_mode=args.signal_mode,
+             simulator=args.simulator)
 
 
 if __name__ == "__main__":
