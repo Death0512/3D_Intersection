@@ -626,9 +626,10 @@ def main():
                          "Scale <= 0 produces zero vehicles. "
                          "Ignored when --demand is a path.")
     ap.add_argument("--simulator", type=str, default=None,
-                    choices=["legacy", "micro"],
+                    choices=["legacy", "micro", "research"],
                     help="simulation engine: 'legacy' (event-driven, default) "
-                         "or 'micro' (IDM car-following, interaction-driven)")
+                         "'micro' (IDM prototype), or 'research' "
+                         "(formal state-based simulation kernel)")
     args = ap.parse_args()
 
     fps = args.fps

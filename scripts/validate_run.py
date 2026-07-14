@@ -104,9 +104,9 @@ def main():
         ok &= check(f"{v['id']} in-segment camera tag", in_ok)
         ok &= check(f"{v['id']} out-segment camera tag", out_ok)
 
-    # ---- microsim-specific validation (only when simulator == "micro") --------
+    # ---- state-based microsim validation (micro prototype or research engine) --
     simulator_mode = scn.get("simulator", "legacy") if scn is not None else "legacy"
-    if simulator_mode == "micro" and scn is not None:
+    if simulator_mode in ("micro", "research") and scn is not None:
         print("-" * 60)
         print("MICROSCOPIC SIMULATION CHECKS")
         print("-" * 60)

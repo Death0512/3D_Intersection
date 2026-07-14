@@ -39,8 +39,8 @@
 #                       for S seconds (default: 600)
 #   --samples N         Cycles render samples (default: 48). Lower = faster,
 #                       noisier (denoiser compensates). Try 16-24 for tests.
-#   --simulator MODE     Simulation engine: 'legacy' (default, event-driven)
-#                        or 'micro' (IDM car-following, interaction-driven).
+#   --simulator MODE     Simulation engine: 'legacy' (default), 'micro' (IDM
+#                        prototype), or 'research' (formal state-based kernel).
 #   --blender PATH      Path to blender binary (default: auto-detect)
 #   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
 #   -h, --help          Show this help

@@ -1,8 +1,8 @@
-"""Compare legacy (event-driven) and micro (IDM) simulators side-by-side.
+"""Compare legacy, micro (IDM), and research simulators side-by-side.
 
-Runs both simulators on the same seed/demand/signal and prints thesis-ready
-comparison metrics: delay, throughput, queue statistics, and per-vehicle
-timing differences.
+Runs all three simulators on the same seed/demand/signal and prints
+thesis-ready comparison metrics: delay, throughput, queue statistics,
+and per-vehicle timing differences.
 
 Usage:
     python3 scripts/compare_simulators.py --seed 42 --seconds 12 --signal
@@ -46,7 +46,7 @@ def compare(seed: int, seconds: float, fps: int,
             demand: SGEN.DemandModel):
     """Run both simulators and return comparison dict."""
     results = {}
-    for sim_name in ("legacy", "micro"):
+    for sim_name in ("legacy", "micro", "research"):
         with tempfile.TemporaryDirectory() as td:
             scn = SGEN.generate(
                 seed, seconds, td, fps=fps,
@@ -81,53 +81,48 @@ def compare(seed: int, seconds: float, fps: int,
 def print_report(results: Dict):
     """Pretty-print the comparison report."""
     print()
-    print("=" * 70)
+    W = 85
+    print("=" * W)
     print("  SIMULATOR COMPARISON REPORT")
-    print("=" * 70)
+    print("=" * W)
 
-    header = f"{'Metric':<30} {'Legacy':>18} {'Micro (IDM)':>18}"
+    header = f"{'Metric':<30} {'Legacy':>15} {'Micro (IDM)':>15} {'Research':>15}"
     print(header)
-    print("-" * 70)
+    print("-" * W)
 
     leg = results["legacy"]
     mic = results["micro"]
+    res = results["research"]
 
     rows = [
-        ("Vehicles", leg["num_vehicles"], mic["num_vehicles"]),
-        ("Duration (frames)", leg["duration_frames"], mic["duration_frames"]),
-        ("Throughput (veh/h)", leg["throughput_vph"], mic["throughput_vph"]),
-        ("Queued count", leg["queued_count"], mic["queued_count"]),
-        ("Mean wait (frames)", leg["wait_frames"]["mean"],
-         mic["wait_frames"]["mean"]),
-        ("Max wait (frames)", leg["wait_frames"]["max"],
-         mic["wait_frames"]["max"]),
-        ("Std wait (frames)", leg["wait_frames"]["std"],
-         mic["wait_frames"]["std"]),
-        ("Mean delay (frames)", leg["delay_frames"]["mean"],
-         mic["delay_frames"]["mean"]),
-        ("Max delay (frames)", leg["delay_frames"]["max"],
-         mic["delay_frames"]["max"]),
-        ("Mean queue slot", leg["queue_slot"]["mean"],
-         mic["queue_slot"]["mean"]),
-        ("Max queue slot", leg["queue_slot"]["max"],
-         mic["queue_slot"]["max"]),
+        ("Vehicles", leg["num_vehicles"], mic["num_vehicles"], res["num_vehicles"]),
+        ("Duration (frames)", leg["duration_frames"], mic["duration_frames"], res["duration_frames"]),
+        ("Throughput (veh/h)", leg["throughput_vph"], mic["throughput_vph"], res["throughput_vph"]),
+        ("Queued count", leg["queued_count"], mic["queued_count"], res["queued_count"]),
+        ("Mean wait (frames)", leg["wait_frames"]["mean"], mic["wait_frames"]["mean"], res["wait_frames"]["mean"]),
+        ("Max wait (frames)", leg["wait_frames"]["max"], mic["wait_frames"]["max"], res["wait_frames"]["max"]),
+        ("Std wait (frames)", leg["wait_frames"]["std"], mic["wait_frames"]["std"], res["wait_frames"]["std"]),
+        ("Mean delay (frames)", leg["delay_frames"]["mean"], mic["delay_frames"]["mean"], res["delay_frames"]["mean"]),
+        ("Max delay (frames)", leg["delay_frames"]["max"], mic["delay_frames"]["max"], res["delay_frames"]["max"]),
+        ("Mean queue slot", leg["queue_slot"]["mean"], mic["queue_slot"]["mean"], res["queue_slot"]["mean"]),
+        ("Max queue slot", leg["queue_slot"]["max"], mic["queue_slot"]["max"], res["queue_slot"]["max"]),
     ]
 
-    for label, lv, mv in rows:
-        print(f"{label:<30} {str(lv):>18} {str(mv):>18}")
+    for label, lv, mv, rv in rows:
+        print(f"{label:<30} {str(lv):>15} {str(mv):>15} {str(rv):>15}")
 
-    print("=" * 70)
+    print("=" * W)
     print()
     print("Key thesis observation:")
-    print("  In the MICRO simulator, vehicle speed is an OUTPUT of IDM dynamics,")
-    print("  not a fixed input. Trajectories emerge from continuous car-following")
-    print("  interactions rather than being planned in advance.")
+    print("  In MICRO and RESEARCH simulators, vehicle speed is an OUTPUT of IDM")
+    print("  dynamics, not a fixed input. RESEARCH adds formal driver profiles,")
+    print("  conflict-resource intersection, and closed-loop adaptive signal FSM.")
     print()
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Compare legacy vs micro (IDM) simulators")
+        description="Compare legacy, micro (IDM), and research simulators")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--seconds", type=float, default=12.0)
     ap.add_argument("--fps", type=int, default=G.FPS)

@@ -38,6 +38,8 @@ import traffic_signal as SG
 from gen_plate import random_plate
 import intersection_sim as IS
 import micro_sim as MS
+import research_sim as RS
+from sim.exporter import write_simulation_artifacts
 
 ROAD_JSON = os.path.join(HERE, "..", "assets", "road.json")
 
@@ -241,6 +243,21 @@ def _filter_to_duration(vehicles: list, duration_frames: int,
     if dropped:
         vehicles[:] = keep
     return dropped
+
+
+def _remap_trajectory_samples(sim_meta: dict, id_map: Dict[str, str]) -> None:
+    """Keep trajectory samples for final vehicles and remap ids in place."""
+    if "trajectory_samples" not in sim_meta:
+        return
+    kept = []
+    for sample in sim_meta.get("trajectory_samples", []):
+        vid = sample.get("vehicle_id")
+        if vid in id_map:
+            sample["vehicle_id"] = id_map[vid]
+            kept.append(sample)
+    sim_meta["trajectory_samples"] = kept
+
+
 TURNS = [G.Turn.LEFT, G.Turn.STRAIGHT, G.Turn.RIGHT]
 TURN_WEIGHTS = [1, 3, 2]  # straight most common
 TURN_WEIGHT_BY_TURN = dict(zip(TURNS, TURN_WEIGHTS))
@@ -550,9 +567,12 @@ def generate(seed: int, seconds: float,
     for approach in G.Direction:
         rate_ps = demand.flow_vph(approach) / 3600.0
         arrivals = []
+        if rate_ps <= 0.0:
+            arrivals_by_approach[approach] = arrivals
+            continue
         t = -warmup_seconds
         while t < seconds:
-            t += rng.expovariate(rate_ps) if rate_ps > 0 else seconds
+            t += rng.expovariate(rate_ps)
             if t < seconds:
                 frame = int(round(t * fps_f))
                 arrivals.append(frame)
@@ -594,6 +614,10 @@ def generate(seed: int, seconds: float,
 
     # ---- microsimulation ---------------------------------------------------
     def _run_sim(veh_list):
+        if simulator == "research":
+            return RS.simulate(veh_list, approach_len, fps,
+                               signal_plan=signal_plan, seed=seed,
+                               record_trajectories=True)
         if simulator == "micro":
             return MS.simulate(veh_list, approach_len, fps,
                                signal_plan=signal_plan, seed=seed)
@@ -650,8 +674,12 @@ def generate(seed: int, seconds: float,
                       file=sys.stderr, flush=True)
 
     # Renumber IDs
+    id_map = {}
     for i, v in enumerate(vehicles):
+        old_id = v["id"]
         v["id"] = f"V{i:03d}"
+        id_map[old_id] = v["id"]
+    _remap_trajectory_samples(sim_meta, id_map)
 
     scenario = {
         "seed": seed,
@@ -687,6 +715,9 @@ def generate(seed: int, seconds: float,
     if demand is not None:
         scenario["demand"] = demand.to_dict()
     os.makedirs(out_dir, exist_ok=True)
+    if simulator == "research":
+        scenario["simulation_artifacts"] = write_simulation_artifacts(
+            out_dir, scenario, sim_meta)
     out_path = os.path.join(out_dir, "scenario.json")
     with open(out_path, "w") as f:
         json.dump(scenario, f, indent=2)
@@ -730,10 +761,10 @@ def main():
                     help="scheduler version: only v2 (event-driven) "
                          "supported (default: %(default)s)")
     ap.add_argument("--simulator", type=str, default="legacy",
-                    choices=["legacy", "micro"],
+                    choices=["legacy", "micro", "research"],
                     help="simulation engine: 'legacy' (event-driven queue, "
-                         "default) or 'micro' (IDM car-following model "
-                         "with time-stepped state evolution)")
+                         "default), 'micro' (IDM prototype), or 'research' "
+                         "(formal state-based simulation kernel)")
     ap.add_argument("--out", type=str, default=os.path.join(HERE, "..", "output", "run1"))
     args = ap.parse_args()
     if args.generator != "v2":

@@ -38,6 +38,7 @@ import blender_utils as bu
 import envfile as ENV
 import geometry as G
 import kinematics as K
+from sim.trajectory import apply_samples_to_motion, load_trajectory_index
 from gen_plate import render_plate
 
 
@@ -233,7 +234,9 @@ def assign_plate_and_color(coll, plate_str: str, plates_dir: str, rgba=None):
 
 def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
                           anchor_loc, anchor_rot_z: float, is_in_camera: bool,
-                          road_meta: dict):
+                          road_meta: dict,
+                          trajectory_samples=None,
+                          frame_end: int = None):
     """Append + duplicate one vehicle at its env-JSON spawn anchor, assign
     plate+color. Returns (root_object, motion).
 
@@ -292,6 +295,10 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
         stop_frame=veh.get("stop_frame"),
         release_frame=veh.get("release_frame"),
         queue_slot=veh.get("queue_slot", -1))
+    if is_in_camera and trajectory_samples:
+        motion = apply_samples_to_motion(
+            motion, trajectory_samples, anchor_xy,
+            road_meta=road_meta, frame_end=frame_end)
     fwd_off = meta.get("forward_offset_deg", 0.0)
 
     # Create the parent Empty at the WORLD ORIGIN with no rotation first, then
@@ -729,6 +736,8 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
     scene_objs = []
     motions = []
     frame_end = max(0, scenario["duration_frames"] - 1)
+    scenario_dir = scenario.get("_base_dir", os.path.dirname(os.path.abspath(out_blend)))
+    traj_index = load_trajectory_index(scenario, scenario_dir)
     n_visible_candidates = 0
     print(f"  [build] placing vehicles for {camera_tag} "
           f"(scanning {len(scenario['vehicles'])} total)...", flush=True)
@@ -759,7 +768,9 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
         empty, motion = make_vehicle_instance(
             veh, veh_manifest, plates_dir,
             anchor_loc=anchor_loc, anchor_rot_z=anchor_rot_z,
-            is_in_camera=is_in, road_meta=road_meta)
+            is_in_camera=is_in, road_meta=road_meta,
+            trajectory_samples=traj_index.get(veh["id"]),
+            frame_end=frame_end)
         keyframe_motion(empty, motion, is_in_camera=is_in, frame_end=frame_end)
         scene_objs.append(empty)
         motions.append((veh, motion))
@@ -797,6 +808,7 @@ def main():
     ns = ap.parse_args(post)
     with open(ns.scenario) as f:
         scenario = json.load(f)
+    scenario["_base_dir"] = os.path.dirname(os.path.abspath(ns.scenario))
     build_shot(scenario, ns.camera, ns.out)
 
 

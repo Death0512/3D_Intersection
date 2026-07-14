@@ -1,0 +1,82 @@
+"""Phase 6 — simulation artifact exporter.
+
+The renderer should consume traffic state produced by the simulation engine, not
+recompute traffic behavior.  This module writes standalone simulation artifacts
+beside ``scenario.json`` while keeping the legacy scenario fields intact for
+backward-compatible rendering.
+"""
+from __future__ import annotations
+
+import json
+import os
+from typing import Dict, Iterable, Tuple
+
+
+def _jsonable_arrival_events(arrivals: Dict) -> Dict[str, list]:
+    out = {}
+    for key, frames in arrivals.items():
+        if isinstance(key, tuple) and len(key) == 2:
+            a, t = key
+            a = getattr(a, "value", a)
+            t = getattr(t, "value", t)
+            out[f"{a}_{t}"] = list(frames)
+        else:
+            out[str(key)] = list(frames)
+    return out
+
+
+def write_simulation_artifacts(out_dir: str, scenario: Dict,
+                               sim_meta: Dict) -> Dict[str, str]:
+    """Write trajectory/metrics/meta JSON files and return relative paths.
+
+    Returned paths are relative to ``out_dir`` so ``scenario.json`` remains
+    portable when a Kaggle output directory is zipped or moved.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    paths = {
+        "trajectory": "trajectory.json",
+        "lane_metrics": "lane_metrics.json",
+        "simulation_meta": "simulation_meta.json",
+    }
+
+    trajectory = {
+        "schema": "trajectory.v1",
+        "fps": scenario.get("fps"),
+        "duration_frames": scenario.get("duration_frames"),
+        "simulator": scenario.get("simulator"),
+        "coordinate": "lane-longitudinal",
+        "description": (
+            "Per-frame simulation state samples before Blender visualization. "
+            "s is longitudinal distance along the approach lane in metres."
+        ),
+        "samples": sim_meta.get("trajectory_samples", []),
+    }
+    lane_metrics = {
+        "schema": "lane_metrics.v1",
+        "fps": scenario.get("fps"),
+        "duration_frames": scenario.get("duration_frames"),
+        "simulator": scenario.get("simulator"),
+        "lanes": sim_meta.get("lane_metrics", {}),
+    }
+    simulation_meta = {
+        "schema": "simulation_meta.v1",
+        "fps": scenario.get("fps"),
+        "duration_frames": scenario.get("duration_frames"),
+        "simulator": scenario.get("simulator"),
+        "arrival_events": _jsonable_arrival_events(
+            sim_meta.get("arrival_events", {})),
+        "adaptive_intervals": sim_meta.get("adaptive_intervals", []),
+        "adaptive_clearances": sim_meta.get("adaptive_clearances", []),
+    }
+
+    for rel, payload in (
+        (paths["trajectory"], trajectory),
+        (paths["lane_metrics"], lane_metrics),
+        (paths["simulation_meta"], simulation_meta),
+    ):
+        with open(os.path.join(out_dir, rel), "w") as f:
+            json.dump(payload, f, indent=2)
+    return paths
+
+
+__all__ = ["write_simulation_artifacts"]

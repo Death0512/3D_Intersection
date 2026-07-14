@@ -8,10 +8,12 @@ venv
 scripts/__pycache__
 scripts/lib/__pycache__
 scripts/tests/__pycache__
+scripts/lib/sim/__pycache__
 
 scripts/env.sh
 
 codemap.md
 */codemap.md
 .slim
+.slim/deepwork/
 AGENTS.md
