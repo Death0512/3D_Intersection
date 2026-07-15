@@ -53,6 +53,28 @@ class TestSimulationTrajectory(unittest.TestCase):
         self.assertAlmostEqual(track[-1].x, stop[0], places=6)
         self.assertAlmostEqual(track[-1].y, stop[1], places=6)
 
+    def test_samples_to_track_prefers_v2_world_coordinates(self):
+        approach = G.Direction("N")
+        lane = 1
+        stop = G.lane_entry_box_edge(approach, lane)
+        anchor = (stop[0], stop[1] - 40.0)
+        samples = [
+            {
+                "frame": 0,
+                "stage": "APPROACH",
+                "s": 0.0,
+                "world_x": 123.456,
+                "world_y": -7.89,
+            },
+        ]
+
+        track = samples_to_track(samples, approach, lane, anchor,
+                                 road_meta={"approach_length": 40.0})
+
+        self.assertEqual(len(track), 1)
+        self.assertAlmostEqual(track[0].x, 123.456, places=6)
+        self.assertAlmostEqual(track[0].y, -7.89, places=6)
+
     def test_apply_samples_replaces_motion_track_in_only_when_usable(self):
         approach = G.Direction("N")
         lane = 1

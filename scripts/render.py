@@ -39,20 +39,21 @@ except ImportError:
 import geometry as G
 import kinematics as K
 import envfile as ENV
+from sim.trajectory import apply_samples_to_motion, load_trajectory_index
 
 
 # ---------------------------------------------------------------------------
 # Metadata assembly (pure-python, sparse pose ground truth)
 # ---------------------------------------------------------------------------
 
-def compute_metadata(scenario: dict, root: str) -> dict:
+def compute_metadata(scenario: dict, root: str, run_dir: str | None = None) -> dict:
     """Build the full metadata structure from the scenario + kinematics + env.
 
     Per-frame data is SPARSE: only visible frames are listed, each carrying the
     vehicle's world pose (x, y, z, rot_z), visibility flag, and the camera tag
-    that films it. Poses are derived by linear interpolation of the kinematics
-    motion plan (the same plan build_scene keyframes), so metadata and render
-    stay consistent.
+    that films it. Research scenarios prefer trajectory.json-backed approach
+    tracks via the same adapter build_scene uses; legacy scenarios fall back to
+    the kinematics motion plan.
 
     Vehicle START positions come from the required env files
     (``assets/envs/<tag>.json`` lane_defaults) — the SAME anchors build_scene
@@ -69,6 +70,7 @@ def compute_metadata(scenario: dict, root: str) -> dict:
         raise SystemExit(f"FAIL: road.json not found: {road_path}")
     with open(road_path) as f:
         road_meta = json.load(f)
+    traj_index = load_trajectory_index(scenario, run_dir) if run_dir else {}
 
     vehicles_meta = []
     for veh in scenario["vehicles"]:
@@ -88,6 +90,12 @@ def compute_metadata(scenario: dict, root: str) -> dict:
                                stop_frame=veh.get("stop_frame"),
                                release_frame=veh.get("release_frame"),
                                queue_slot=veh.get("queue_slot", -1))
+        motion = apply_samples_to_motion(
+            motion,
+            traj_index.get(veh["id"], []),
+            in_anchor[:2],
+            road_meta=road_meta,
+        )
 
         frames = []
         # In segment — rot_z is the env anchor heading (true vehicle heading;
@@ -516,7 +524,7 @@ def _write_metadata(scenario, out_dir):
     import glob
     videos = sorted(os.path.relpath(p, out_dir)
                     for p in glob.glob(os.path.join(out_dir, "video_*.mp4")))
-    meta = compute_metadata(scenario, ROOT)
+    meta = compute_metadata(scenario, ROOT, run_dir=out_dir)
     meta["videos"] = videos
     meta_path = os.path.join(out_dir, "metadata.json")
     with open(meta_path, "w") as f:

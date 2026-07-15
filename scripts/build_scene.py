@@ -235,8 +235,7 @@ def assign_plate_and_color(coll, plate_str: str, plates_dir: str, rgba=None):
 def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
                           anchor_loc, anchor_rot_z: float, is_in_camera: bool,
                           road_meta: dict,
-                          trajectory_samples=None,
-                          frame_end: int = None):
+                          trajectory_samples=None):
     """Append + duplicate one vehicle at its env-JSON spawn anchor, assign
     plate+color. Returns (root_object, motion).
 
@@ -298,7 +297,7 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
     if is_in_camera and trajectory_samples:
         motion = apply_samples_to_motion(
             motion, trajectory_samples, anchor_xy,
-            road_meta=road_meta, frame_end=frame_end)
+            road_meta=road_meta)
     fwd_off = meta.get("forward_offset_deg", 0.0)
 
     # Create the parent Empty at the WORLD ORIGIN with no rotation first, then
@@ -769,8 +768,7 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
             veh, veh_manifest, plates_dir,
             anchor_loc=anchor_loc, anchor_rot_z=anchor_rot_z,
             is_in_camera=is_in, road_meta=road_meta,
-            trajectory_samples=traj_index.get(veh["id"]),
-            frame_end=frame_end)
+            trajectory_samples=traj_index.get(veh["id"]))
         keyframe_motion(empty, motion, is_in_camera=is_in, frame_end=frame_end)
         scene_objs.append(empty)
         motions.append((veh, motion))

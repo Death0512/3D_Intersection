@@ -23,6 +23,14 @@ sys.path.insert(0, os.path.join(HERE, "lib"))
 
 import geometry as G
 import kinematics as K
+import envfile as ENV
+
+TRACE_POS_TOL_M = 0.01
+
+
+def _load_json(path):
+    with open(path) as f:
+        return json.load(f)
 
 
 def check(label, cond, detail=""):
@@ -57,15 +65,13 @@ def main():
     ok &= check("metadata.json exists", os.path.exists(meta_path))
     if not os.path.exists(meta_path):
         print("=" * 60); sys.exit(1)
-    with open(meta_path) as f:
-        meta = json.load(f)
+    meta = _load_json(meta_path)
 
     # scenario headway
     scn = None
     scn_path = os.path.join(out, "scenario.json")
     if os.path.exists(scn_path):
-        with open(scn_path) as f:
-            scn = json.load(f)
+        scn = _load_json(scn_path)
         lanes = {}
         for v in scn["vehicles"]:
             lanes.setdefault((v["approach"], v["lane"]), []).append(
@@ -103,6 +109,101 @@ def main():
                      if f["frame"] >= v["reappear_frame"])
         ok &= check(f"{v['id']} in-segment camera tag", in_ok)
         ok &= check(f"{v['id']} out-segment camera tag", out_ok)
+
+    # trajectory artifact integrity
+    traj_path = os.path.join(out, "trajectory.json")
+    if os.path.exists(traj_path):
+        print("-" * 60)
+        print("TRAJECTORY INTEGRITY CHECKS")
+        print("-" * 60)
+        traj = _load_json(traj_path)
+        samples = traj.get("samples", [])
+        by_vid = {}
+        for sample in samples:
+            vid = sample.get("vehicle_id")
+            if vid:
+                by_vid.setdefault(vid, []).append(sample)
+
+        meta_by_vid = {v["id"]: v for v in meta["vehicles"]}
+        scenario_by_vid = {v["id"]: v for v in scn["vehicles"]} if scn else {}
+
+        ok &= check("trajectory schema is v2", traj.get("schema") == "trajectory.v2",
+                    traj.get("schema", ""))
+
+        for vid, veh_samples in by_vid.items():
+            veh_meta = meta_by_vid.get(vid)
+            scn_veh = scenario_by_vid.get(vid)
+            if veh_meta is None or scn_veh is None:
+                ok &= check(f"{vid} trajectory has matching metadata/scenario",
+                            False, "orphan trajectory vehicle")
+                continue
+
+            veh_samples.sort(key=lambda s: int(s.get("frame", 0)))
+            # world coordinates must be present and finite for every sample
+            bad_world = [s for s in veh_samples
+                         if any(k not in s for k in ("world_x", "world_y", "world_z"))]
+            ok &= check(f"{vid} trajectory has world coords", not bad_world,
+                        f"{len(bad_world)} missing" if bad_world else "")
+
+            # samples must stay on one route / lane identity
+            route_ok = all(
+                s.get("approach") == veh_meta["approach"] and
+                s.get("lane") == veh_meta["lane"] and
+                s.get("turn") == veh_meta["turn"]
+                for s in veh_samples
+            )
+            ok &= check(f"{vid} trajectory route identity consistent", route_ok)
+
+            trace_vehicle = traj.get("vehicles", {}).get(vid, {})
+            spawn = trace_vehicle.get("spawn_position", {})
+            ok &= check(f"{vid} has spawn position",
+                        all(k in spawn for k in ("x", "y", "z")))
+            env = ENV.load_env(f"in_{scn_veh['approach']}", os.path.abspath(os.path.join(HERE, "..")))
+            expected_anchor, _ = ENV.lane_default_anchor(env, scn_veh["lane"])
+            if all(k in spawn for k in ("x", "y")):
+                spawn_err = ((spawn["x"] - expected_anchor[0]) ** 2 +
+                             (spawn["y"] - expected_anchor[1]) ** 2) ** 0.5
+                ok &= check(f"{vid} spawn position matches lane anchor",
+                            spawn_err < TRACE_POS_TOL_M,
+                            f"err={spawn_err:.3f}m")
+
+            # disappearance timing must not regress before release
+            release = scn_veh.get("release_frame")
+            disappear = veh_meta["disappear_frame"]
+            if release is not None:
+                ok &= check(f"{vid} disappear >= release",
+                            disappear >= release,
+                            f"release={release} disappear={disappear}")
+
+            # trajectory samples should be monotone in frame and s for approach-side samples
+            frames = [int(s.get("frame", 0)) for s in veh_samples]
+            ok &= check(f"{vid} trajectory frames sorted", frames == sorted(frames))
+            approach_samples = [s for s in veh_samples
+                                if s.get("stage") in ("APPROACH", "QUEUED")]
+            if len(approach_samples) >= 2:
+                s_vals = [float(s.get("s", 0.0)) for s in approach_samples]
+                ok &= check(f"{vid} approach s monotone", all(a <= b for a, b in zip(s_vals, s_vals[1:])),
+                            f"s={s_vals[:5]}..." if len(s_vals) > 5 else f"s={s_vals}")
+
+            # geometry consistency: trajectory world pose should be near metadata pose at matching frames
+            meta_frames = {f["frame"]: f for f in veh_meta["frames"]}
+            matched = 0
+            for sample in veh_samples:
+                fr = int(sample.get("frame", -1))
+                meta_fr = meta_frames.get(fr)
+                if not meta_fr:
+                    continue
+                matched += 1
+                pose = meta_fr.get("pose") or {}
+                dx = abs(float(sample.get("world_x", 0.0)) - float(pose.get("x", 0.0)))
+                dy = abs(float(sample.get("world_y", 0.0)) - float(pose.get("y", 0.0)))
+                if dx > TRACE_POS_TOL_M or dy > TRACE_POS_TOL_M:
+                    ok &= check(f"{vid} metadata/trajectory pose match",
+                                False, f"frame={fr} dx={dx:.3f} dy={dy:.3f}")
+                    break
+            else:
+                ok &= check(f"{vid} metadata/trajectory pose match", matched > 0,
+                            f"matched={matched}")
 
     # ---- state-based microsim validation (micro prototype or research engine) --
     simulator_mode = scn.get("simulator", "legacy") if scn is not None else "legacy"

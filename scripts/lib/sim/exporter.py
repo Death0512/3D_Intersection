@@ -40,15 +40,18 @@ def write_simulation_artifacts(out_dir: str, scenario: Dict,
     }
 
     trajectory = {
-        "schema": "trajectory.v1",
+        "schema": sim_meta.get("trajectory_schema", "trajectory.v1"),
         "fps": scenario.get("fps"),
         "duration_frames": scenario.get("duration_frames"),
         "simulator": scenario.get("simulator"),
-        "coordinate": "lane-longitudinal",
+        "coordinate": "world+lane-longitudinal",
         "description": (
-            "Per-frame simulation state samples before Blender visualization. "
-            "s is longitudinal distance along the approach lane in metres."
+            "Per-frame simulation trace before Blender visualization. "
+            "v2 samples keep legacy lane-longitudinal s and add world-space "
+            "position plus velocity-vector fields. Per-vehicle constants live "
+            "in the vehicles side table."
         ),
+        "vehicles": sim_meta.get("trajectory_vehicles", {}),
         "samples": sim_meta.get("trajectory_samples", []),
     }
     lane_metrics = {

@@ -40,6 +40,7 @@ import intersection_sim as IS
 import micro_sim as MS
 import research_sim as RS
 from sim.exporter import write_simulation_artifacts
+from sim.trajectory import enrich_trajectory_samples
 
 ROAD_JSON = os.path.join(HERE, "..", "assets", "road.json")
 
@@ -716,6 +717,7 @@ def generate(seed: int, seconds: float,
         scenario["demand"] = demand.to_dict()
     os.makedirs(out_dir, exist_ok=True)
     if simulator == "research":
+        enrich_trajectory_samples(scenario, sim_meta, ROOT, road_meta=road_meta)
         scenario["simulation_artifacts"] = write_simulation_artifacts(
             out_dir, scenario, sim_meta)
     out_path = os.path.join(out_dir, "scenario.json")

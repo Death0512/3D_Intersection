@@ -60,6 +60,29 @@ def test_pipeline_metadata_validate_smoke():
         _run([sys.executable, "scripts/validate_run.py", "--out", td])
 
 
+def test_research_trajectory_integrity_validate_smoke():
+    with tempfile.TemporaryDirectory() as td:
+        _run([
+            sys.executable, "scripts/scenario_gen.py",
+            "--seed", "7",
+            "--seconds", "1",
+            "--out", td,
+            "--simulator", "research",
+        ])
+
+        for tag in G.camera_names():
+            with open(os.path.join(td, f"video_{tag}.mp4"), "wb") as f:
+                f.write(b"smoke")
+
+        _run([
+            sys.executable, "scripts/render.py", "--",
+            "--scenario", os.path.join(td, "scenario.json"),
+            "--out", td,
+            "--metadata-only",
+        ])
+        _run([sys.executable, "scripts/validate_run.py", "--out", td])
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0
