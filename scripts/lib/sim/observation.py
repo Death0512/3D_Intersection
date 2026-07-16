@@ -40,9 +40,14 @@ class SimulationObservation:
 
 
 def lane_observations_from_metrics(metrics: dict) -> Dict[str, LaneObservation]:
-    lanes = metrics.get("lanes", metrics)
+    schema = str(metrics.get("schema", "lane_metrics.v1"))
+    lanes = metrics.get("lanes", {})
     out: Dict[str, LaneObservation] = {}
     for lane_id, values in lanes.items():
+        if schema.startswith("lane_metrics.v2"):
+            values = values.get("summary", {})
+        if not isinstance(values, dict):
+            values = {}
         out[str(lane_id)] = LaneObservation(
             lane_id=str(lane_id),
             queue_length=float(values.get("queue_length", 0.0)),

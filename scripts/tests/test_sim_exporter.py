@@ -54,6 +54,24 @@ class TestSimulationExporter(unittest.TestCase):
             self.assertEqual(meta["schema"], "simulation_meta.v1")
             self.assertIn("N_straight", meta["arrival_events"])
 
+    def test_write_lane_metrics_v2_with_timeseries(self):
+        scenario = {"fps": 30, "duration_frames": 10, "simulator": "research"}
+        sim_meta = {
+            "lane_metrics": {"N_1": {"queue_length": 2}},
+            "lane_metrics_timeseries": {"N_1": [
+                {"frame": 0, "queue_length": 1},
+                {"frame": 1, "queue_length": 2},
+            ]},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            paths = write_simulation_artifacts(td, scenario, sim_meta)
+            with open(os.path.join(td, paths["lane_metrics"])) as f:
+                payload = json.load(f)
+
+        self.assertEqual(payload["schema"], "lane_metrics.v2")
+        self.assertEqual(payload["lanes"]["N_1"]["summary"]["queue_length"], 2)
+        self.assertEqual(len(payload["lanes"]["N_1"]["timeseries"]), 2)
+
     def test_research_generate_writes_artifact_references(self):
         zero_demand = DemandModel(
             flows={d: 0.0 for d in G.Direction},
@@ -103,6 +121,25 @@ class TestSimulationExporter(unittest.TestCase):
             self.assertIn("spawn_position", veh_trace)
             self.assertIn("exit_position", veh_trace)
             self.assertIn("heading", veh_trace)
+
+    def test_metadata_pass_upgrades_trajectory_v3_with_exit_samples(self):
+        with tempfile.TemporaryDirectory() as td:
+            scenario = generate(7, 2.0, td, simulator="research")
+
+            render._write_metadata(scenario, td)
+
+            with open(os.path.join(td, scenario["simulation_artifacts"]["trajectory"])) as f:
+                traj = json.load(f)
+            self.assertEqual(traj["schema"], "trajectory.v3")
+            exit_samples = [s for s in traj["samples"] if s.get("stage") == "EXIT"]
+            self.assertTrue(exit_samples)
+            sample = exit_samples[0]
+            for key in ("world_x", "world_y", "world_z", "velocity_x", "velocity_y"):
+                self.assertIn(key, sample)
+            veh_trace = traj["vehicles"][sample["vehicle_id"]]
+            self.assertIn("reappear_position", veh_trace)
+            self.assertIn("leave_position", veh_trace)
+            self.assertEqual(veh_trace["exit_position"], veh_trace["leave_position"])
 
     def test_metadata_uses_trajectory_v2_world_pose(self):
         with tempfile.TemporaryDirectory() as td:

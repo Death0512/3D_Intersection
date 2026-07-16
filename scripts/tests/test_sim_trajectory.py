@@ -16,6 +16,8 @@ from sim.trajectory import (
     apply_samples_to_motion,
     load_trajectory_index,
     samples_to_track,
+    _complete_trajectory_payload,
+    _exit_sample_from_metadata,
 )
 
 
@@ -98,6 +100,32 @@ class TestSimulationTrajectory(unittest.TestCase):
         self.assertNotEqual(len(updated.track_in), old_len)
         self.assertEqual([p.frame for p in updated.track_in], [0, 15, 30])
 
+    def test_apply_samples_replaces_exit_track_when_v3_exit_samples_exist(self):
+        approach = G.Direction("N")
+        lane = 1
+        stop = G.lane_entry_box_edge(approach, lane)
+        anchor = (stop[0], stop[1] - 40.0)
+        motion = G.compute_motion(
+            "V1", approach, lane, G.Turn("straight"),
+            speed_ms=10.0, depart_frame=0,
+            appear_anchor=anchor, road_meta={"approach_length": 40.0})
+
+        updated = apply_samples_to_motion(
+            motion,
+            [{"frame": 0, "stage": "APPROACH", "s": 0.0},
+             {"frame": 30, "stage": "IN_BOX", "release_frame": 30,
+              "s": 40.0},
+             {"frame": 40, "stage": "EXIT", "world_x": 10.0, "world_y": 20.0},
+             {"frame": 50, "stage": "EXIT", "world_x": 10.0, "world_y": 30.0}],
+            anchor,
+            road_meta={"approach_length": 40.0},
+        )
+
+        self.assertEqual([p.frame for p in updated.track_out], [40, 50])
+        self.assertEqual(updated.reappear_frame, 40)
+        self.assertEqual(updated.leave_frame, 50)
+        self.assertAlmostEqual(updated.leave_pos[1], 30.0)
+
     def test_release_frame_in_box_sample_reaches_stop_line(self):
         vehicles = [{
             "id": "V0", "approach": "N", "lane": 1, "turn": "straight",
@@ -135,6 +163,41 @@ class TestSimulationTrajectory(unittest.TestCase):
                                  road_meta={"approach_length": 40.0})
 
         self.assertEqual(track, [])
+
+    def test_exit_sample_from_metadata_basic(self):
+        veh_meta = {
+            "id": "V",
+            "approach": "N",
+            "lane": 1,
+            "turn": "straight",
+            "speed_ms": 8.0,
+            "exit_direction": "S",
+            "release_frame": 25,
+        }
+        frame = {"frame": 40, "pose": {"x": 1.0, "y": 2.0, "z": 0.0}}
+
+        sample = _exit_sample_from_metadata(veh_meta, frame, 5.0)
+
+        self.assertEqual(sample["stage"], "EXIT")
+        self.assertEqual(sample["release_frame"], 25)
+        self.assertEqual(sample["s"], 5.0)
+        self.assertEqual(sample["world_x"], 1.0)
+        self.assertEqual(sample["velocity_y"], -8.0)
+
+    def test_complete_trajectory_preserves_samples_without_exit_frames(self):
+        payload = {
+            "schema": "trajectory.v2",
+            "samples": [{"vehicle_id": "V1", "frame": 0, "stage": "APPROACH"}],
+            "vehicles": {},
+        }
+
+        changed = _complete_trajectory_payload(payload, {"vehicles": []})
+
+        self.assertFalse(changed)
+        self.assertEqual(payload["schema"], "trajectory.v2")
+        self.assertEqual(payload["samples"], [
+            {"vehicle_id": "V1", "frame": 0, "stage": "APPROACH"}
+        ])
 
 
 if __name__ == "__main__":

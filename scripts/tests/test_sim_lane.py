@@ -85,8 +85,10 @@ class TestEngineLaneMetricsInMeta(unittest.TestCase):
         } for i in range(3)]
         _, meta = simulate(vehicles, 40.0, 30, signal_plan=None, seed=42)
         self.assertIn("lane_metrics", meta)
+        self.assertIn("lane_metrics_timeseries", meta)
         key = "N_1"
         self.assertIn(key, meta["lane_metrics"])
+        self.assertIn(key, meta["lane_metrics_timeseries"])
         lm = meta["lane_metrics"][key]
         self.assertIn("flow_vps", lm)
         self.assertIn("arrival_rate_vps", lm)
@@ -97,6 +99,10 @@ class TestEngineLaneMetricsInMeta(unittest.TestCase):
         self.assertIsInstance(lm["flow_vps"], (int, float))
         self.assertIsInstance(lm["arrival_rate_vps"], (int, float))
         self.assertGreater(lm["cumulative_delay_s"], 0.0)
+        ts = meta["lane_metrics_timeseries"][key]
+        self.assertGreater(len(ts), 0)
+        self.assertIn("frame", ts[0])
+        self.assertIn("queue_length", ts[0])
 
 
 if __name__ == "__main__":

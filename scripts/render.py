@@ -39,7 +39,11 @@ except ImportError:
 import geometry as G
 import kinematics as K
 import envfile as ENV
-from sim.trajectory import apply_samples_to_motion, load_trajectory_index
+from sim.trajectory import (
+    apply_samples_to_motion,
+    complete_trajectory_with_metadata,
+    load_trajectory_index,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +530,7 @@ def _write_metadata(scenario, out_dir):
                     for p in glob.glob(os.path.join(out_dir, "video_*.mp4")))
     meta = compute_metadata(scenario, ROOT, run_dir=out_dir)
     meta["videos"] = videos
+    complete_trajectory_with_metadata(scenario, out_dir, meta)
     meta_path = os.path.join(out_dir, "metadata.json")
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)

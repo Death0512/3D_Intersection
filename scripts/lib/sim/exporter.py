@@ -54,13 +54,36 @@ def write_simulation_artifacts(out_dir: str, scenario: Dict,
         "vehicles": sim_meta.get("trajectory_vehicles", {}),
         "samples": sim_meta.get("trajectory_samples", []),
     }
-    lane_metrics = {
-        "schema": "lane_metrics.v1",
-        "fps": scenario.get("fps"),
-        "duration_frames": scenario.get("duration_frames"),
-        "simulator": scenario.get("simulator"),
-        "lanes": sim_meta.get("lane_metrics", {}),
-    }
+    lane_summary = sim_meta.get("lane_metrics", {})
+    lane_timeseries = sim_meta.get("lane_metrics_timeseries", {})
+    if lane_timeseries:
+        lane_metrics = {
+            "schema": "lane_metrics.v2",
+            "fps": scenario.get("fps"),
+            "duration_frames": scenario.get("duration_frames"),
+            "simulator": scenario.get("simulator"),
+            "description": (
+                "Lane analytics with backward-compatible final summary and "
+                "per-frame timeseries snapshots from the simulation engine. "
+                "Flow/arrival/discharge rates are one-second window-finalized "
+                "values and may remain stale between window boundaries."
+            ),
+            "lanes": {
+                key: {
+                    "summary": lane_summary.get(key, {}),
+                    "timeseries": lane_timeseries.get(key, []),
+                }
+                for key in sorted(set(lane_summary) | set(lane_timeseries))
+            },
+        }
+    else:
+        lane_metrics = {
+            "schema": "lane_metrics.v1",
+            "fps": scenario.get("fps"),
+            "duration_frames": scenario.get("duration_frames"),
+            "simulator": scenario.get("simulator"),
+            "lanes": lane_summary,
+        }
     simulation_meta = {
         "schema": "simulation_meta.v1",
         "fps": scenario.get("fps"),

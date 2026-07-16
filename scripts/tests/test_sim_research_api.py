@@ -40,6 +40,14 @@ class TestResearchAPI(unittest.TestCase):
         self.assertEqual(lanes["E_0"].queue_length, 4.0)
         self.assertEqual(lanes["E_0"].average_speed, 1.5)
 
+    def test_lane_observations_missing_lanes_does_not_create_fake_lanes(self):
+        lanes = lane_observations_from_metrics({
+            "schema": "lane_metrics.v2",
+            "fps": 30,
+            "duration_frames": 120,
+        })
+        self.assertEqual(lanes, {})
+
     def test_rewards(self):
         self.assertLess(delay_reward(10.0, throughput_vph=0.0), 0.0)
         self.assertGreater(queue_reward(0.0, average_speed=10.0), 0.0)

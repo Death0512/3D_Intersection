@@ -127,7 +127,7 @@ def main():
         meta_by_vid = {v["id"]: v for v in meta["vehicles"]}
         scenario_by_vid = {v["id"]: v for v in scn["vehicles"]} if scn else {}
 
-        ok &= check("trajectory schema is v2", traj.get("schema") == "trajectory.v2",
+        ok &= check("trajectory schema is v2/v3", traj.get("schema") in {"trajectory.v2", "trajectory.v3"},
                     traj.get("schema", ""))
 
         for vid, veh_samples in by_vid.items():
@@ -184,6 +184,25 @@ def main():
                 s_vals = [float(s.get("s", 0.0)) for s in approach_samples]
                 ok &= check(f"{vid} approach s monotone", all(a <= b for a, b in zip(s_vals, s_vals[1:])),
                             f"s={s_vals[:5]}..." if len(s_vals) > 5 else f"s={s_vals}")
+
+            if traj.get("schema") == "trajectory.v3":
+                exit_samples = [s for s in veh_samples if s.get("stage") == "EXIT"]
+                out_meta_frames = [f for f in veh_meta["frames"]
+                                   if f.get("camera") == veh_meta.get("out_camera")]
+                if out_meta_frames:
+                    exit_frames = [int(s.get("frame", -1)) for s in exit_samples]
+                    out_frames = [int(f.get("frame", -2)) for f in out_meta_frames]
+                    ok &= check(f"{vid} v3 has EXIT samples for out-camera frames",
+                                exit_frames == out_frames,
+                                f"exit={exit_frames[:5]} out={out_frames[:5]}")
+                    last_exit = exit_samples[-1] if exit_samples else None
+                    leave = trace_vehicle.get("leave_position") or trace_vehicle.get("exit_position") or {}
+                    if last_exit and all(k in leave for k in ("x", "y")):
+                        leave_err = ((float(last_exit["world_x"]) - float(leave["x"])) ** 2 +
+                                     (float(last_exit["world_y"]) - float(leave["y"])) ** 2) ** 0.5
+                        ok &= check(f"{vid} v3 final EXIT sample matches leave position",
+                                    leave_err < TRACE_POS_TOL_M,
+                                    f"err={leave_err:.3f}m")
 
             # geometry consistency: trajectory world pose should be near metadata pose at matching frames
             meta_frames = {f["frame"]: f for f in veh_meta["frames"]}

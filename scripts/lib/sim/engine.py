@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import sys
+from dataclasses import asdict
 from typing import Dict, List, Optional, Tuple
 
 import geometry as G
@@ -89,6 +90,7 @@ class SimulationEngine:
         self.exit_last_leave: Dict[Tuple[str, int], int] = {}
         self.lane_last_release: Dict[Tuple[str, int], int] = {}
         self.lane_history: Dict[Tuple[str, int], List[Tuple[int, int]]] = {}
+        self.lane_metrics_timeseries: Dict[str, List[dict]] = {}
         self.wait_list: List[int] = []
 
     def build_state(self, vehicles: list) -> SimulationState:
@@ -147,6 +149,7 @@ class SimulationEngine:
         return max_depart + traverse + int(round(self.config.max_horizon_buffer_s * self.config.fps))
 
     def run(self, vehicles: list) -> Tuple[List[dict], Dict]:
+        self.lane_metrics_timeseries = {}
         state = self.build_state(vehicles)
         if self.adaptive and self.fsm is None:
             self.green_end = state.frame
@@ -166,6 +169,7 @@ class SimulationEngine:
             self.intersection.expire(tick)
             for lane in state.lanes.values():
                 lane.update_metrics(tick, self.config.dt)
+                self._record_lane_metrics_sample(lane, tick)
             self.recorder.record(tick, state.vehicles)
             if all(st.release_frame is not None for st in state.vehicles):
                 break
@@ -341,6 +345,18 @@ class SimulationEngine:
         self.exit_occupancy.setdefault(exit_key, []).append(
             (entry_frame, clear_frame, length))
 
+    def _record_lane_metrics_sample(self, lane: LaneState, frame: int) -> None:
+        """Store a per-frame lane metric snapshot for analytics artifacts."""
+        if lane.metrics.vehicle_count == 0 and lane.metrics.cumulative_delay_s == 0.0:
+            # ponytail: skip never-active empty lanes; add stride sampling only if
+            # lane_metrics.json grows beyond practical research-run sizes.
+            return
+        key = f"{lane.approach}_{lane.index}"
+        self.lane_metrics_timeseries.setdefault(key, []).append({
+            "frame": frame,
+            **asdict(lane.metrics),
+        })
+
     def _finalize_unreleased(self, state: SimulationState) -> None:
         for st in state.vehicles:
             if st.release_frame is None:
@@ -369,9 +385,10 @@ class SimulationEngine:
             "arrival_events": arrival_events,
             "trajectory_samples": self.recorder.to_jsonable(),
             "lane_metrics": {
-                f"{k[0]}_{k[1]}": lane.metrics.__dict__.copy()
+                f"{k[0]}_{k[1]}": asdict(lane.metrics)
                 for k, lane in state.lanes.items()
             },
+            "lane_metrics_timeseries": self.lane_metrics_timeseries,
         }
         if self.fsm is not None:
             meta["adaptive_intervals"] = self.fsm.intervals()
