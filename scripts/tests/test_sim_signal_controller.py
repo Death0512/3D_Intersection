@@ -42,6 +42,19 @@ def _make_vehicle(vid: str, approach: str = "N", lane: int = 1,
 
 
 class TestSignalControllerFSM(unittest.TestCase):
+    def test_fsm_starts_with_green_at_frame_zero(self):
+        ctrl = MaxPressureController(SignalControllerConfig())
+
+        self.assertEqual(ctrl.phase, SignalPhase.GREEN)
+        self.assertEqual(ctrl.current_combo, SG._NS_COMBOS[3])
+        greens = [
+            (d, t)
+            for d in (G.Direction("N"), G.Direction("S"), G.Direction("E"), G.Direction("W"))
+            for t in (G.Turn("left"), G.Turn("straight"), G.Turn("right"))
+            if ctrl.is_green(d, t, 0)
+        ]
+        self.assertGreater(len(greens), 0)
+
     def test_max_pressure_starts_green_from_live_counts(self):
         cfg = SignalControllerConfig(min_green_f=2, max_green_f=5,
                                      yellow_f=1, all_red_f=1)
@@ -87,6 +100,18 @@ class TestSignalControllerFSM(unittest.TestCase):
         self.assertEqual(ctrl.phase, SignalPhase.GREEN)
         ctrl.step(3, demand)
         self.assertEqual(ctrl.phase, SignalPhase.YELLOW)
+
+    def test_fsm_no_demand_does_not_stay_all_red(self):
+        cfg = SignalControllerConfig(min_green_f=1, max_green_f=2,
+                                     yellow_f=1, all_red_f=1)
+        ctrl = MaxPressureController(cfg)
+        phases = set()
+        for tick in range(8):
+            ctrl.step(tick, {})
+            phases.add(ctrl.phase)
+        self.assertIn(SignalPhase.GREEN, phases)
+        self.assertIn(SignalPhase.YELLOW, phases)
+        self.assertNotEqual(ctrl.phase, SignalPhase.ALL_RED)
 
     def test_engine_does_not_release_during_fsm_yellow(self):
         cfg = SimulationConfig.from_runtime(fps=30, approach_visible_length=40.0)
@@ -142,7 +167,7 @@ class TestFixedTimeController(unittest.TestCase):
         ctrl = FixedTimeController(cfg)
         ctrl.step(0, {})
         self.assertEqual(ctrl.phase, SignalPhase.GREEN)
-        self.assertEqual(ctrl.current_combo, SG._ALL_COMBOS[0])
+        self.assertEqual(ctrl.current_combo, SG._NS_COMBOS[3])
         ctrl.step(1, {})
         ctrl.step(2, {})
         ctrl.step(3, {})
@@ -151,7 +176,9 @@ class TestFixedTimeController(unittest.TestCase):
         self.assertEqual(ctrl.phase, SignalPhase.ALL_RED)
         ctrl.step(5, {})
         self.assertEqual(ctrl.phase, SignalPhase.GREEN)
-        self.assertEqual(ctrl.current_combo, SG._ALL_COMBOS[1])
+        expected_next = SG._ALL_COMBOS[(SG._ALL_COMBOS.index(SG._NS_COMBOS[3]) + 1)
+                                      % len(SG._ALL_COMBOS)]
+        self.assertEqual(ctrl.current_combo, expected_next)
 
     def test_full_cycle_produces_intervals_and_clearances(self):
         cfg = SignalControllerConfig(min_green_f=1, max_green_f=2,

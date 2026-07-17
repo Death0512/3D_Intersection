@@ -360,7 +360,7 @@ class AdaptiveSignalPlan:
 
         # Decide which side starts: the side with the earliest arrival runs
         # first; tie-break N/S (deterministic).
-        def _first_arrival(side_combos: List[Tuple[int, int]]) -> int:
+        def _first_arrival(side_combos: List[Tuple[int, int]]) -> Optional[int]:
             best = None
             for combo in side_combos:
                 for ph in combo:
@@ -383,7 +383,9 @@ class AdaptiveSignalPlan:
         # huge queue at the first rendered frame.
         first_arrival = min(
             (x for x in (ns_first, ew_first) if x is not None), default=0)
-        t = first_arrival
+        # Keep the controller active from frame 0 onward: real intersections
+        # do not sit dark until the first vehicle appears.
+        t = min(first_arrival, 0)
         max_rounds = 5000
         while t < horizon_frames and max_rounds > 0:
             max_rounds -= 1

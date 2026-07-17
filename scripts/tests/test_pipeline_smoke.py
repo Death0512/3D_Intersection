@@ -23,6 +23,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 from lib import geometry as G  # noqa: E402
+import run_pipeline as RP  # noqa: E402
 
 
 def _run(cmd, cwd=ROOT):
@@ -81,6 +82,38 @@ def test_research_trajectory_integrity_validate_smoke():
             "--metadata-only",
         ])
         _run([sys.executable, "scripts/validate_run.py", "--out", td])
+
+
+def test_metadata_parallel_command_uses_expected_video_manifest():
+    calls = []
+    old_run = RP.run
+    try:
+        RP.run = lambda cmd, **kwargs: calls.append((cmd, kwargs))
+        RP.step_metadata("/tmp/scenario.json", "/tmp/out", only="in_N",
+                         expected_videos=True)
+    finally:
+        RP.run = old_run
+
+    cmd, kwargs = calls[0]
+    assert "--metadata-only" in cmd
+    assert "--metadata-expected-videos" in cmd
+    assert "--only" in cmd
+    assert "in_N" in cmd
+
+
+def test_build_scene_phase_uses_split_worker_and_build_cap():
+    calls = []
+    old_phase = RP._step_camera_phase
+    try:
+        RP._step_camera_phase = lambda *args, **kwargs: calls.append((args, kwargs))
+        RP.step_build_scenes_parallel("/tmp/scenario.json", "/tmp/out")
+    finally:
+        RP._step_camera_phase = old_phase
+
+    args, kwargs = calls[0]
+    assert args[0] == "build"
+    assert args[1] is RP._build_worker
+    assert kwargs["jobs"] <= RP.MAX_BUILD_WORKERS
 
 
 def _run_all():

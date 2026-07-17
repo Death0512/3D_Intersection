@@ -56,21 +56,21 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 SEED=42
 FPS=30
-SECONDS_VAL=12
+SECONDS_VAL=60
 OUT_DIR=""            # empty → auto-selected per host (see below)
 ONLY=""
 SKIP_ASSET_CHECK=0  
 SIGNAL=0
-SIGNAL_MODE="fixed"
+SIGNAL_MODE="adaptive"
 DEMAND=""
 DEMAND_SCALE=""
 BLENDER_BIN=""
 PYTHON_BIN=""
 JOBS=0   # 0 = auto-detect from free VRAM
-MAX_WORKERS_PER_GPU=1   # one Blender worker per physical GPU
+MAX_WORKERS_PER_GPU=4   # one Blender worker per physical GPU
 SILENCE_TIMEOUT=0   # 0 = use run_pipeline.py default (600s)
 SAMPLES=0           # 0 = use build_scene default (48)
-SIMULATOR=""        # "" = legacy; "micro" = IDM car-following
+SIMULATOR="research"        # "" = legacy; "micro" = IDM car-following
 
 # ---------------------------------------------------------------------------
 # Parse arguments

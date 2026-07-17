@@ -59,10 +59,10 @@ class SignalController:
 
     def __init__(self, cfg: SignalControllerConfig):
         self.cfg = cfg
-        self.phase = SignalPhase.ALL_RED
+        self.phase = SignalPhase.GREEN
         self.phase_start = 0
         self.green_start = 0
-        self.current_combo: Optional[Tuple[int, int]] = None
+        self.current_combo: Optional[Tuple[int, int]] = _NS_COMBOS[3]
         self.next_combo: Optional[Tuple[int, int]] = None
         self.elapsed_green = 0
         self._last_extend_tick: Optional[int] = None
@@ -150,7 +150,8 @@ class FixedTimeController(SignalController):
 
     def __init__(self, cfg: SignalControllerConfig):
         super().__init__(cfg)
-        self._cycle = 0
+        self._cycle = (_ALL_COMBOS.index(self.current_combo) + 1
+                       if self.current_combo in _ALL_COMBOS else 0)
 
     def step(self, tick: int,
              lane_counts: Dict[Tuple[Direction, Turn], int]) -> None:
@@ -182,8 +183,7 @@ class ActuatedController(SignalController):
             if tick - self.phase_start >= self.cfg.all_red_f or self.current_combo is None:
                 side = self._side_with_pressure(lane_counts)
                 if side is None:
-                    self.current_combo = None
-                    return
+                    side = _NS_COMBOS if self.current_combo in _EW_COMBOS else _EW_COMBOS
                 combo = self._best_combo(side, lane_counts)
                 self.current_combo = combo
                 self.phase = SignalPhase.GREEN

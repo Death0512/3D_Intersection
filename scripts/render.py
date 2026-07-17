@@ -394,8 +394,8 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
     import subprocess
     import build_scene as BS  # requires bpy (only available inside Blender)
 
-    print(f"  [{camera_tag}] building scene...", flush=True)
     scene_blend = os.path.join(out_dir, f"scene_{camera_tag}.blend")
+    print(f"  [{camera_tag}] building scene...", flush=True)
     BS.build_shot(scenario, camera_tag, scene_blend)
 
     # Re-configure GPU here too: Cycles addon prefs live in user preferences,
@@ -442,6 +442,14 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
         except Exception:
             pass
 
+    # If --skip-encode is set, leave PNG frames on disk and return the frames
+    # dir path.  The pipeline will encode in a controlled step to stagger NVENC.
+    skip_encode = os.environ.get("RENDER_SKIP_ENCODE") == "1"
+    if skip_encode:
+        print(f"  [{camera_tag}] frames ready (encode deferred): {frames_dir}",
+              flush=True)
+        return frames_dir
+
     # encode to mp4 with GPU NVENC only; fail fast instead of CPU fallback.
     print(f"  [{camera_tag}] encoding...", flush=True)
     video_path = os.path.join(out_dir, f"video_{camera_tag}.mp4")
@@ -462,6 +470,77 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
     return video_path
 
 
+def build_scene_only(scenario: dict, camera_tag: str, out_dir: str) -> str:
+    """Build and save the per-camera .blend without rendering."""
+    import build_scene as BS
+    scene_blend = os.path.join(out_dir, f"scene_{camera_tag}.blend")
+    print(f"  [{camera_tag}] building scene only...", flush=True)
+    BS.build_shot(scenario, camera_tag, scene_blend)
+    return scene_blend
+
+
+def render_from_scene(scenario: dict, camera_tag: str, out_dir: str,
+                      samples: int | None = None):
+    """Render an existing cached per-camera .blend to mp4."""
+    import shutil
+    import subprocess
+    import build_scene as BS
+
+    scene_blend = os.path.join(out_dir, f"scene_{camera_tag}.blend")
+    if not os.path.exists(scene_blend):
+        raise FileNotFoundError(f"missing cached scene: {scene_blend}")
+    print(f"  [{camera_tag}] loading cached scene...", flush=True)
+    bpy.ops.wm.open_mainfile(filepath=scene_blend)
+    print(f"  [{camera_tag}] configuring GPU...", flush=True)
+    BS.configure_gpu()
+    samples_override = samples if samples is not None else RENDER_SAMPLES
+    BS.setup_render(samples=samples_override)
+    if samples_override is not None:
+        print(f"  [{camera_tag}] Cycles samples = {samples_override}", flush=True)
+
+    scene = bpy.context.scene
+    last_frame = max(0, scene.frame_end)
+
+    frames_dir = os.path.join(out_dir, f"frames_{camera_tag}")
+    os.makedirs(frames_dir, exist_ok=True)
+    for fn in os.listdir(frames_dir):
+        if fn.endswith(".png"):
+            os.remove(os.path.join(frames_dir, fn))
+    scene.render.filepath = os.path.join(frames_dir, "f_")
+    scene.render.image_settings.file_format = "PNG"
+
+    print(f"  [{camera_tag}] rendering cached scene 0..{last_frame} "
+          f"({scene.cycles.samples} samples)...", flush=True)
+    _install_render_progress_handler(scene)
+    try:
+        bpy.ops.render.render(animation=True)
+    finally:
+        try:
+            bpy.app.handlers.render_write.clear()
+        except Exception:
+            pass
+
+    skip_encode = os.environ.get("RENDER_SKIP_ENCODE") == "1"
+    if skip_encode:
+        print(f"  [{camera_tag}] frames ready (encode deferred): {frames_dir}",
+              flush=True)
+        return frames_dir
+
+    print(f"  [{camera_tag}] encoding...", flush=True)
+    video_path = os.path.join(out_dir, f"video_{camera_tag}.mp4")
+    fps = scenario.get("fps", scene.render.fps or 30)
+    ok = _ffmpeg_encode(frames_dir, video_path, fps)
+    if ok:
+        print(f"  [{camera_tag}] rendered: {video_path}", flush=True)
+    else:
+        raise RuntimeError(f"ffmpeg encode failed for {camera_tag}")
+    try:
+        shutil.rmtree(frames_dir)
+    except Exception as e:
+        print(f"  [{camera_tag}] [WARN] rmtree frames_dir failed: {e}", flush=True)
+    return video_path
+
+
 def main():
     args = sys.argv
     if "--" not in args:
@@ -475,6 +554,16 @@ def main():
                     help="skip metadata compute (used in parallel render workers)")
     ap.add_argument("--metadata-only", action="store_true",
                     help="write metadata.json from scenario + existing videos (no render)")
+    ap.add_argument("--metadata-expected-videos", action="store_true",
+                    help="metadata-only: list expected video files instead of scanning out dir")
+    ap.add_argument("--build-only", action="store_true",
+                    help="build cached scene_<camera>.blend only; requires --only")
+    ap.add_argument("--render-only", action="store_true",
+                    help="render from cached scene_<camera>.blend only; requires --only")
+    ap.add_argument("--skip-encode", action="store_true",
+                    help="render PNG frames only, skip ffmpeg encode; the pipeline "
+                         "will run encode as a separate controlled step to stagger "
+                         "NVENC sessions across workers")
     ap.add_argument("--samples", type=int, default=None,
                     help="Cycles render samples (default: build_scene.CYCLES_SAMPLES=48; "
                          "lower = faster, noisier — denoiser compensates. "
@@ -491,8 +580,15 @@ def main():
 
     # --metadata-only mode: pure-python metadata pass (no bpy/render).
     if ns.metadata_only:
-        _write_metadata(scenario, ns.out)
+        _write_metadata(scenario, ns.out,
+                        expected_videos=ns.metadata_expected_videos,
+                        only=ns.only)
         return
+
+    if ns.build_only and ns.render_only:
+        raise SystemExit("--build-only and --render-only are mutually exclusive")
+    if (ns.build_only or ns.render_only) and not ns.only:
+        raise SystemExit("--build-only/--render-only require --only <camera_tag>")
 
     # pre-generate plates (in conda python normally; here we try via bpy fallback)
     plates_dir = os.path.join(ns.out, "plates")
@@ -506,7 +602,13 @@ def main():
     failed = []
     for tag in cameras:
         try:
-            p = render_one(scenario, tag, ns.out)
+            if ns.build_only:
+                p = build_scene_only(scenario, tag, ns.out)
+            elif ns.render_only:
+                p = render_from_scene(scenario, tag, ns.out,
+                                      samples=RENDER_SAMPLES)
+            else:
+                p = render_one(scenario, tag, ns.out)
             rendered.append(p)
         except Exception as e:
             import traceback
@@ -514,20 +616,25 @@ def main():
             print(f"  FAILED {tag}: {e}", flush=True)
             failed.append(tag)
 
-    if not ns.no_metadata:
+    if not ns.no_metadata and not ns.build_only and not ns.render_only:
         _write_metadata(scenario, ns.out)
-    print(f"Rendered {len(rendered)}/{len(cameras)} videos")
+    action = "Built" if ns.build_only else "Rendered"
+    print(f"{action} {len(rendered)}/{len(cameras)} camera outputs")
     if failed:
         raise SystemExit(
             f"FAILED cameras ({len(failed)}/{len(cameras)}): "
             f"{', '.join(failed)}")
 
 
-def _write_metadata(scenario, out_dir):
+def _write_metadata(scenario, out_dir, expected_videos=False, only=None):
     """Write metadata.json — scans out_dir for existing video_*.mp4 files."""
     import glob
-    videos = sorted(os.path.relpath(p, out_dir)
-                    for p in glob.glob(os.path.join(out_dir, "video_*.mp4")))
+    if expected_videos:
+        tags = [only] if only else G.camera_names()
+        videos = [f"video_{tag}.mp4" for tag in tags]
+    else:
+        videos = sorted(os.path.relpath(p, out_dir)
+                        for p in glob.glob(os.path.join(out_dir, "video_*.mp4")))
     meta = compute_metadata(scenario, ROOT, run_dir=out_dir)
     meta["videos"] = videos
     complete_trajectory_with_metadata(scenario, out_dir, meta)

@@ -39,17 +39,35 @@ sys.path.insert(0, os.path.join(HERE, "lib"))
 import envfile as ENV
 import geometry as G
 
-# Per-job VRAM budget estimate (MiB).  Covers scene + BVH + OptiX denoiser +
-# output buffer + headroom.  Conservative for the RTX 3050 Ti at 1080p/48 samples.
-VRAM_PER_JOB_MIB = 1600
+# Per-job VRAM budget estimate (MiB) for a LIGHT camera scene (~3-5 vehicles,
+# 1 road segment, 1080p, 48 Cycles samples + OPTIX denoiser).  Empirically the
+# per-context footprint for such scenes is ~500-700 MiB; we budget 900 MiB to
+# include OS + driver overhead and headroom for BVH spikes.
+# Adjust down for very sparse scenes (e.g. --demand-scale 0.5) or up for
+# heavy-demand runs with many vehicles in frame.
+VRAM_PER_JOB_MIB = 900
 
 # Minimum free VRAM to attempt any GPU rendering (MiB).
 MIN_FREE_VRAM_MIB = 1200
 
-# Hard cap on Blender render workers per GPU.  One worker per GPU keeps each
-# Cycles context with full VRAM headroom and avoids compute/denoiser contention.
-# Override with --max-workers-per-gpu for very light scenes if needed.
-MAX_WORKERS_PER_GPU = 1
+# Default cap on Blender render workers per GPU.  Raised to 2 because each
+# camera scene is very lightweight (3-5 vehicles vs. a full city scene), so two
+# Cycles contexts co-reside comfortably within typical NVIDIA consumer VRAM (4 GB+).
+# Hard limit: consumer NVIDIA GPUs allow at most 3 concurrent NVENC sessions;
+# we stay at 2/GPU to leave headroom for the OS encoder and avoid driver-level
+# NVENC contention.  Raise via --max-workers-per-gpu only for tested hardware.
+MAX_WORKERS_PER_GPU = 2
+
+# Building cached .blend scenes launches Blender processes too. Keep this
+# modest to preserve reliability on laptops/Kaggle while still overlapping the
+# CPU-heavy scene construction phase.
+MAX_BUILD_WORKERS = 2
+
+# NVENC concurrent encode limit.  Consumer NVIDIA GPUs support at most 3
+# concurrent NVENC sessions.  The encode semaphore (created per render phase)
+# caps simultaneous ffmpeg NVENC calls to this value, preventing encoder
+# contention when multiple workers finish their Cycles render at the same time.
+MAX_NVENC_CONCURRENT = 2
 
 
 def run(cmd: list, cwd=ROOT, check=True, timeout=None):
@@ -224,7 +242,8 @@ def _free_vram_mib():
 
 
 def _detect_jobs(camera_count: int, explicit: int = 0,
-                 max_workers_per_gpu: int = MAX_WORKERS_PER_GPU):
+                 max_workers_per_gpu: int = MAX_WORKERS_PER_GPU,
+                 vram_budget: int = VRAM_PER_JOB_MIB):
     """Determine how many parallel Blender jobs to run AND which GPU each binds to.
 
     Multi-GPU hosts (e.g. Kaggle T4×2): each GPU runs up to
@@ -244,6 +263,11 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     stall the render — see MAX_WORKERS_PER_GPU docstring). Raise it via
     --max-workers-per-gpu for lighter scenes (few vehicles / no signal) where
     the per-scene VRAM footprint is small.
+
+    ``vram_budget`` overrides the module-level VRAM_PER_JOB_MIB estimate —
+    callers scale this up for heavy scenes (many vehicles) so the worker
+    count is computed correctly in a single pass instead of a post-hoc
+    second banner.
     """
     if max_workers_per_gpu < 1:
         max_workers_per_gpu = 1
@@ -264,7 +288,7 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
         for gid, free in info:
             if free < MIN_FREE_VRAM_MIB:
                 continue
-            w = max(1, min(free // VRAM_PER_JOB_MIB, max_workers_per_gpu))
+            w = max(1, min(free // vram_budget, max_workers_per_gpu))
             per_gpu_slots.append((gid, int(w)))
         if len(per_gpu_slots) < 2:
             print(f"[GPU] {n_gpu} GPU(s) detected but only "
@@ -292,7 +316,7 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     # Single GPU: VRAM-budget job count, capped per-GPU (original behaviour
     # plus the cap so a huge single card doesn't oversubscribe).
     free = info[0][1] if info[0][0] == 0 else _free_vram_mib()
-    jobs = max(1, min(free // VRAM_PER_JOB_MIB, max_workers_per_gpu))
+    jobs = max(1, min(free // vram_budget, max_workers_per_gpu))
     jobs = min(jobs, camera_count)
     if free < MIN_FREE_VRAM_MIB:
         raise SystemExit(
@@ -301,7 +325,7 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     assignment = [0] * jobs
     print(f"[GPU] free VRAM {free} MiB, cap={max_workers_per_gpu}/GPU → "
           f"{jobs} parallel render job{'' if jobs==1 else 's'} "
-          f"(budget {VRAM_PER_JOB_MIB} MiB/job)")
+          f"(budget {vram_budget} MiB/job)")
     return jobs, assignment
 
 
@@ -316,12 +340,25 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
 DEFAULT_SILENCE_TIMEOUT_S = 600  # 10 min
 
 
-def _render_worker(args, watchdog_state=None, samples=None):
-    """Run one Blender render worker for a single camera. Blocks.
+def _camera_worker(args, watchdog_state=None, samples=None, mode="render",
+                   skip_encode=False):
+    """Run one Blender worker for a single camera. Blocks.
 
     ``args`` is (scenario_path, out_dir, tag, gpu_id).  ``gpu_id`` is the
     NVIDIA GPU index this worker should bind to via CUDA_VISIBLE_DEVICES,
-    so multi-GPU hosts run one Blender per physical GPU.
+    so multi-GPU hosts run one Blender per physical GPU for render mode.
+
+    ``mode`` is either ``"build"`` (create cached scene_<tag>.blend) or
+    ``"render"`` (render from that cached scene). Splitting these phases keeps
+    each camera's scene isolated while avoiding repeated build work during the
+    GPU-bound render stage.
+
+    ``skip_encode`` (render mode only): when True, the Blender worker writes
+    PNG frames only and exits without calling ffmpeg.  The encode step is then
+    handled by ``step_encode_all`` with a semaphore so at most
+    ``MAX_NVENC_CONCURRENT`` ffmpeg NVENC sessions run simultaneously — avoiding
+    NVENC driver contention when multiple workers finish their Cycles render at
+    the same time.
 
     ``samples`` (optional int) threads the --samples flag through to render.py
     so Cycles uses the user's sample count (lower = faster, noisier).
@@ -344,6 +381,12 @@ def _render_worker(args, watchdog_state=None, samples=None):
         "--scenario", scenario_path, "--out", out_dir,
         "--only", tag, "--no-metadata",
     ]
+    if mode == "build":
+        cmd.append("--build-only")
+    elif mode == "render":
+        cmd.append("--render-only")
+    else:
+        raise ValueError(f"unknown camera worker mode: {mode}")
     if samples is not None:
         cmd += ["--samples", str(samples)]
     env = os.environ.copy()
@@ -353,8 +396,13 @@ def _render_worker(args, watchdog_state=None, samples=None):
     # OS pipe immediately. Without this, the 8-hour silent-hang scenario
     # (block-buffered stdout under non-TTY) reappears.
     env["PYTHONUNBUFFERED"] = "1"
-    tag_label = f"[{tag}]"
-    print(f"\n{tag_label} $ {' '.join(cmd)}  (GPU {gpu_id})", flush=True)
+    if skip_encode and mode == "render":
+        # Signal the child to leave PNG frames on disk; the pipeline encodes
+        # in a dedicated step with NVENC semaphore.
+        env["RENDER_SKIP_ENCODE"] = "1"
+    tag_label = f"[{mode}:{tag}]"
+    gpu_note = f"GPU {gpu_id}" if mode == "render" else "build"
+    print(f"\n{tag_label} $ {' '.join(cmd)}  ({gpu_note})", flush=True)
     t0 = time.time()
     ok = True
     # Stream output in real-time so long renders show progress.
@@ -387,6 +435,17 @@ def _render_worker(args, watchdog_state=None, samples=None):
     if watchdog_state is not None:
         watchdog_state["done"] = True
     return tag, ok, dt
+
+
+def _render_worker(args, watchdog_state=None, samples=None, skip_encode=False):
+    return _camera_worker(args, watchdog_state=watchdog_state,
+                          samples=samples, mode="render",
+                          skip_encode=skip_encode)
+
+
+def _build_worker(args, watchdog_state=None, samples=None):
+    return _camera_worker(args, watchdog_state=watchdog_state,
+                          samples=samples, mode="build")
 
 
 def _watchdog(workers_state, silence_timeout_s, stop_event):
@@ -441,40 +500,161 @@ def _watchdog(workers_state, silence_timeout_s, stop_event):
         time.sleep(5)
 
 
+def step_encode_all(out_dir, camera_tags, scenario_path, fps=None):
+    """Encode all cameras' PNG frame directories to MP4 with an NVENC semaphore.
+
+    Called after step_render_parallel when ``skip_encode=True`` — at that
+    point each camera has a ``frames_<tag>/`` directory on disk with all PNGs
+    rendered.  This step encodes them one-at-a-time up to MAX_NVENC_CONCURRENT
+    at once using a threading.Semaphore to avoid saturating the NVENC encoder.
+
+    Consumer NVIDIA GPUs allow at most 3 concurrent NVENC sessions; keeping
+    sessions ≤ MAX_NVENC_CONCURRENT prevents the driver-level stall that occurs
+    when multiple ffmpeg processes compete for the same encoder chip.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import json as _json
+
+    # Reuse render.py's ffmpeg helper — it already has the correct
+    # "-start_number 0" flag (scene.frame_start = 0) and the NVENC
+    # availability probe with proper diagnostics; duplicating that command
+    # here previously dropped frame 0 and skipped the NVENC probe.
+    sys.path.insert(0, HERE)
+    import render as _render
+
+    # Derive FPS from scenario.json if not provided.
+    if fps is None:
+        try:
+            with open(scenario_path) as f:
+                fps = _json.load(f).get("fps", 30)
+        except Exception:
+            fps = 30
+
+    sema = threading.Semaphore(MAX_NVENC_CONCURRENT)
+
+    def _encode_one(tag):
+        frames_dir = os.path.join(out_dir, f"frames_{tag}")
+        video_path = os.path.join(out_dir, f"video_{tag}.mp4")
+        if not os.path.isdir(frames_dir):
+            print(f"  [encode:{tag}] SKIP — frames dir not found: {frames_dir}",
+                  flush=True)
+            return tag, False
+        with sema:
+            print(f"  [encode:{tag}] encoding {frames_dir} → {video_path}",
+                  flush=True)
+            t0 = time.time()
+            ok = _render._ffmpeg_encode(frames_dir, video_path, fps)
+            dt = time.time() - t0
+            if ok:
+                print(f"  [encode:{tag}] OK ({dt:.1f}s)", flush=True)
+                try:
+                    shutil.rmtree(frames_dir)
+                except Exception as e:
+                    print(f"  [encode:{tag}] [WARN] rmtree failed: {e}",
+                          flush=True)
+                return tag, True
+            else:
+                print(f"  [encode:{tag}] FAILED after {dt:.1f}s "
+                      f"(see ffmpeg diagnostics above)", flush=True)
+                return tag, False
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=MAX_NVENC_CONCURRENT) as pool:
+        futs = {pool.submit(_encode_one, tag): tag for tag in camera_tags}
+        for fut in as_completed(futs):
+            tag, ok = fut.result()
+            results[tag] = ok
+
+    failed = [t for t, ok in results.items() if not ok]
+    if failed:
+        raise SystemExit(
+            f"PIPELINE ABORTED — encode failed for: {', '.join(failed)}. "
+            f"PNG frames preserved in {out_dir}/frames_* for manual recovery.")
+    print(f"  [encode] all {len(camera_tags)} camera(s) encoded OK", flush=True)
+
+
 def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
                          only=None, silence_timeout_s=DEFAULT_SILENCE_TIMEOUT_S,
-                         samples=None):
-    """Render all 8 (or ``only``) cameras. If ``gpu_assignment`` is set, each
-    worker binds to a different GPU via CUDA_VISIBLE_DEVICES (round-robins
-    when there are more cameras than GPUs). Otherwise all workers share GPU 0.
+                         samples=None, skip_encode=False, camera_tags=None):
+    """Render all 8 (or ``only``, or explicit ``camera_tags``) cameras. If
+    ``gpu_assignment`` is set, each worker binds to a different GPU via
+    CUDA_VISIBLE_DEVICES (round-robins when there are more cameras than
+    GPUs). Otherwise all workers share GPU 0.
 
     ``samples`` threads --samples through to render.py (None = use the
     build_scene default of 48).
+
+    ``skip_encode`` defers ffmpeg encoding out of the Blender workers so the
+    pipeline can control NVENC concurrency via a semaphore (see
+    ``step_encode_all``).  Workers write PNG frames to ``frames_<tag>/`` and
+    exit; the caller then runs ``step_encode_all`` after all workers finish.
+
+    ``camera_tags`` overrides the camera set entirely (used by the GPU-error
+    retry path to re-render only the cameras that failed in the first pass,
+    instead of re-rendering all 8).
 
     A background watchdog kills the entire pool (hard-kill policy) if any
     worker is silent for ``silence_timeout_s`` seconds — converts a
     multi-hour silent hang into a fast, diagnosable abort.
     """
+    if camera_tags is None:
+        camera_tags = G.camera_names()
+        if only:
+            camera_tags = [only]
+
+    def _worker_with_skip(args, watchdog_state=None, samples=None):
+        return _render_worker(args, watchdog_state=watchdog_state,
+                              samples=samples, skip_encode=skip_encode)
+
+    _step_camera_phase(
+        "render", _worker_with_skip, scenario_path, out_dir, camera_tags,
+        jobs=jobs, gpu_assignment=gpu_assignment,
+        silence_timeout_s=silence_timeout_s, samples=samples)
+
+
+def step_build_scenes_parallel(scenario_path, out_dir, only=None,
+                               silence_timeout_s=DEFAULT_SILENCE_TIMEOUT_S):
+    """Build cached per-camera .blend scenes before GPU rendering.
+
+    These are still isolated one-scene-per-camera builds, preserving the current
+    data integrity model. The split lets the later render phase open an already
+    built .blend and focus on GPU rendering/encoding.
+    """
     camera_tags = G.camera_names()
     if only:
         camera_tags = [only]
+    # Build processes are CPU/startup bound. Cap at camera count; GPU assignment
+    # is irrelevant, but keep a stable zero for the worker environment.
+    _step_camera_phase(
+        "build", _build_worker, scenario_path, out_dir, camera_tags,
+        jobs=min(len(camera_tags), MAX_BUILD_WORKERS),
+        gpu_assignment=[0] * max(1, min(len(camera_tags), MAX_BUILD_WORKERS)),
+        silence_timeout_s=silence_timeout_s, samples=None)
+
+
+def _step_camera_phase(phase, worker, scenario_path, out_dir, camera_tags,
+                       jobs=2, gpu_assignment=None,
+                       silence_timeout_s=DEFAULT_SILENCE_TIMEOUT_S,
+                       samples=None):
+    """Shared executor for per-camera build/render phases."""
     n_cams = len(camera_tags)
 
     # D12: short-circuit BEFORE building the parallel banner, so a single-
     # camera render doesn't print a misleading "N parallel workers" line.
     if jobs <= 1 or n_cams == 1:
-        print(f"[render] serial/single-camera render — 1 worker")
+        print(f"[{phase}] serial/single-camera phase — 1 worker")
         results = {}
         for tag in camera_tags:
             args = (scenario_path, out_dir, tag,
                     gpu_assignment[0] if gpu_assignment else 0)
-            tag_r, ok, dt = _render_worker(args, samples=samples)
+            tag_r, ok, dt = worker(args, samples=samples)
             results[tag_r] = (ok, dt)
-        _print_render_summary(results, camera_tags)
+        _print_phase_summary(phase, results, camera_tags)
         failed = sum(1 for ok, _ in results.values() if not ok)
         if failed:
             raise SystemExit(
-                f"PIPELINE ABORTED — {failed} render worker(s) failed. "
+                f"PIPELINE ABORTED — {failed} {phase} worker(s) failed. "
                 f"Partial renders may exist in {out_dir}.")
         return
 
@@ -483,7 +663,7 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
     # pair each camera tag with its GPU id in order. If we have more cameras
     # than assignments, fall back to GPU 0 for the overflow.
     tasks = [(scenario_path, out_dir, tag,
-              gpu_assignment[i] if i < n_gpus else 0)
+              gpu_assignment[i % n_gpus] if n_gpus else 0)
              for i, tag in enumerate(camera_tags)]
     results = {}
 
@@ -507,8 +687,7 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
             for i, t in enumerate(tasks):
                 tag = t[2]
                 # Pass the per-tag watchdog slot so the worker updates it.
-                futs[pool.submit(_render_worker, t, workers_state[tag],
-                                 samples)] = i
+                futs[pool.submit(worker, t, workers_state[tag], samples)] = i
             try:
                 for fut in as_completed(futs, timeout=None):
                     if stop_event.is_set():
@@ -535,22 +714,22 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
         for tag in camera_tags:
             if tag not in results:
                 results[tag] = (False, 0.0)
-        _print_render_summary(results, camera_tags)
+        _print_phase_summary(phase, results, camera_tags)
         raise SystemExit(
-            f"PIPELINE ABORTED — render watchdog killed the pool (see stderr "
+            f"PIPELINE ABORTED — {phase} watchdog killed the pool (see stderr "
             f"above for which worker went silent and its last line). "
             f"Partial renders may exist in {out_dir}.")
-    _print_render_summary(results, camera_tags)
+    _print_phase_summary(phase, results, camera_tags)
     failed = sum(1 for ok, _ in results.values() if not ok)
     if failed:
         raise SystemExit(
-            f"PIPELINE ABORTED — {failed} render worker(s) failed. "
+            f"PIPELINE ABORTED — {failed} {phase} worker(s) failed. "
             f"Partial renders may exist in {out_dir}.")
 
 
-def _print_render_summary(results, camera_tags):
+def _print_phase_summary(phase, results, camera_tags):
     print()
-    print(f"  Render summary ({len(results)}/{len(camera_tags)} cameras):")
+    print(f"  {phase.title()} summary ({len(results)}/{len(camera_tags)} cameras):")
     for tag in camera_tags:
         ok, dt = results.get(tag, (False, 0))
         print(f"    {tag:6s} {'OK' if ok else 'FAILED'}  ({dt:.1f}s)")
@@ -559,7 +738,7 @@ def _print_render_summary(results, camera_tags):
         print(f"  {failed} camera(s) FAILED — pipeline will abort")
 
 
-def step_metadata(scenario_path, out_dir):
+def step_metadata(scenario_path, out_dir, only=None, expected_videos=False):
     """Generate metadata.json. FATAL — the whole point of the run is the
     metadata ground-truth; a silent partial write here wastes all the render
     compute. Bounded to 600s (pure-Python per-frame pose loop, bounded by
@@ -567,6 +746,10 @@ def step_metadata(scenario_path, out_dir):
     cmd = [PYTHON, os.path.join(HERE, "render.py"), "--",
            "--scenario", scenario_path, "--out", out_dir,
            "--metadata-only"]
+    if only:
+        cmd += ["--only", only]
+    if expected_videos:
+        cmd.append("--metadata-expected-videos")
     run(cmd, check=True, timeout=600)
 
 
@@ -662,16 +845,95 @@ def main():
     print("\n[3/5] Plate pre-generation")
     step_plates(scn, out_dir)
 
-    print("\n[4/5] Render cameras (parallel)")
+    print("\n[4a/6] Build cached camera scenes")
+    step_build_scenes_parallel(scn, out_dir, only=args.only,
+                               silence_timeout_s=args.silence_timeout)
+
+    # Per-scene VRAM estimate: scale budget up if the scenario has many
+    # vehicles (>8 means a heavy scene; each extra vehicle adds BVH nodes,
+    # textures, and frame buffer pressure).  This lets _detect_jobs choose
+    # fewer workers automatically on heavy runs without user intervention.
+    _veh_count = 0
+    try:
+        with open(scn) as _f:
+            _veh_count = len(json.load(_f).get("vehicles", []))
+    except Exception:
+        pass
+    _vram_budget = VRAM_PER_JOB_MIB if _veh_count <= 8 else (
+        VRAM_PER_JOB_MIB + (_veh_count - 8) * 60)
+
+    print(f"\n[4b/6] Render cached camera scenes  "
+          f"(VRAM budget {_vram_budget} MiB/job"
+          f"{f', {_veh_count} vehicles' if _veh_count > 8 else ''})")
     n_jobs, gpu_assign = _detect_jobs(
         8 if not args.only else 1, explicit=args.jobs,
-        max_workers_per_gpu=args.max_workers_per_gpu)
-    step_render_parallel(scn, out_dir, jobs=n_jobs, gpu_assignment=gpu_assign,
-                         only=args.only, silence_timeout_s=args.silence_timeout,
-                         samples=args.samples)
+        max_workers_per_gpu=args.max_workers_per_gpu,
+        vram_budget=_vram_budget)
 
-    print("\n[5/5] Metadata + run validation")
-    step_metadata(scn, out_dir)
+    # Use skip_encode=True so Blender workers only render PNG frames; the
+    # pipeline then encodes with a semaphore (step_encode_all) to avoid NVENC
+    # driver contention when multiple renders finish at the same time.
+    camera_tags_for_encode = (
+        G.camera_names() if not args.only else [args.only])
+
+    print("\n[5/6] Metadata generation (parallel with render)")
+    from concurrent.futures import ThreadPoolExecutor
+    render_error = None
+    with ThreadPoolExecutor(max_workers=1) as meta_pool:
+        meta_future = meta_pool.submit(step_metadata, scn, out_dir,
+                                       args.only, True)
+        try:
+            step_render_parallel(scn, out_dir, jobs=n_jobs,
+                                 gpu_assignment=gpu_assign,
+                                 only=args.only,
+                                 silence_timeout_s=args.silence_timeout,
+                                 samples=args.samples,
+                                 skip_encode=True)
+        except SystemExit as e:
+            # GPU error: try once more with a single worker before giving up.
+            # Only re-render cameras that didn't produce a frames_<tag> dir —
+            # a worker that already wrote its PNG sequence succeeded, so
+            # re-rendering it would waste GPU time redundantly.
+            msg = str(e)
+            if n_jobs > 1 and any(k in msg.lower() for k in
+                                  ("gpu", "cuda", "optix", "nvenc", "vram")):
+                remaining = [
+                    tag for tag in camera_tags_for_encode
+                    if not os.path.isdir(os.path.join(out_dir, f"frames_{tag}"))
+                ]
+                if not remaining:
+                    remaining = camera_tags_for_encode
+                print(f"\n[4b/6] GPU error detected — retrying with 1 worker "
+                      f"for {len(remaining)}/{len(camera_tags_for_encode)} "
+                      f"unfinished camera(s): {', '.join(remaining)}",
+                      flush=True)
+                try:
+                    step_render_parallel(scn, out_dir, jobs=1,
+                                         gpu_assignment=[0],
+                                         camera_tags=remaining,
+                                         silence_timeout_s=args.silence_timeout,
+                                         samples=args.samples,
+                                         skip_encode=True)
+                except Exception as e2:
+                    render_error = e2
+            else:
+                render_error = e
+        except Exception as e:
+            render_error = e
+        # Always wait for metadata to finish (even on render failure) so we
+        # don't leave artifacts mid-write.
+        meta_future.result()
+
+    if render_error is not None:
+        raise SystemExit(render_error)
+
+    # Encode PNG frames → MP4 with NVENC semaphore (at most MAX_NVENC_CONCURRENT
+    # simultaneously).  Runs after all Blender render workers have exited so
+    # the GPU is fully free for encoding.
+    print(f"\n[4c/6] NVENC encode ({MAX_NVENC_CONCURRENT} concurrent max)")
+    step_encode_all(out_dir, camera_tags_for_encode, scn)
+
+    print("\n[6/6] Run validation")
     step_validate_run(out_dir)
 
     print("\n" + "=" * 60)
