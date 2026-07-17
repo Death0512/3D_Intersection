@@ -813,6 +813,13 @@ def main():
                     help="simulation engine: 'legacy' (event-driven, default) "
                          "'micro' (IDM prototype), or 'research' "
                          "(formal state-based simulation kernel)")
+    ap.add_argument("--phase", type=str, default="all",
+                    choices=["all", "cpu1", "gpu", "cpu2"],
+                    help="pipeline phase to run: "
+                         "'all' (default, full pipeline), "
+                         "'cpu1' (steps 0-3: env+assets+scenario+plates, CPU only), "
+                         "'gpu' (step 4: build+render+encode, GPU required), "
+                         "'cpu2' (steps 5-6: metadata+validation, CPU only)")
     args = ap.parse_args()
 
     fps = args.fps
@@ -829,59 +836,71 @@ def main():
     print(f"  simulator : {sim_label}")
     print("=" * 60)
 
+    phase = args.phase
+
     ENV.validate_all_envs(ROOT)
     print("[0/5] Env files OK")
 
-    if not args.skip_asset_check:
-        print("\n[1/5] Asset validation")
-        step_assets_validate()
+    # ---- cpu1: steps 0-3 ---------------------------------------------------
+    if phase in ("all", "cpu1"):
+        if not args.skip_asset_check:
+            print("\n[1/5] Asset validation")
+            step_assets_validate()
 
-    print("\n[2/5] Scenario generation")
-    scn = step_scenario(args.seed, seconds, out_dir, fps=fps,
-                        signal=args.signal, signal_mode=args.signal_mode,
-                        demand=args.demand, demand_scale=args.demand_scale,
-                        simulator=args.simulator)
+        print("\n[2/5] Scenario generation")
+        scn = step_scenario(args.seed, seconds, out_dir, fps=fps,
+                            signal=args.signal, signal_mode=args.signal_mode,
+                            demand=args.demand, demand_scale=args.demand_scale,
+                            simulator=args.simulator)
 
-    print("\n[3/5] Plate pre-generation")
-    step_plates(scn, out_dir)
+        print("\n[3/5] Plate pre-generation")
+        step_plates(scn, out_dir)
 
-    print("\n[4a/6] Build cached camera scenes")
-    step_build_scenes_parallel(scn, out_dir, only=args.only,
-                               silence_timeout_s=args.silence_timeout)
+        if phase == "cpu1":
+            print("\n" + "=" * 60)
+            print("PHASE cpu1 COMPLETE — copy output dir to GPU host, then run:")
+            print(f"  bash scripts/run_gpu.sh --out {out_dir} [render options]")
+            print("=" * 60)
+            return
 
-    # Per-scene VRAM estimate: scale budget up if the scenario has many
-    # vehicles (>8 means a heavy scene; each extra vehicle adds BVH nodes,
-    # textures, and frame buffer pressure).  This lets _detect_jobs choose
-    # fewer workers automatically on heavy runs without user intervention.
-    _veh_count = 0
-    try:
-        with open(scn) as _f:
-            _veh_count = len(json.load(_f).get("vehicles", []))
-    except Exception:
-        pass
-    _vram_budget = VRAM_PER_JOB_MIB if _veh_count <= 8 else (
-        VRAM_PER_JOB_MIB + (_veh_count - 8) * 60)
+    # For gpu / cpu2 phases, scenario.json must already exist
+    scn = os.path.join(out_dir, "scenario.json")
+    if phase in ("gpu", "cpu2") and not os.path.exists(scn):
+        raise SystemExit(
+            f"FAIL: scenario.json not found at {scn}\n"
+            f"  Run cpu1 phase first: bash scripts/run_cpu1.sh --out {out_dir} ...")
 
-    print(f"\n[4b/6] Render cached camera scenes  "
-          f"(VRAM budget {_vram_budget} MiB/job"
-          f"{f', {_veh_count} vehicles' if _veh_count > 8 else ''})")
-    n_jobs, gpu_assign = _detect_jobs(
-        8 if not args.only else 1, explicit=args.jobs,
-        max_workers_per_gpu=args.max_workers_per_gpu,
-        vram_budget=_vram_budget)
+    # ---- gpu: step 4 --------------------------------------------------------
+    if phase in ("all", "gpu"):
+        print("\n[4a/6] Build cached camera scenes")
+        step_build_scenes_parallel(scn, out_dir, only=args.only,
+                                   silence_timeout_s=args.silence_timeout)
 
-    # Use skip_encode=True so Blender workers only render PNG frames; the
-    # pipeline then encodes with a semaphore (step_encode_all) to avoid NVENC
-    # driver contention when multiple renders finish at the same time.
-    camera_tags_for_encode = (
-        G.camera_names() if not args.only else [args.only])
+        # Per-scene VRAM estimate: scale budget up if the scenario has many
+        # vehicles (>8 means a heavy scene; each extra vehicle adds BVH nodes,
+        # textures, and frame buffer pressure).  This lets _detect_jobs choose
+        # fewer workers automatically on heavy runs without user intervention.
+        _veh_count = 0
+        try:
+            with open(scn) as _f:
+                _veh_count = len(json.load(_f).get("vehicles", []))
+        except Exception:
+            pass
+        _vram_budget = VRAM_PER_JOB_MIB if _veh_count <= 8 else (
+            VRAM_PER_JOB_MIB + (_veh_count - 8) * 60)
 
-    print("\n[5/6] Metadata generation (parallel with render)")
-    from concurrent.futures import ThreadPoolExecutor
-    render_error = None
-    with ThreadPoolExecutor(max_workers=1) as meta_pool:
-        meta_future = meta_pool.submit(step_metadata, scn, out_dir,
-                                       args.only, True)
+        print(f"\n[4b/6] Render cached camera scenes  "
+              f"(VRAM budget {_vram_budget} MiB/job"
+              f"{f', {_veh_count} vehicles' if _veh_count > 8 else ''})")
+        n_jobs, gpu_assign = _detect_jobs(
+            8 if not args.only else 1, explicit=args.jobs,
+            max_workers_per_gpu=args.max_workers_per_gpu,
+            vram_budget=_vram_budget)
+
+        camera_tags_for_encode = (
+            G.camera_names() if not args.only else [args.only])
+
+        render_error = None
         try:
             step_render_parallel(scn, out_dir, jobs=n_jobs,
                                  gpu_assignment=gpu_assign,
@@ -890,10 +909,6 @@ def main():
                                  samples=args.samples,
                                  skip_encode=True)
         except SystemExit as e:
-            # GPU error: try once more with a single worker before giving up.
-            # Only re-render cameras that didn't produce a frames_<tag> dir —
-            # a worker that already wrote its PNG sequence succeeded, so
-            # re-rendering it would waste GPU time redundantly.
             msg = str(e)
             if n_jobs > 1 and any(k in msg.lower() for k in
                                   ("gpu", "cuda", "optix", "nvenc", "vram")):
@@ -920,21 +935,35 @@ def main():
                 render_error = e
         except Exception as e:
             render_error = e
-        # Always wait for metadata to finish (even on render failure) so we
-        # don't leave artifacts mid-write.
-        meta_future.result()
 
-    if render_error is not None:
-        raise SystemExit(render_error)
+        if render_error is not None:
+            raise SystemExit(render_error)
 
-    # Encode PNG frames → MP4 with NVENC semaphore (at most MAX_NVENC_CONCURRENT
-    # simultaneously).  Runs after all Blender render workers have exited so
-    # the GPU is fully free for encoding.
-    print(f"\n[4c/6] NVENC encode ({MAX_NVENC_CONCURRENT} concurrent max)")
-    step_encode_all(out_dir, camera_tags_for_encode, scn)
+        print(f"\n[4c/6] NVENC encode ({MAX_NVENC_CONCURRENT} concurrent max)")
+        step_encode_all(out_dir, camera_tags_for_encode, scn)
 
-    print("\n[6/6] Run validation")
-    step_validate_run(out_dir)
+        if phase == "gpu":
+            print("\n" + "=" * 60)
+            print("PHASE gpu COMPLETE — copy output dir back to CPU host, then run:")
+            print(f"  bash scripts/run_cpu2.sh --out {out_dir}")
+            print("=" * 60)
+            return
+
+    # ---- cpu2: steps 5-6 ---------------------------------------------------
+    if phase in ("all", "cpu2"):
+        # In split mode metadata wasn't run alongside render, so run it now.
+        if phase == "cpu2":
+            print("\n[5/6] Metadata generation")
+            step_metadata(scn, out_dir, args.only, True)
+        elif phase == "all":
+            # 'all' mode: metadata ran in parallel with render above, but the
+            # parallel ThreadPoolExecutor was removed in the gpu block refactor.
+            # Run it sequentially here so 'all' mode still produces metadata.
+            print("\n[5/6] Metadata generation")
+            step_metadata(scn, out_dir, args.only, True)
+
+        print("\n[6/6] Run validation")
+        step_validate_run(out_dir)
 
     print("\n" + "=" * 60)
     print("PIPELINE COMPLETE")
