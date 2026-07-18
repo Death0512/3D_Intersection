@@ -67,7 +67,7 @@ DEMAND_SCALE=""
 BLENDER_BIN=""
 PYTHON_BIN=""
 JOBS=0   # 0 = auto-detect from free VRAM
-MAX_WORKERS_PER_GPU=4   # one Blender worker per physical GPU
+MAX_WORKERS_PER_GPU=1   # one Blender worker per physical GPU
 SILENCE_TIMEOUT=0   # 0 = use run_pipeline.py default (600s)
 SAMPLES=0           # 0 = use build_scene default (48)
 SIMULATOR="research"        # "" = legacy; "micro" = IDM car-following
