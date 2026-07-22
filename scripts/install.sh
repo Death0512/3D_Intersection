@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — One-shot setup for Blender 5.1.x + Python venv + ffmpeg + fonts.
+# install.sh — One-shot setup for Blender 5.1.x + Python deps + ffmpeg + SUMO.
 #
 # After running this, `bash scripts/run_all.sh` just works. The installer writes
 # scripts/env.sh which run_all.sh auto-sources. You can also `source scripts/env.sh`
@@ -16,6 +16,7 @@
 #   --env-file FILE     Path to write the activation env file (default: scripts/env.sh).
 #   --no-blender        Skip blender setup entirely (assume already on PATH, must be 5.x).
 #   --no-ffmpeg         Skip ffmpeg apt install (assume already present).
+#   --no-sumo           Skip SUMO apt install (assume sumo + tools already present).
 #   --gpu-tune          (sudo) Enable GPU persistence mode + raise power limit to max.
 #                       Requires NVIDIA driver + sudo. Opt-in; does NOT run by default.
 #   -h, --help          Show this help.
@@ -23,7 +24,30 @@
 set -euo pipefail
 
 usage() {
-  grep '^#' "$0" | grep -v '#!/\|set -' | sed 's/^# //; /^$/d'
+  cat <<'EOF'
+install.sh — One-shot setup for Blender 5.1.x + Python deps + ffmpeg + SUMO.
+
+Usage:
+  bash scripts/install.sh [OPTIONS]
+
+Options:
+  --yes               Non-interactive: pass -y to apt, skip prompts.
+  --blender PATH      Skip download; use this existing blender binary (must be 5.1.x).
+  --python PYTHON3    Base python3 for venv creation (default: python3 on PATH).
+  --venv DIR          Venv directory (default: ./venv, project root).
+  --env-file FILE     Path to write activation env file (default: scripts/env.sh).
+  --no-blender        Skip blender setup entirely (assume already on PATH, must be 5.x).
+  --no-ffmpeg         Skip ffmpeg apt install (assume already present).
+  --no-sumo           Skip SUMO apt install (assume sumo + tools already present).
+  --gpu-tune          Enable optional NVIDIA persistence mode + max power limit.
+  -h, --help          Show this help.
+
+Kaggle notes:
+  - Kaggle is auto-detected via KAGGLE_KERNEL_RUN_TYPE or /kaggle.
+  - On Kaggle this installer skips venv and installs Python deps with --user.
+  - If Blender download is blocked, upload Blender as a Kaggle Dataset and pass:
+      --blender /kaggle/input/<dataset>/blender
+EOF
   exit 0
 }
 
@@ -35,6 +59,7 @@ VENV_DIR=""
 ENV_FILE=""
 NO_BLENDER=0
 NO_FFMPEG=0
+NO_SUMO=0
 GPU_TUNE=0
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,9 +74,13 @@ ENV_FILE="${ENV_FILE:-$SCRIPTS_DIR/env.sh}"
 PYTHON3_BASE="${PYTHON3_BASE:-$(command -v python3 || command -v python)}"
 BLENDER_INSTALLED_BIN=""
 
-APT_DEPS=(ffmpeg fonts-dejavu-core fonts-liberation
+APT_DEPS=(fonts-dejavu-core fonts-liberation ca-certificates curl xz-utils tar
+          python3-pip python3-venv
           libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 libxkbcommon0 libsm6
-          curl xz-utils)
+          libx11-6 libxrandr2 libxinerama1 libxcursor1 libfontconfig1 libfreetype6)
+FFMPEG_APT_DEPS=(ffmpeg)
+SUMO_APT_DEPS=(sumo sumo-tools)
+PY_DEPS=(Pillow traci sumolib)
 
 # ---- parse args -------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -63,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --env-file)    ENV_FILE="$2";               shift 2 ;;
     --no-blender)  NO_BLENDER=1;                shift   ;;
     --no-ffmpeg)   NO_FFMPEG=1;                 shift   ;;
+    --no-sumo)     NO_SUMO=1;                   shift   ;;
     --gpu-tune)    GPU_TUNE=1;                  shift   ;;
     -h|--help)     usage ;;
     *) echo "Unknown option: $1" >&2; usage ;;
@@ -92,6 +122,34 @@ assert_cmd() {
   fi
 }
 
+find_kaggle_blender() {
+  # Common pattern when the Blender tarball/binary is uploaded as a Kaggle
+  # Dataset to bypass flaky/geo-blocked download.blender.org access.
+  if [[ ! -d /kaggle/input ]]; then
+    return 1
+  fi
+  local cand
+  while IFS= read -r -d '' cand; do
+    if [[ -x "$cand" ]] && "$cand" --version 2>/dev/null | grep -q '^Blender 5\.'; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done < <(find /kaggle/input -type f -name blender -perm -111 -print0 2>/dev/null)
+  return 1
+}
+
+detect_sumo_home() {
+  if [[ -n "${SUMO_HOME:-}" && -d "$SUMO_HOME" ]]; then
+    printf '%s\n' "$SUMO_HOME"
+  elif [[ -d /usr/share/sumo ]]; then
+    printf '%s\n' /usr/share/sumo
+  elif [[ -d /usr/local/share/sumo ]]; then
+    printf '%s\n' /usr/local/share/sumo
+  else
+    return 1
+  fi
+}
+
 echo "============================================================"
 echo "INSTALL  blender=${BLENDER_VERSION}  venv=${VENV_DIR}"
 echo "  project  : $ROOT_DIR"
@@ -100,11 +158,19 @@ echo "  env-file : $ENV_FILE"
 echo "============================================================"
 
 # ---- 1. System packages (apt) -----------------------------------------------
+echo ""
+echo "--- [1/3] System packages ---"
+APT_INSTALL=("${APT_DEPS[@]}")
 if [[ "$NO_FFMPEG" -ne 1 ]]; then
+  APT_INSTALL+=("${FFMPEG_APT_DEPS[@]}")
+fi
+if [[ "$NO_SUMO" -ne 1 ]]; then
+  APT_INSTALL+=("${SUMO_APT_DEPS[@]}")
+fi
+if [[ "${#APT_INSTALL[@]}" -gt 0 ]]; then
   echo ""
-  echo "--- [1/3] System packages ---"
   _sudo apt-get ${YES:--y} update -qq
-  _sudo apt-get install ${YES:--y} -qq "${APT_DEPS[@]}"
+  _sudo apt-get install ${YES:--y} -qq "${APT_INSTALL[@]}"
   echo "  apt: OK"
 fi
 
@@ -127,16 +193,30 @@ else
     echo "  blender ${BLENDER_VERSION} already at $BLENDER_SYMLINK"
     BL="$BLENDER_SYMLINK"
   elif command -v blender &>/dev/null \
-       && blender --version 2>/dev/null | grep -q "^Blender ${BLENDER_VERSION%.*}"; then
+        && blender --version 2>/dev/null | grep -q "^Blender ${BLENDER_VERSION%.*}"; then
     echo "  using system blender: $(command -v blender)"
     BL="$(command -v blender)"
+  elif [[ "$IS_KAGGLE" -eq 1 ]] && KG_BLENDER="$(find_kaggle_blender)"; then
+    echo "  using Kaggle dataset blender: $KG_BLENDER"
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$KG_BLENDER" "$BLENDER_SYMLINK"
+    BL="$BLENDER_SYMLINK"
   else
     assert_cmd curl
     assert_cmd tar
     mkdir -p "$HOME/.local/bin" "$HOME/.local/opt"
     echo "  downloading Blender ${BLENDER_VERSION} ..."
     TARBALL="/tmp/blender-${BLENDER_VERSION}.tar.xz"
-    curl -fsSL --retry 3 -o "$TARBALL" "$BLENDER_URL"
+    if ! curl -fL --retry 5 --retry-delay 2 --connect-timeout 30 -o "$TARBALL" "$BLENDER_URL"; then
+      echo "ERROR: Blender download failed: $BLENDER_URL" >&2
+      if [[ "$IS_KAGGLE" -eq 1 ]]; then
+        echo "       Kaggle tip: upload a Blender 5.x linux-x64 folder/tarball as a" >&2
+        echo "       Kaggle Dataset, then rerun with:" >&2
+        echo "         bash scripts/install.sh --blender /kaggle/input/<dataset>/blender" >&2
+        echo "       or place an executable named 'blender' under /kaggle/input." >&2
+      fi
+      exit 1
+    fi
     echo "  extracting ..."
     rm -rf "$BLENDER_INSTALL_DIR"
     tar -xf "$TARBALL" -C "$HOME/.local/opt"
@@ -166,9 +246,9 @@ else
   echo "            The render step WILL FAIL without it."
 fi
 
-# ---- 3. Python venv with Pillow ---------------------------------------------
+# ---- 3. Python environment ---------------------------------------------------
 echo ""
-echo "--- [3/3] Python venv + Pillow ---"
+echo "--- [3/3] Python deps ---"
 
 if [[ ! -x "$PYTHON3_BASE" ]]; then
   echo "ERROR: python3 interpreter '$PYTHON3_BASE' is not executable." >&2; exit 1
@@ -177,19 +257,17 @@ fi
 PY_VERSION="$("$PYTHON3_BASE" --version 2>&1)"
 echo "  base python: $PY_VERSION"
 
-# On Kaggle the venv ensurepip step is stripped/broken, and the container is
-# ephemeral anyway, so skip the venv and use the system Python directly
-# (pip + Pillow are already available, or we install them with --user).
+# On Kaggle the venv ensurepip step is often stripped/broken, and the container
+# is ephemeral anyway, so skip the venv and use the system Python directly.
 if [[ "$IS_KAGGLE" -eq 1 ]]; then
   echo "  host     : Kaggle — skipping venv (using system python)"
   VENV_PYTHON="$PYTHON3_BASE"
   VENV_DIR=""
   # Ensure pip is usable; Kaggle ships it but make --user installs safe.
   "$VENV_PYTHON" -m pip install -q --upgrade pip --user 2>/dev/null || true
-  if ! "$VENV_PYTHON" -c "import PIL" 2>/dev/null; then
-    "$VENV_PYTHON" -m pip install -q --user Pillow
-  fi
+  "$VENV_PYTHON" -m pip install -q --user "${PY_DEPS[@]}"
   echo "  pip: Pillow $("$VENV_PYTHON" -c "import PIL; print(PIL.__version__)" 2>&1)"
+  echo "  pip: traci  $("$VENV_PYTHON" -c "import traci; print(getattr(traci, '__version__', 'OK'))" 2>&1)"
 else
   echo "  venv        : $VENV_DIR"
   if [[ -d "$VENV_DIR" ]] && [[ -x "$VENV_DIR/bin/python" ]]; then
@@ -199,9 +277,23 @@ else
   fi
 
   "$VENV_DIR/bin/pip" install --upgrade -q pip setuptools wheel
-  "$VENV_DIR/bin/pip" install -q Pillow
+  "$VENV_DIR/bin/pip" install -q "${PY_DEPS[@]}"
   echo "  pip: Pillow $("$VENV_DIR/bin/python" -c "import PIL; print(PIL.__version__)" 2>&1)"
+  echo "  pip: traci  $("$VENV_DIR/bin/python" -c "import traci; print(getattr(traci, '__version__', 'OK'))" 2>&1)"
   VENV_PYTHON="$VENV_DIR/bin/python"
+fi
+
+# ---- SUMO check --------------------------------------------------------------
+SUMO_HOME_DETECTED=""
+if SUMO_HOME_DETECTED="$(detect_sumo_home)"; then
+  echo "  SUMO_HOME: $SUMO_HOME_DETECTED"
+else
+  echo "  WARNING : SUMO_HOME not detected. SUMO unified mode needs SUMO_HOME=/usr/share/sumo."
+fi
+if command -v sumo &>/dev/null; then
+  echo "  sumo    : $(sumo --version 2>/dev/null | head -1)"
+else
+  echo "  WARNING : sumo binary not found — use apt install sumo sumo-tools or rerun without --no-sumo."
 fi
 
 # ---- font check (for gen_plate) ---------------------------------------------
@@ -235,6 +327,12 @@ cat > "$ENV_FILE" <<EOF
 
 export DOAN_PYTHON="$VENV_PYTHON"
 
+SUMO_HOME_DETECTED="$SUMO_HOME_DETECTED"
+if [[ -n "\$SUMO_HOME_DETECTED" && -d "\$SUMO_HOME_DETECTED" ]]; then
+  export SUMO_HOME="\$SUMO_HOME_DETECTED"
+  export PATH="\$SUMO_HOME/tools:\$PATH"
+fi
+
 # Prepend Blender dir to PATH so 'blender' and shutil.which pick it up.
 BLENDER_DIR="${BLENDER_BIN_DIR}"
 if [[ -d "\$BLENDER_DIR" ]]; then
@@ -252,6 +350,9 @@ echo "============================================================"
 echo ""
 echo "  blender : $BLENDER_INSTALLED_BIN   ($BV)"
 echo "  python  : $VENV_PYTHON"
+if [[ -n "$SUMO_HOME_DETECTED" ]]; then
+  echo "  sumo    : $(command -v sumo || true)  (SUMO_HOME=$SUMO_HOME_DETECTED)"
+fi
 echo "  env     : $ENV_FILE"
 echo ""
 echo "Quick start:"
@@ -260,6 +361,9 @@ echo "  python3 scripts/scenario_gen.py --seed 42 --seconds 5 --demand-scale 3 -
 echo ""
 echo "Or run the full pipeline:"
 echo "  bash scripts/run_all.sh --seconds 5 --demand-scale 3 --out output/test"
+echo ""
+echo "SUMO unified pipeline:"
+echo "  python3 scripts/run_pipeline.py --simulator sumo --seconds 5 --demand-scale 3 --out output/sumo_test"
 echo ""
 
 # ---- GPU tuning (opt-in, --gpu-tune flag required) --------------------------
@@ -312,8 +416,19 @@ timeout 20 "$BL" -b --python-expr "import bpy" 2>/dev/null \
 "$VENV_PYTHON" -c "import PIL" 2>/dev/null \
   && echo "  Pillow   : OK" || echo "  Pillow   : FAIL"
 
+"$VENV_PYTHON" -c "import traci, sumolib" 2>/dev/null \
+  && echo "  traci    : OK" || echo "  traci    : FAIL"
+
+command -v sumo &>/dev/null \
+  && echo "  sumo     : OK" || echo "  sumo     : WARN"
+
 command -v ffmpeg &>/dev/null \
   && echo "  ffmpeg   : OK" || echo "  ffmpeg   : WARN"
+
+if command -v ffmpeg &>/dev/null; then
+  ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'h264_nvenc' \
+    && echo "  nvenc    : OK" || echo "  nvenc    : WARN (h264_nvenc not listed)"
+fi
 
 echo ""
 echo "Done."

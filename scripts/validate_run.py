@@ -72,6 +72,43 @@ def main():
     scn_path = os.path.join(out, "scenario.json")
     if os.path.exists(scn_path):
         scn = _load_json(scn_path)
+
+    simulator_mode = scn.get("simulator", "legacy") if scn is not None else "legacy"
+    if simulator_mode == "sumo":
+        ok &= check("scenario simulator is SUMO", True)
+        ok &= check("metadata simulator is SUMO", meta.get("simulator") == "sumo",
+                    str(meta.get("simulator")))
+        scenario_vehicles = scn.get("vehicles", []) if scn else []
+        meta_vehicles = meta.get("vehicles", [])
+        ok &= check("metadata vehicle count matches scenario",
+                    len(meta_vehicles) == len(scenario_vehicles),
+                    f"metadata={len(meta_vehicles)} scenario={len(scenario_vehicles)}")
+        scn_by_id = {v.get("id"): v for v in scenario_vehicles}
+        for mv in meta_vehicles:
+            vid = mv.get("id")
+            sv = scn_by_id.get(vid)
+            ok &= check(f"{vid} exists in scenario", sv is not None)
+            frames = mv.get("frames", [])
+            ok &= check(f"{vid} has metadata frames", bool(frames))
+            bad_pose = [fr for fr in frames if not fr.get("pose")]
+            ok &= check(f"{vid} all frames have poses", not bad_pose,
+                        f"{len(bad_pose)} missing" if bad_pose else "")
+            if sv is not None:
+                traj = sv.get("trajectory", [])
+                ok &= check(f"{vid} has SUMO trajectory", bool(traj))
+                ok &= check(f"{vid} metadata frames match trajectory",
+                            len(frames) == len(traj),
+                            f"metadata={len(frames)} trajectory={len(traj)}")
+                if traj and frames:
+                    ok &= check(f"{vid} first/last frame match trajectory",
+                                frames[0].get("frame") == traj[0].get("frame") and
+                                frames[-1].get("frame") == traj[-1].get("frame"))
+        print("=" * 60)
+        print("OVERALL:", "ALL PASS" if ok else "FAILURES PRESENT")
+        print("=" * 60)
+        sys.exit(0 if ok else 1)
+
+    if scn is not None:
         lanes = {}
         for v in scn["vehicles"]:
             lanes.setdefault((v["approach"], v["lane"]), []).append(
@@ -225,7 +262,6 @@ def main():
                             f"matched={matched}")
 
     # ---- state-based microsim validation (micro prototype or research engine) --
-    simulator_mode = scn.get("simulator", "legacy") if scn is not None else "legacy"
     if simulator_mode in ("micro", "research") and scn is not None:
         print("-" * 60)
         print("MICROSCOPIC SIMULATION CHECKS")

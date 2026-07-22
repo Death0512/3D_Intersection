@@ -150,6 +150,18 @@ def step_scenario(seed, seconds, out_dir, fps=None,
     return os.path.join(out_dir, "scenario.json")
 
 
+def step_sumo_scenario(seed, seconds, out_dir, fps=None, demand_scale=None):
+    """Run SUMO/TraCI once and write scenario.json with per-frame trajectories."""
+    cmd = [PYTHON, os.path.join(HERE, "run_sumo_unified.py"),
+           "--seed", str(seed), "--seconds", str(seconds), "--out", out_dir]
+    if fps is not None:
+        cmd += ["--fps", str(fps)]
+    if demand_scale is not None:
+        cmd += ["--demand-scale", str(demand_scale)]
+    run(cmd, timeout=900)
+    return os.path.join(out_dir, "scenario.json")
+
+
 def step_plates(scenario_path, out_dir):
     """Pre-generate all plate PNGs in conda python (Pillow available).
     Bounded to 300s — plate rendering is fast per plate (~10ms)."""
@@ -354,7 +366,7 @@ def _camera_worker(args, watchdog_state=None, samples=None, mode="render",
     GPU-bound render stage.
 
     ``skip_encode`` (render mode only): when True, the Blender worker writes
-    PNG frames only and exits without calling ffmpeg.  The encode step is then
+    JPEG frames only and exits without calling ffmpeg.  The encode step is then
     handled by ``step_encode_all`` with a semaphore so at most
     ``MAX_NVENC_CONCURRENT`` ffmpeg NVENC sessions run simultaneously — avoiding
     NVENC driver contention when multiple workers finish their Cycles render at
@@ -397,7 +409,7 @@ def _camera_worker(args, watchdog_state=None, samples=None, mode="render",
     # (block-buffered stdout under non-TTY) reappears.
     env["PYTHONUNBUFFERED"] = "1"
     if skip_encode and mode == "render":
-        # Signal the child to leave PNG frames on disk; the pipeline encodes
+        # Signal the child to leave JPEG frames on disk; the pipeline encodes
         # in a dedicated step with NVENC semaphore.
         env["RENDER_SKIP_ENCODE"] = "1"
     tag_label = f"[{mode}:{tag}]"
@@ -501,10 +513,10 @@ def _watchdog(workers_state, silence_timeout_s, stop_event):
 
 
 def step_encode_all(out_dir, camera_tags, scenario_path, fps=None):
-    """Encode all cameras' PNG frame directories to MP4 with an NVENC semaphore.
+    """Encode all cameras' JPEG frame directories to MP4 with an NVENC semaphore.
 
     Called after step_render_parallel when ``skip_encode=True`` — at that
-    point each camera has a ``frames_<tag>/`` directory on disk with all PNGs
+    point each camera has a ``frames_<tag>/`` directory on disk with all JPEGs
     rendered.  This step encodes them one-at-a-time up to MAX_NVENC_CONCURRENT
     at once using a threading.Semaphore to avoid saturating the NVENC encoder.
 
@@ -570,7 +582,7 @@ def step_encode_all(out_dir, camera_tags, scenario_path, fps=None):
     if failed:
         raise SystemExit(
             f"PIPELINE ABORTED — encode failed for: {', '.join(failed)}. "
-            f"PNG frames preserved in {out_dir}/frames_* for manual recovery.")
+            f"JPEG frames preserved in {out_dir}/frames_* for manual recovery.")
     print(f"  [encode] all {len(camera_tags)} camera(s) encoded OK", flush=True)
 
 
@@ -587,7 +599,7 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
 
     ``skip_encode`` defers ffmpeg encoding out of the Blender workers so the
     pipeline can control NVENC concurrency via a semaphore (see
-    ``step_encode_all``).  Workers write PNG frames to ``frames_<tag>/`` and
+    ``step_encode_all``).  Workers write JPEG frames to ``frames_<tag>/`` and
     exit; the caller then runs ``step_encode_all`` after all workers finish.
 
     ``camera_tags`` overrides the camera set entirely (used by the GPU-error
@@ -753,6 +765,34 @@ def step_metadata(scenario_path, out_dir, only=None, expected_videos=False):
     run(cmd, check=True, timeout=600)
 
 
+def step_sumo_unified_build(scenario_path, out_dir):
+    scene_path = os.path.join(out_dir, "unified_scene.blend")
+    cmd = [BLENDER, "-b", "--python", os.path.join(HERE, "build_unified_scene.py"), "--",
+           "--scenario", scenario_path, "--out", scene_path]
+    run(cmd, check=True, timeout=1800)
+    return scene_path
+
+
+def step_sumo_unified_render(scenario_path, out_dir, jobs, samples, only=None):
+    scene_path = os.path.join(out_dir, "unified_scene.blend")
+    if not os.path.exists(scene_path):
+        raise SystemExit(f"FAIL: unified scene not found: {scene_path}")
+    cmd = [PYTHON, os.path.join(HERE, "render_unified.py"),
+           "--scene", scene_path, "--scenario", scenario_path, "--out", out_dir,
+           "--jobs", str(max(1, jobs)), "--samples", str(samples)]
+    if only:
+        cmd += ["--only", only]
+    run(cmd, check=True, timeout=7200)
+
+
+def step_sumo_metadata(scenario_path, out_dir, only=None):
+    cmd = [PYTHON, os.path.join(HERE, "compute_sumo_metadata.py"),
+           "--scenario", scenario_path, "--out", out_dir, "--expected-videos"]
+    if only:
+        cmd += ["--only", only]
+    run(cmd, check=True, timeout=600)
+
+
 def step_validate_run(out_dir):
     """Validate the run output. FATAL — a partial dataset (missing metadata,
     missing videos, malformed JSON) must bail rather than print "complete"."""
@@ -809,10 +849,11 @@ def main():
                          "Scale <= 0 produces zero vehicles. "
                          "Ignored when --demand is a path.")
     ap.add_argument("--simulator", type=str, default=None,
-                    choices=["legacy", "micro", "research"],
+                    choices=["legacy", "micro", "research", "sumo"],
                     help="simulation engine: 'legacy' (event-driven, default) "
-                         "'micro' (IDM prototype), or 'research' "
-                         "(formal state-based simulation kernel)")
+                         "'micro' (IDM prototype), 'research' "
+                         "(formal state-based simulation kernel), or 'sumo' "
+                         "(SUMO/TraCI unified trajectory pipeline)")
     ap.add_argument("--phase", type=str, default="all",
                     choices=["all", "cpu1", "gpu", "cpu2"],
                     help="pipeline phase to run: "
@@ -837,6 +878,7 @@ def main():
     print("=" * 60)
 
     phase = args.phase
+    sumo_unified = args.simulator == "sumo"
 
     ENV.validate_all_envs(ROOT)
     print("[0/5] Env files OK")
@@ -848,10 +890,18 @@ def main():
             step_assets_validate()
 
         print("\n[2/5] Scenario generation")
-        scn = step_scenario(args.seed, seconds, out_dir, fps=fps,
-                            signal=args.signal, signal_mode=args.signal_mode,
-                            demand=args.demand, demand_scale=args.demand_scale,
-                            simulator=args.simulator)
+        if sumo_unified:
+            if args.signal:
+                print("[sumo] --signal ignored: SUMO build uses a traffic-light junction")
+            if args.demand:
+                print("[sumo] --demand JSON ignored in unified mode; use --demand-scale")
+            scn = step_sumo_scenario(args.seed, seconds, out_dir, fps=fps,
+                                     demand_scale=args.demand_scale)
+        else:
+            scn = step_scenario(args.seed, seconds, out_dir, fps=fps,
+                                signal=args.signal, signal_mode=args.signal_mode,
+                                demand=args.demand, demand_scale=args.demand_scale,
+                                simulator=args.simulator)
 
         print("\n[3/5] Plate pre-generation")
         step_plates(scn, out_dir)
@@ -872,95 +922,94 @@ def main():
 
     # ---- gpu: step 4 --------------------------------------------------------
     if phase in ("all", "gpu"):
-        print("\n[4a/6] Build cached camera scenes")
-        step_build_scenes_parallel(scn, out_dir, only=args.only,
-                                   silence_timeout_s=args.silence_timeout)
+        if sumo_unified:
+            print("\n[4a/6] Build unified SUMO scene")
+            step_sumo_unified_build(scn, out_dir)
 
-        # Per-scene VRAM estimate: scale budget up if the scenario has many
-        # vehicles (>8 means a heavy scene; each extra vehicle adds BVH nodes,
-        # textures, and frame buffer pressure).  This lets _detect_jobs choose
-        # fewer workers automatically on heavy runs without user intervention.
-        _veh_count = 0
-        try:
-            with open(scn) as _f:
-                _veh_count = len(json.load(_f).get("vehicles", []))
-        except Exception:
-            pass
-        _vram_budget = VRAM_PER_JOB_MIB if _veh_count <= 8 else (
-            VRAM_PER_JOB_MIB + (_veh_count - 8) * 60)
+            print("\n[4b/6] Render unified SUMO scene")
+            n_jobs, _ = _detect_jobs(
+                8 if not args.only else 1, explicit=args.jobs,
+                max_workers_per_gpu=args.max_workers_per_gpu,
+                vram_budget=VRAM_PER_JOB_MIB * 2)
+            step_sumo_unified_render(scn, out_dir, n_jobs, args.samples, args.only)
 
-        print(f"\n[4b/6] Render cached camera scenes  "
-              f"(VRAM budget {_vram_budget} MiB/job"
-              f"{f', {_veh_count} vehicles' if _veh_count > 8 else ''})")
-        n_jobs, gpu_assign = _detect_jobs(
-            8 if not args.only else 1, explicit=args.jobs,
-            max_workers_per_gpu=args.max_workers_per_gpu,
-            vram_budget=_vram_budget)
+            if phase == "gpu":
+                print("\n" + "=" * 60)
+                print("PHASE gpu COMPLETE — copy output dir back to CPU host, then run:")
+                print(f"  bash scripts/run_cpu2.sh --out {out_dir} --simulator sumo")
+                print("=" * 60)
+                return
+        else:
+            print("\n[4a/6] Build cached camera scenes")
+            step_build_scenes_parallel(scn, out_dir, only=args.only,
+                                       silence_timeout_s=args.silence_timeout)
 
-        camera_tags_for_encode = (
-            G.camera_names() if not args.only else [args.only])
+            # Per-scene VRAM estimate: scale budget up if the scenario has many
+            # vehicles (>8 means a heavy scene; each extra vehicle adds BVH nodes,
+            # textures, and frame buffer pressure).  This lets _detect_jobs choose
+            # fewer workers automatically on heavy runs without user intervention.
+            _veh_count = 0
+            try:
+                with open(scn) as _f:
+                    _veh_count = len(json.load(_f).get("vehicles", []))
+            except Exception:
+                pass
+            _vram_budget = VRAM_PER_JOB_MIB if _veh_count <= 8 else (
+                VRAM_PER_JOB_MIB + (_veh_count - 8) * 60)
 
-        render_error = None
-        try:
-            step_render_parallel(scn, out_dir, jobs=n_jobs,
-                                 gpu_assignment=gpu_assign,
-                                 only=args.only,
-                                 silence_timeout_s=args.silence_timeout,
-                                 samples=args.samples,
-                                 skip_encode=True)
-        except SystemExit as e:
-            msg = str(e)
-            if n_jobs > 1 and any(k in msg.lower() for k in
-                                  ("gpu", "cuda", "optix", "nvenc", "vram")):
-                remaining = [
-                    tag for tag in camera_tags_for_encode
-                    if not os.path.isdir(os.path.join(out_dir, f"frames_{tag}"))
-                ]
-                if not remaining:
-                    remaining = camera_tags_for_encode
-                print(f"\n[4b/6] GPU error detected — retrying with 1 worker "
-                      f"for {len(remaining)}/{len(camera_tags_for_encode)} "
-                      f"unfinished camera(s): {', '.join(remaining)}",
-                      flush=True)
-                try:
-                    step_render_parallel(scn, out_dir, jobs=1,
-                                         gpu_assignment=[0],
-                                         camera_tags=remaining,
-                                         silence_timeout_s=args.silence_timeout,
-                                         samples=args.samples,
-                                         skip_encode=True)
-                except Exception as e2:
-                    render_error = e2
-            else:
+            print("\n[4b/6] Render cached camera scenes sequentially "
+                  "(JPEG frames; encode+cleanup after each camera)")
+            _n_jobs_detected, _gpu_assign_detected = _detect_jobs(
+                8 if not args.only else 1, explicit=args.jobs,
+                max_workers_per_gpu=args.max_workers_per_gpu,
+                vram_budget=_vram_budget)
+            # Storage-optimized Option A: force one render worker at a time.
+            # With skip_encode=False, render.py encodes the camera immediately
+            # and removes frames before the next camera starts.
+            n_jobs = 1
+            gpu_assign = [_gpu_assign_detected[0] if _gpu_assign_detected else 0]
+
+            render_error = None
+            try:
+                step_render_parallel(scn, out_dir, jobs=n_jobs,
+                                     gpu_assignment=gpu_assign,
+                                     only=args.only,
+                                     silence_timeout_s=args.silence_timeout,
+                                     samples=args.samples,
+                                      skip_encode=False)
+            except SystemExit as e:
                 render_error = e
-        except Exception as e:
-            render_error = e
+            except Exception as e:
+                render_error = e
 
-        if render_error is not None:
-            raise SystemExit(render_error)
+            if render_error is not None:
+                raise SystemExit(render_error)
 
-        print(f"\n[4c/6] NVENC encode ({MAX_NVENC_CONCURRENT} concurrent max)")
-        step_encode_all(out_dir, camera_tags_for_encode, scn)
-
-        if phase == "gpu":
-            print("\n" + "=" * 60)
-            print("PHASE gpu COMPLETE — copy output dir back to CPU host, then run:")
-            print(f"  bash scripts/run_cpu2.sh --out {out_dir}")
-            print("=" * 60)
-            return
+            if phase == "gpu":
+                print("\n" + "=" * 60)
+                print("PHASE gpu COMPLETE — copy output dir back to CPU host, then run:")
+                print(f"  bash scripts/run_cpu2.sh --out {out_dir}")
+                print("=" * 60)
+                return
 
     # ---- cpu2: steps 5-6 ---------------------------------------------------
     if phase in ("all", "cpu2"):
         # In split mode metadata wasn't run alongside render, so run it now.
         if phase == "cpu2":
             print("\n[5/6] Metadata generation")
-            step_metadata(scn, out_dir, args.only, True)
+            if sumo_unified:
+                step_sumo_metadata(scn, out_dir, args.only)
+            else:
+                step_metadata(scn, out_dir, args.only, True)
         elif phase == "all":
             # 'all' mode: metadata ran in parallel with render above, but the
             # parallel ThreadPoolExecutor was removed in the gpu block refactor.
             # Run it sequentially here so 'all' mode still produces metadata.
             print("\n[5/6] Metadata generation")
-            step_metadata(scn, out_dir, args.only, True)
+            if sumo_unified:
+                step_sumo_metadata(scn, out_dir, args.only)
+            else:
+                step_metadata(scn, out_dir, args.only, True)
 
         print("\n[6/6] Run validation")
         step_validate_run(out_dir)

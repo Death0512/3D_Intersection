@@ -252,7 +252,7 @@ def _print_ffmpeg_stderr(encoder: str, rc: int, stderr: str):
 
 def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float,
                    timeout_s: int = 1800) -> bool:
-    """Encode the PNG frame sequence to mp4 with GPU NVENC only.
+    """Encode the JPEG frame sequence to mp4 with GPU NVENC only.
 
     Inherits CUDA_VISIBLE_DEVICES from
     the parent process environment (set per-worker by run_pipeline.py), so
@@ -268,10 +268,10 @@ def _ffmpeg_encode(frames_dir: str, video_path: str, fps: float,
 
     base = [
         "ffmpeg", "-y", "-framerate", str(fps),
-        # frames start at f_0000.png (scene.frame_start = 0); ffmpeg's %04d
+        # frames start at f_0000.jpg (scene.frame_start = 0); ffmpeg's %04d
         # glob defaults to -start_number 1, which would drop frame 0.
         "-start_number", "0",
-        "-i", _os.path.join(frames_dir, "f_%04d.png"),
+        "-i", _os.path.join(frames_dir, "f_%04d.jpg"),
     ]
 
     def _run(cmd, tag):
@@ -382,7 +382,7 @@ def _install_render_progress_handler(scene):
 def render_one(scenario: dict, camera_tag: str, out_dir: str):
     """Build + render one camera shot to <out_dir>/video_<tag>.mp4.
 
-    Renders a PNG frame sequence into a temp subdir, then encodes to mp4 with
+    Renders a JPEG frame sequence into a temp subdir, then encodes to mp4 with
     ffmpeg (Blender's built-in FFMPEG container can be finicky across builds).
 
     Emits explicit phase markers (D1) so each long step (buildshot → GPU →
@@ -416,15 +416,16 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
     scene.frame_start = 0
     scene.frame_end = last_frame
 
-    # PNG sequence into a frames subdir
+    # JPEG sequence into a frames subdir
     frames_dir = os.path.join(out_dir, f"frames_{camera_tag}")
     os.makedirs(frames_dir, exist_ok=True)
     # clear any old frames
     for fn in os.listdir(frames_dir):
-        if fn.endswith(".png"):
+        if fn.endswith(".jpg"):
             os.remove(os.path.join(frames_dir, fn))
-    scene.render.filepath = os.path.join(frames_dir, "f_")  # produces f_0001.png ...
-    scene.render.image_settings.file_format = "PNG"
+    scene.render.filepath = os.path.join(frames_dir, "f_")  # produces f_0001.jpg ...
+    scene.render.image_settings.file_format = "JPEG"
+    scene.render.image_settings.quality = 95
 
     # Install per-frame progress handler before the long render (C2).
     print(f"  [{camera_tag}] rendering frames 0..{last_frame} "
@@ -442,7 +443,7 @@ def render_one(scenario: dict, camera_tag: str, out_dir: str):
         except Exception:
             pass
 
-    # If --skip-encode is set, leave PNG frames on disk and return the frames
+    # If --skip-encode is set, leave JPEG frames on disk and return the frames
     # dir path.  The pipeline will encode in a controlled step to stagger NVENC.
     skip_encode = os.environ.get("RENDER_SKIP_ENCODE") == "1"
     if skip_encode:
@@ -504,10 +505,11 @@ def render_from_scene(scenario: dict, camera_tag: str, out_dir: str,
     frames_dir = os.path.join(out_dir, f"frames_{camera_tag}")
     os.makedirs(frames_dir, exist_ok=True)
     for fn in os.listdir(frames_dir):
-        if fn.endswith(".png"):
+        if fn.endswith(".jpg"):
             os.remove(os.path.join(frames_dir, fn))
     scene.render.filepath = os.path.join(frames_dir, "f_")
-    scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.file_format = "JPEG"
+    scene.render.image_settings.quality = 95
 
     print(f"  [{camera_tag}] rendering cached scene 0..{last_frame} "
           f"({scene.cycles.samples} samples)...", flush=True)
@@ -561,7 +563,7 @@ def main():
     ap.add_argument("--render-only", action="store_true",
                     help="render from cached scene_<camera>.blend only; requires --only")
     ap.add_argument("--skip-encode", action="store_true",
-                    help="render PNG frames only, skip ffmpeg encode; the pipeline "
+                    help="render JPEG frames only, skip ffmpeg encode; the pipeline "
                          "will run encode as a separate controlled step to stagger "
                          "NVENC sessions across workers")
     ap.add_argument("--samples", type=int, default=None,

@@ -631,7 +631,7 @@ def configure_gpu():
 # ---------------------------------------------------------------------------
 
 def setup_render(env_lights: dict = None, samples: int = None):
-    """Configure Cycles GPU rendering at 1080p, 30 fps, PNG sequence.
+    """Configure Cycles GPU rendering at 1080p, 30 fps, JPEG sequence.
 
     Denoising is GPU-only: use the OPTIX denoiser only when Blender selected
     the OPTIX backend and the NVIDIA OptiX weights file exists. On CUDA-only
@@ -681,7 +681,8 @@ def setup_render(env_lights: dict = None, samples: int = None):
     scene.render.resolution_x = RES_X
     scene.render.resolution_y = RES_Y
     scene.render.fps = FPS
-    scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.file_format = "JPEG"
+    scene.render.image_settings.quality = 95
     scene.render.image_settings.color_mode = "RGB"
     # world light
     world = scene.world or bpy.data.worlds.new("World")
