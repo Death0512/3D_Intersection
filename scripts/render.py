@@ -509,7 +509,7 @@ def render_from_scene(scenario: dict, camera_tag: str, out_dir: str,
             os.remove(os.path.join(frames_dir, fn))
     scene.render.filepath = os.path.join(frames_dir, "f_")
     scene.render.image_settings.file_format = "JPEG"
-    scene.render.image_settings.quality = 95
+    scene.render.image_settings.quality = 80
 
     print(f"  [{camera_tag}] rendering cached scene 0..{last_frame} "
           f"({scene.cycles.samples} samples)...", flush=True)
