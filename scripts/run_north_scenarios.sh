@@ -70,7 +70,10 @@ run_one empty        0
 run_one sparse       1
 run_one moderate     5
 run_one dense        15
-run_one surge_spike  1 "spike:start=55,end=65,scale=20"
+# Spike positioned in the middle of the video: ~46% to ~59% of duration.
+SPIKE_START=$(( SECONDS_VAL * 46 / 100 ))
+SPIKE_END=$(( SECONDS_VAL * 59 / 100 ))
+run_one surge_spike  1 "spike:start=$SPIKE_START,end=$SPIKE_END,scale=20"
 run_one signal_cycle 3
 
 echo ""
