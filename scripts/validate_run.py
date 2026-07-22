@@ -49,23 +49,31 @@ def main():
     print(f"VALIDATE RUN: {out}")
     print("=" * 60)
 
+    # Metadata records the expected video subset for partial-camera runs.
+    meta_path = os.path.join(out, "metadata.json")
+    meta = _load_json(meta_path) if os.path.exists(meta_path) else None
+
     # videos
-    expected = G.camera_names()
+    if meta and meta.get("videos"):
+        expected = [v[len("video_"):-len(".mp4")] for v in meta.get("videos", [])]
+    else:
+        expected = G.camera_names()
     videos = [f for f in os.listdir(out) if f.startswith("video_") and f.endswith(".mp4")]
     present_tags = {v[len("video_"):-len(".mp4")] for v in videos}
     missing = set(expected) - present_tags
-    ok &= check(f"videos present ({len(videos)}/{len(expected)})", len(videos) == len(expected),
+    expected_present = [t for t in expected if t in present_tags]
+    ok &= check(f"videos present ({len(expected_present)}/{len(expected)})", not missing,
                 f"missing: {missing}" if missing else "")
     for v in sorted(videos):
         sz = os.path.getsize(os.path.join(out, v))
         ok &= check(f"  {v} non-empty", sz > 0, f"{sz} B")
 
     # metadata
-    meta_path = os.path.join(out, "metadata.json")
     ok &= check("metadata.json exists", os.path.exists(meta_path))
     if not os.path.exists(meta_path):
         print("=" * 60); sys.exit(1)
-    meta = _load_json(meta_path)
+    if meta is None:
+        meta = _load_json(meta_path)
 
     # scenario headway
     scn = None

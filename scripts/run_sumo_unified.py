@@ -26,7 +26,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from typing import Dict, Iterable, List, Tuple
+from typing import Callable, Dict, Iterable, List, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -160,22 +160,73 @@ def write_sumo_network(sumo_dir: str, speed_ms: float = 16.67,
     return net
 
 
+def _demand_multiplier(profile: str | None) -> Callable[[float], float]:
+    """Return a time→multiplier function for optional time-varying demand.
+
+    Supported syntax:
+      spike:start=55,end=65,scale=20
+
+    Outside [start,end) the multiplier is 1.0; inside it is ``scale``.  The
+    route writer uses thinning from the maximum rate, so the spike window is
+    sampled correctly without needing a full non-homogeneous Poisson solver.
+    """
+    if not profile:
+        return lambda _t: 1.0
+    kind, _, rest = profile.partition(":")
+    if kind.strip().lower() != "spike":
+        raise SystemExit(f"FAIL: unsupported --demand-profile {profile!r}; expected spike:start=55,end=65,scale=20")
+    opts = {"start": 55.0, "end": 65.0, "scale": 20.0}
+    if rest:
+        for part in rest.split(","):
+            if not part.strip():
+                continue
+            k, sep, v = part.partition("=")
+            if not sep or k.strip() not in opts:
+                raise SystemExit(f"FAIL: bad --demand-profile component {part!r}")
+            opts[k.strip()] = float(v)
+    start, end, scale = opts["start"], opts["end"], opts["scale"]
+    if end <= start:
+        raise SystemExit("FAIL: demand spike end must be greater than start")
+    if scale < 0:
+        raise SystemExit("FAIL: demand spike scale must be >= 0")
+    return lambda t: scale if start <= float(t) < end else 1.0
+
+
 def write_routes(sumo_dir: str, rng: random.Random, seconds: float,
-                 flow_vph: Dict[str, float]) -> Tuple[str, Dict[str, dict]]:
+                 flow_vph: Dict[str, float], demand_profile: str | None = None) -> Tuple[str, Dict[str, dict]]:
     routes_path = os.path.join(sumo_dir, "routes.rou.xml")
     vehicles_meta: Dict[str, dict] = {}
     per_route_counter = defaultdict(int)
     vehicles = []
 
+    multiplier = _demand_multiplier(demand_profile)
+
+    # Rejection/thinning from a conservative max-rate proposal.  This preserves
+    # a Poisson-like arrival process while allowing short high-flow windows.
+    probe_times = [0.0, seconds]
+    if demand_profile and demand_profile.startswith("spike:"):
+        opts = {"start": 55.0, "end": 65.0, "scale": 20.0}
+        for part in demand_profile.partition(":")[2].split(","):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                if k.strip() in opts:
+                    opts[k.strip()] = float(v)
+        probe_times += [opts["start"], opts["end"]]
+    max_mult = max(1.0, *(multiplier(t) for t in probe_times))
+
     for ap in DIRECTIONS:
-        rate = max(0.0, float(flow_vph.get(ap, 0.0))) / 3600.0
-        if rate <= 0:
+        base_rate = max(0.0, float(flow_vph.get(ap, 0.0))) / 3600.0
+        proposal_rate = base_rate * max_mult
+        if proposal_rate <= 0:
             continue
         t = 0.0
         while t < seconds:
-            t += rng.expovariate(rate)
+            t += rng.expovariate(proposal_rate)
             if t >= seconds:
                 break
+            accept_p = (base_rate * multiplier(t)) / proposal_rate if proposal_rate > 0 else 0.0
+            if rng.random() > accept_p:
+                continue
             turn, lane = _pick_turn_and_lane(rng)
             rid = _route_id(ap, turn)
             idx = per_route_counter[rid]
@@ -309,6 +360,8 @@ def main(argv=None) -> int:
     ap.add_argument("--flow", type=float, default=400.0,
                     help="base demand veh/h per approach")
     ap.add_argument("--demand-scale", type=float, default=1.0)
+    ap.add_argument("--demand-profile", default=None,
+                    help="optional time-varying demand, e.g. spike:start=55,end=65,scale=20")
     ap.add_argument("--flow-json", default=None,
                     help="optional JSON with flows per approach: {N,E,S,W}")
     ns = ap.parse_args(argv)
@@ -324,7 +377,8 @@ def main(argv=None) -> int:
     print(f"[sumo] writing network/routes in {sumo_dir}", flush=True)
     write_sumo_network(sumo_dir)
     flow_vph = _flow_dict(ns)
-    routes_path, vehicles_meta = write_routes(sumo_dir, rng, ns.seconds, flow_vph)
+    routes_path, vehicles_meta = write_routes(sumo_dir, rng, ns.seconds, flow_vph,
+                                              demand_profile=ns.demand_profile)
     cfg = write_config(sumo_dir, step, ns.seconds)
 
     print(f"[sumo] running TraCI at {fps} FPS for {duration_frames} frames "
@@ -361,6 +415,7 @@ def main(argv=None) -> int:
         "seconds": float(ns.seconds),
         "seed": ns.seed,
         "flow_vph": flow_vph,
+        "demand_profile": ns.demand_profile,
         "coordinate_system": "SUMO world copied to Blender XY; +X east, +Y north, Z up",
         "sumo": {
             "dir": os.path.relpath(sumo_dir, out_dir),

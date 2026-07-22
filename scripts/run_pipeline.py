@@ -150,7 +150,19 @@ def step_scenario(seed, seconds, out_dir, fps=None,
     return os.path.join(out_dir, "scenario.json")
 
 
-def step_sumo_scenario(seed, seconds, out_dir, fps=None, demand_scale=None):
+def camera_tags_from_only(only):
+    if not only:
+        return G.camera_names()
+    tags = [t.strip() for t in str(only).split(",") if t.strip()]
+    valid = set(G.camera_names())
+    bad = [t for t in tags if t not in valid]
+    if bad:
+        raise SystemExit(f"FAIL: invalid --only camera tag(s): {', '.join(bad)}")
+    return tags
+
+
+def step_sumo_scenario(seed, seconds, out_dir, fps=None, demand_scale=None,
+                       demand_profile=None):
     """Run SUMO/TraCI once and write scenario.json with per-frame trajectories."""
     cmd = [PYTHON, os.path.join(HERE, "run_sumo_unified.py"),
            "--seed", str(seed), "--seconds", str(seconds), "--out", out_dir]
@@ -158,6 +170,8 @@ def step_sumo_scenario(seed, seconds, out_dir, fps=None, demand_scale=None):
         cmd += ["--fps", str(fps)]
     if demand_scale is not None:
         cmd += ["--demand-scale", str(demand_scale)]
+    if demand_profile:
+        cmd += ["--demand-profile", str(demand_profile)]
     run(cmd, timeout=900)
     return os.path.join(out_dir, "scenario.json")
 
@@ -611,9 +625,7 @@ def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
     multi-hour silent hang into a fast, diagnosable abort.
     """
     if camera_tags is None:
-        camera_tags = G.camera_names()
-        if only:
-            camera_tags = [only]
+        camera_tags = camera_tags_from_only(only)
 
     def _worker_with_skip(args, watchdog_state=None, samples=None):
         return _render_worker(args, watchdog_state=watchdog_state,
@@ -633,9 +645,7 @@ def step_build_scenes_parallel(scenario_path, out_dir, only=None,
     data integrity model. The split lets the later render phase open an already
     built .blend and focus on GPU rendering/encoding.
     """
-    camera_tags = G.camera_names()
-    if only:
-        camera_tags = [only]
+    camera_tags = camera_tags_from_only(only)
     # Build processes are CPU/startup bound. Cap at camera count; GPU assignment
     # is irrelevant, but keep a stable zero for the worker environment.
     _step_camera_phase(
@@ -810,7 +820,7 @@ def main():
                          "(400 veh/h/approach), ~5-7 vehicles appear in 12s; "
                          "increase --demand-scale for denser traffic.")
     ap.add_argument("--out", type=str, default=os.path.join(ROOT, "output", "run1"))
-    ap.add_argument("--only", help="render only this camera (debug)")
+    ap.add_argument("--only", help="render only this camera or comma-separated cameras, e.g. in_N,out_N")
     ap.add_argument("--jobs", type=int, default=0,
                     help="parallel render workers (0 = auto-detect from free "
                          "VRAM capped by --max-workers-per-gpu)")
@@ -848,6 +858,10 @@ def main():
                          "on-screen traffic, no JSON file needed. "
                          "Scale <= 0 produces zero vehicles. "
                          "Ignored when --demand is a path.")
+    ap.add_argument("--demand-profile", type=str, default=None,
+                    help="SUMO-only time-varying demand profile. Currently supports "
+                         "spike:start=55,end=65,scale=20 (base demand outside, "
+                         "base*scale inside).")
     ap.add_argument("--simulator", type=str, default=None,
                     choices=["legacy", "micro", "research", "sumo"],
                     help="simulation engine: 'legacy' (event-driven, default) "
@@ -896,7 +910,8 @@ def main():
             if args.demand:
                 print("[sumo] --demand JSON ignored in unified mode; use --demand-scale")
             scn = step_sumo_scenario(args.seed, seconds, out_dir, fps=fps,
-                                     demand_scale=args.demand_scale)
+                                     demand_scale=args.demand_scale,
+                                     demand_profile=args.demand_profile)
         else:
             scn = step_scenario(args.seed, seconds, out_dir, fps=fps,
                                 signal=args.signal, signal_mode=args.signal_mode,
@@ -928,7 +943,7 @@ def main():
 
             print("\n[4b/6] Render unified SUMO scene")
             n_jobs, _ = _detect_jobs(
-                8 if not args.only else 1, explicit=args.jobs,
+                len(camera_tags_from_only(args.only)), explicit=args.jobs,
                 max_workers_per_gpu=args.max_workers_per_gpu,
                 vram_budget=VRAM_PER_JOB_MIB * 2)
             step_sumo_unified_render(scn, out_dir, n_jobs, args.samples, args.only)
@@ -960,7 +975,7 @@ def main():
             print("\n[4b/6] Render cached camera scenes sequentially "
                   "(JPEG frames; encode+cleanup after each camera)")
             _n_jobs_detected, _gpu_assign_detected = _detect_jobs(
-                8 if not args.only else 1, explicit=args.jobs,
+                len(camera_tags_from_only(args.only)), explicit=args.jobs,
                 max_workers_per_gpu=args.max_workers_per_gpu,
                 vram_budget=_vram_budget)
             # Storage-optimized Option A: force one render worker at a time.

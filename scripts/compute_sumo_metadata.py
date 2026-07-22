@@ -15,6 +15,17 @@ import envfile as ENV
 import geometry as G
 
 
+def _camera_tags(only: str | None) -> list[str]:
+    if not only:
+        return G.camera_names()
+    tags = [t.strip() for t in only.split(",") if t.strip()]
+    valid = set(G.camera_names())
+    bad = [t for t in tags if t not in valid]
+    if bad:
+        raise SystemExit(f"FAIL: invalid camera tag(s): {', '.join(bad)}")
+    return tags
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", required=True)
@@ -24,7 +35,7 @@ def main():
     ns = ap.parse_args()
     with open(ns.scenario) as f:
         scenario = json.load(f)
-    tags = [ns.only] if ns.only else G.camera_names()
+    tags = _camera_tags(ns.only)
     videos = [f"video_{t}.mp4" for t in tags]
     cameras = {}
     with open(os.path.join(ROOT, "assets", "road.json")) as f:

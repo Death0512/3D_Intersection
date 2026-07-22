@@ -17,6 +17,17 @@ import geometry as G
 BLENDER = shutil.which("blender") or "blender"
 
 
+def _camera_tags(only: str | None) -> list[str]:
+    if not only:
+        return G.camera_names()
+    tags = [t.strip() for t in only.split(",") if t.strip()]
+    valid = set(G.camera_names())
+    bad = [t for t in tags if t not in valid]
+    if bad:
+        raise SystemExit(f"FAIL: invalid camera tag(s): {', '.join(bad)}")
+    return tags
+
+
 def _run_render(scene, out_dir, tag, gpu_id, samples):
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -60,7 +71,7 @@ def main():
     with open(ns.scenario) as f:
         scenario = json.load(f)
     fps = int(scenario.get("fps", 30) or 30)
-    tags = [ns.only] if ns.only else G.camera_names()
+    tags = _camera_tags(ns.only)
     os.makedirs(ns.out, exist_ok=True)
     jobs = max(1, min(int(ns.jobs), len(tags)))
     for i, tag in enumerate(tags):
