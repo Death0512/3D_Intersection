@@ -68,13 +68,13 @@ run_one() {
 
 run_one empty        0
 run_one sparse       1
-run_one moderate     5
-run_one dense        15
-# Spike positioned in the middle of the video: ~46% to ~59% of duration.
-SPIKE_START=$(( SECONDS_VAL * 46 / 100 ))
-SPIKE_END=$(( SECONDS_VAL * 59 / 100 ))
-run_one surge_spike  1 "spike:start=$SPIKE_START,end=$SPIKE_END,scale=20"
-run_one signal_cycle 3
+run_one moderate     2.5
+run_one dense        6
+# Brief overload near the middle, followed by enough time for recovery.
+SPIKE_START=$(( SECONDS_VAL * 2 / 5 ))
+SPIKE_END=$(( SPIKE_START + SECONDS_VAL / 15 ))
+run_one surge_spike  1 "spike:start=$SPIKE_START,end=$SPIKE_END,scale=8"
+run_one signal_cycle 2
 
 echo ""
 echo "All North scenarios complete: $OUT_ROOT"
