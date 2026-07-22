@@ -44,6 +44,14 @@
 #                       for S seconds (default: 600)
 #   --samples N         Cycles render samples (default: 48). Lower = faster,
 #                       noisier (denoiser compensates). Try 16-24 for tests.
+#   --keyframe-stride N SUMO unified only: fallback Blender keyframe spacing
+#                       for straight/steady vehicle tracks (default: 6).
+#   --heading-threshold-deg F
+#                       SUMO unified only: keep extra keyframes when heading
+#                       changes more than F degrees (default: 1.0).
+#   --speed-threshold F
+#                       SUMO unified only: keep extra keyframes when speed
+#                       changes more than F m/s (default: 0.8).
 #   --simulator MODE     Simulation engine: 'legacy' (default), 'micro' (IDM
 #                        prototype), or 'research' (formal state-based kernel).
 #   --blender PATH      Path to blender binary (default: auto-detect)
@@ -78,6 +86,9 @@ SILENCE_TIMEOUT=0   # 0 = use run_pipeline.py default (600s)
 SAMPLES=0           # 0 = use build_scene default (48)
 SIMULATOR="research"        # "" = legacy; "micro" = IDM car-following
 NORTH_SCENARIOS=0
+KEYFRAME_STRIDE=""
+HEADING_THRESHOLD_DEG=""
+SPEED_THRESHOLD=""
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -107,6 +118,9 @@ while [[ $# -gt 0 ]]; do
         --max-workers-per-gpu) MAX_WORKERS_PER_GPU="$2"; shift 2 ;;
         --silence-timeout) SILENCE_TIMEOUT="$2"; shift 2 ;;
         --samples)        SAMPLES="$2";       shift 2 ;;
+        --keyframe-stride) KEYFRAME_STRIDE="$2"; shift 2 ;;
+        --heading-threshold-deg) HEADING_THRESHOLD_DEG="$2"; shift 2 ;;
+        --speed-threshold) SPEED_THRESHOLD="$2"; shift 2 ;;
         --simulator)      SIMULATOR="$2";     shift 2 ;;
         -h|--help)        usage ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -132,6 +146,9 @@ if [[ "$NORTH_SCENARIOS" -eq 1 ]]; then
     [[ "$JOBS" -gt 0 ]] && BATCH_ARGS+=(--jobs "$JOBS")
     [[ "$MAX_WORKERS_PER_GPU" -gt 0 ]] && BATCH_ARGS+=(--max-workers-per-gpu "$MAX_WORKERS_PER_GPU")
     [[ "$SILENCE_TIMEOUT" -gt 0 ]] && BATCH_ARGS+=(--silence-timeout "$SILENCE_TIMEOUT")
+    [[ -n "$KEYFRAME_STRIDE" ]] && BATCH_ARGS+=(--keyframe-stride "$KEYFRAME_STRIDE")
+    [[ -n "$HEADING_THRESHOLD_DEG" ]] && BATCH_ARGS+=(--heading-threshold-deg "$HEADING_THRESHOLD_DEG")
+    [[ -n "$SPEED_THRESHOLD" ]] && BATCH_ARGS+=(--speed-threshold "$SPEED_THRESHOLD")
     [[ -n "$BLENDER_BIN" ]] && BATCH_ARGS+=(--blender "$BLENDER_BIN")
     [[ -n "$PYTHON_BIN" ]] && BATCH_ARGS+=(--python "$PYTHON_BIN")
     exec bash "$SCRIPT_DIR/run_north_scenarios.sh" "${BATCH_ARGS[@]}"
@@ -236,6 +253,9 @@ PIPELINE_ARGS=(
 [[ -n "$DEMAND_PROFILE" ]]  && PIPELINE_ARGS+=(--demand-profile "$DEMAND_PROFILE")
 [[ "$SILENCE_TIMEOUT" -gt 0 ]] && PIPELINE_ARGS+=(--silence-timeout "$SILENCE_TIMEOUT")
 [[ "$SAMPLES" -gt 0 ]]       && PIPELINE_ARGS+=(--samples "$SAMPLES")
+[[ -n "$KEYFRAME_STRIDE" ]]  && PIPELINE_ARGS+=(--keyframe-stride "$KEYFRAME_STRIDE")
+[[ -n "$HEADING_THRESHOLD_DEG" ]] && PIPELINE_ARGS+=(--heading-threshold-deg "$HEADING_THRESHOLD_DEG")
+[[ -n "$SPEED_THRESHOLD" ]]  && PIPELINE_ARGS+=(--speed-threshold "$SPEED_THRESHOLD")
 [[ -n "$SIMULATOR" ]]        && PIPELINE_ARGS+=(--simulator "$SIMULATOR")
 
 # C5: force Python stdout unbuffered so every print(..., flush=True) in

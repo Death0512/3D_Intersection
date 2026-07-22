@@ -150,6 +150,60 @@ detect_sumo_home() {
   fi
 }
 
+repair_cuda_compat() {
+  # NVIDIA Container Toolkit may register a newer CUDA compatibility library
+  # ahead of the host driver. On older host drivers this makes cuInit return
+  # CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE even though /dev/nvidia0 works.
+  command -v nvidia-smi &>/dev/null || return 0
+  [[ -d /etc/ld.so.conf.d ]] || return 0
+
+  local rc compat_file backup
+  rc="$($PYTHON3_BASE - <<'PY'
+import ctypes
+try:
+    lib = ctypes.CDLL("libcuda.so.1")
+    rc = int(lib.cuInit(0))
+except Exception:
+    rc = -1
+print(rc)
+PY
+  )"
+  [[ "$rc" == "804" ]] || return 0
+
+  compat_file=""
+  while IFS= read -r candidate; do
+    if grep -qE '^/usr/local/cuda[^/]*/compat/?$' "$candidate" 2>/dev/null; then
+      compat_file="$candidate"
+      break
+    fi
+  done < <(find /etc/ld.so.conf.d -maxdepth 1 -type f -name '*.conf' -print 2>/dev/null)
+
+  if [[ -z "$compat_file" ]]; then
+    echo "  CUDA    : FAIL (forward-compatibility library active; no config file found)" >&2
+    return 1
+  fi
+
+  backup="${compat_file}.disabled"
+  echo "  CUDA    : disabling incompatible compatibility config $compat_file"
+  _sudo cp -a "$compat_file" "$backup"
+  _sudo rm -f "$compat_file"
+  _sudo ldconfig
+
+  rc="$($PYTHON3_BASE - <<'PY'
+import ctypes
+try:
+    print(int(ctypes.CDLL("libcuda.so.1").cuInit(0)))
+except Exception:
+    print(-1)
+PY
+  )"
+  if [[ "$rc" != "0" ]]; then
+    echo "  CUDA    : FAIL (cuInit=$rc after compatibility repair)" >&2
+    return 1
+  fi
+  echo "  CUDA    : host driver usable after compatibility repair"
+}
+
 echo "============================================================"
 echo "INSTALL  blender=${BLENDER_VERSION}  venv=${VENV_DIR}"
 echo "  project  : $ROOT_DIR"
@@ -245,6 +299,8 @@ else
   echo "            Rendering requires an NVIDIA GPU with OptiX support."
   echo "            The render step WILL FAIL without it."
 fi
+
+repair_cuda_compat
 
 # ---- 3. Python environment ---------------------------------------------------
 echo ""
@@ -413,6 +469,18 @@ echo "--- Smoke tests ---"
 timeout 20 "$BL" -b --python-expr "import bpy" 2>/dev/null \
   && echo "  blender  : OK" || echo "  blender  : WARN (non-fatal)"
 
+if command -v nvidia-smi &>/dev/null; then
+  if GPU_CHECK="$(timeout 30 "$BL" -b --python-expr \
+      "import bpy,sys; p=bpy.context.preferences.addons['cycles'].preferences; p.compute_device_type='OPTIX'; p.refresh_devices(); sys.exit(0 if any(d.type in {'CUDA','OPTIX'} for d in p.devices) else 1)" \
+      2>&1)"; then
+    echo "  blender GPU: CUDA/OptiX OK"
+  else
+    echo "$GPU_CHECK" >&2
+    echo "  blender GPU: FAIL (NVIDIA is visible but Blender cannot use CUDA/OptiX)" >&2
+    exit 1
+  fi
+fi
+
 "$VENV_PYTHON" -c "import PIL" 2>/dev/null \
   && echo "  Pillow   : OK" || echo "  Pillow   : FAIL"
 
@@ -426,8 +494,21 @@ command -v ffmpeg &>/dev/null \
   && echo "  ffmpeg   : OK" || echo "  ffmpeg   : WARN"
 
 if command -v ffmpeg &>/dev/null; then
-  ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'h264_nvenc' \
-    && echo "  nvenc    : OK" || echo "  nvenc    : WARN (h264_nvenc not listed)"
+  if ffmpeg -hide_banner -encoders 2>/dev/null | grep 'h264_nvenc' >/dev/null; then
+    NVENC_TEST="${TMPDIR:-/tmp}/doan_nvenc_test.mp4"
+    if ffmpeg -y -v error -f lavfi -i color=size=256x256:rate=1 \
+        -frames:v 1 -c:v h264_nvenc -pix_fmt yuv420p "$NVENC_TEST"; then
+      rm -f "$NVENC_TEST"
+      echo "  nvenc    : OK"
+    else
+      rm -f "$NVENC_TEST"
+      echo "  nvenc    : FAIL (encoder listed but could not encode)" >&2
+      exit 1
+    fi
+  else
+    echo "  nvenc    : FAIL (h264_nvenc not listed)" >&2
+    exit 1
+  fi
 fi
 
 echo ""

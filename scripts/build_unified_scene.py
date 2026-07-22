@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -80,12 +81,27 @@ def _make_vehicle_root(veh: dict, veh_manifest: dict, plates_dir: str):
     return root
 
 
-def _keyframe_sumo_trajectory(root, veh: dict, frame_end: int):
+def _angle_delta(a: float, b: float) -> float:
+    """Smallest absolute angular difference in radians."""
+    return abs((a - b + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def _keyframe_sumo_trajectory(root, veh: dict, frame_end: int,
+                              keyframe_stride: int = 6,
+                              heading_threshold_deg: float = 1.0,
+                              speed_threshold: float = 0.8):
     pts = list(veh.get("trajectory") or [])
     if not pts:
         return False
     fwd_off = math.radians(float(root.get("forward_offset_deg", 0.0)))
-    # Keep all turning/accel detail, but reduce long straight constant-speed runs.
+    # Keep turn/accel detail, but do not keyframe every SUMO sample.  Blender
+    # interpolates linearly between keyframes, so for long 300s renders a 5 FPS
+    # animation track (stride=6 at 30 FPS) is visually smooth enough while
+    # cutting F-curves, .blend size, build RAM and save time roughly in half
+    # versus the old every-3-frame fallback.
+    keyframe_stride = max(1, int(keyframe_stride))
+    heading_threshold = math.radians(float(heading_threshold_deg))
+    speed_threshold = float(speed_threshold)
     selected = []
     prev = None
     for i, p in enumerate(pts):
@@ -93,9 +109,9 @@ def _keyframe_sumo_trajectory(root, veh: dict, frame_end: int):
             selected.append(p); prev = p; continue
         if prev is None:
             selected.append(p); prev = p; continue
-        heading_delta = abs(float(p.get("rot_z", 0.0)) - float(prev.get("rot_z", 0.0)))
+        heading_delta = _angle_delta(float(p.get("rot_z", 0.0)), float(prev.get("rot_z", 0.0)))
         speed_delta = abs(float(p.get("speed", 0.0)) - float(prev.get("speed", 0.0)))
-        if heading_delta > math.radians(0.5) or speed_delta > 0.4 or int(p["frame"]) % 3 == 0:
+        if heading_delta > heading_threshold or speed_delta > speed_threshold or int(p["frame"]) % keyframe_stride == 0:
             selected.append(p); prev = p
 
     for p in selected:
@@ -120,7 +136,44 @@ def _add_center_plane():
     obj.data.materials.append(mat)
 
 
-def build_unified_scene(scenario: dict, out_blend: str):
+def _camera_visible_vehicle(veh: dict, tag: str) -> bool:
+    direction, is_in = BS.parse_camera_tag(tag)
+    if is_in:
+        return veh.get("approach") == direction.value
+    ex_dir, _ex_lane = G.exit_lane_for_movement(
+        G.Direction(veh["approach"]), veh["lane"], G.Turn(veh["turn"]))
+    return ex_dir == direction
+
+
+def _filter_visible_vehicles(scenario: dict, camera_tags: list[str]) -> list[dict]:
+    if not camera_tags:
+        return list(scenario.get("vehicles", []))
+    visible = []
+    for veh in scenario.get("vehicles", []):
+        for tag in camera_tags:
+            if _camera_visible_vehicle(veh, tag):
+                visible.append(veh)
+                break
+    return visible
+
+
+def _selected_camera_tags(only: str | None) -> list[str]:
+    if not only:
+        return G.camera_names()
+    tags = [t.strip() for t in only.split(",") if t.strip()]
+    valid = set(G.camera_names())
+    bad = [t for t in tags if t not in valid]
+    if bad:
+        raise SystemExit(f"FAIL: invalid --only camera tag(s): {', '.join(bad)}")
+    if not tags:
+        raise SystemExit("FAIL: --only did not contain any camera tag")
+    return tags
+
+
+def build_unified_scene(scenario: dict, out_blend: str, only: str | None = None,
+                        keyframe_stride: int = 6,
+                        heading_threshold_deg: float = 1.0,
+                        speed_threshold: float = 0.8):
     bu.reset_scene()
     with open(ROAD_JSON) as f:
         road_meta = json.load(f)
@@ -128,23 +181,36 @@ def build_unified_scene(scenario: dict, out_blend: str):
     plates_dir = os.path.join(os.path.dirname(out_blend), "plates")
     os.makedirs(plates_dir, exist_ok=True)
 
+    selected_tags = _selected_camera_tags(only)
+    selected_vehicles = _filter_visible_vehicles(scenario, selected_tags)
+    total_vehicles = len(scenario.get("vehicles", []))
+    # Drop non-visible vehicles from the decoded JSON object before appending
+    # Blender assets. Dense 300s scenarios can decode to >2GB of Python objects;
+    # keeping all four directions in RAM while rendering only in_N/out_N is a
+    # direct waste on 16GB VMs.
+    scenario["vehicles"] = selected_vehicles
+    gc.collect()
+
     for d in G.Direction:
         BS.place_road(d, road_meta, is_entry=True)
         BS.place_road(d, road_meta, is_entry=False)
     _add_center_plane()
 
-    for tag in G.camera_names():
+    for tag in selected_tags:
         env = ENV.load_env(tag, ROOT)
         direction, is_in = BS.parse_camera_tag(tag)
         cam = BS.place_camera(direction, is_in, road_meta, env=env)
         cam.name = f"Camera_{tag}"
 
     frame_end = max(0, int(scenario.get("duration_frames", 1)) - 1)
-    print(f"[unified] placing {len(scenario.get('vehicles', []))} SUMO vehicles", flush=True)
+    print(f"[unified] placing {len(selected_vehicles)}/{total_vehicles} SUMO vehicles for {len(selected_tags)} camera(s)", flush=True)
     n = 0
-    for veh in scenario.get("vehicles", []):
+    for veh in selected_vehicles:
         root = _make_vehicle_root(veh, veh_manifest, plates_dir)
-        if _keyframe_sumo_trajectory(root, veh, frame_end):
+        if _keyframe_sumo_trajectory(root, veh, frame_end,
+                                     keyframe_stride=keyframe_stride,
+                                     heading_threshold_deg=heading_threshold_deg,
+                                     speed_threshold=speed_threshold):
             n += 1
             if n == 1 or n % 10 == 0:
                 print(f"  [unified] keyframed {n} vehicles", flush=True)
@@ -156,7 +222,7 @@ def build_unified_scene(scenario: dict, out_blend: str):
     scene.frame_end = frame_end
     os.makedirs(os.path.dirname(out_blend), exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=out_blend)
-    print(f"[unified] saved {out_blend} ({n} vehicles, 8 cameras)", flush=True)
+    print(f"[unified] saved {out_blend} ({n} vehicles, {len(selected_tags)} cameras)", flush=True)
 
 
 def main():
@@ -166,10 +232,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--only", default=None,
+                    help="comma-separated camera tags to include (e.g. in_N,out_N)")
+    ap.add_argument("--keyframe-stride", type=int, default=6,
+                    help="fallback frame spacing for straight/steady SUMO tracks (default: 6 = 5 FPS at 30 FPS)")
+    ap.add_argument("--heading-threshold-deg", type=float, default=1.0,
+                    help="always keep a pose when heading changed by more than this many degrees")
+    ap.add_argument("--speed-threshold", type=float, default=0.8,
+                    help="always keep a pose when speed changed by more than this many m/s")
     ns = ap.parse_args(post)
     with open(ns.scenario) as f:
         scenario = json.load(f)
-    build_unified_scene(scenario, ns.out)
+    build_unified_scene(scenario, ns.out, only=ns.only,
+                        keyframe_stride=ns.keyframe_stride,
+                        heading_threshold_deg=ns.heading_threshold_deg,
+                        speed_threshold=ns.speed_threshold)
 
 
 if __name__ == "__main__":

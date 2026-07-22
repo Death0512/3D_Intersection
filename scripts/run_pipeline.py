@@ -161,6 +161,53 @@ def camera_tags_from_only(only):
     return tags
 
 
+def vehicle_visible_for_camera(veh, camera_tag):
+    role, direction_s = camera_tag.split("_", 1)
+    direction = G.Direction(direction_s)
+    if role == "in":
+        return veh.get("approach") == direction.value
+    ex_dir, _ex_lane = G.exit_lane_for_movement(
+        G.Direction(veh["approach"]), veh["lane"], G.Turn(veh["turn"]))
+    return ex_dir == direction
+
+
+def filter_vehicles_for_cameras(scenario, only):
+    tags = camera_tags_from_only(only)
+    if not only:
+        return list(scenario.get("vehicles", []))
+    visible = []
+    for veh in scenario.get("vehicles", []):
+        if any(vehicle_visible_for_camera(veh, tag) for tag in tags):
+            visible.append(veh)
+    return visible
+
+
+def write_sumo_blender_scenario(scenario_path, out_dir, only=None):
+    """Write a Blender-only scenario subset for selected cameras.
+
+    SUMO 300s dense scenarios can contain hundreds of MB of trajectories across
+    all four directions.  When rendering only `in_N,out_N`, making Blender load
+    every unrelated vehicle is pure RAM/build-time waste.  Metadata/validation
+    still use the original `scenario.json`; this filtered copy is only for scene
+    build/render FPS lookup.
+    """
+    if not only:
+        return scenario_path
+    with open(scenario_path) as f:
+        scenario = json.load(f)
+    total = len(scenario.get("vehicles", []))
+    selected = filter_vehicles_for_cameras(scenario, only)
+    filtered = dict(scenario)
+    filtered["vehicles"] = selected
+    filtered["filtered_from"] = os.path.basename(scenario_path)
+    filtered["filtered_for_cameras"] = camera_tags_from_only(only)
+    filtered_path = os.path.join(out_dir, "scenario_blender.json")
+    with open(filtered_path, "w") as f:
+        json.dump(filtered, f, separators=(",", ":"))
+    print(f"  [sumo] blender scenario subset: {len(selected)}/{total} vehicles -> {filtered_path}", flush=True)
+    return filtered_path
+
+
 def step_sumo_scenario(seed, seconds, out_dir, fps=None, demand_scale=None,
                        demand_profile=None):
     """Run SUMO/TraCI once and write scenario.json with per-frame trajectories."""
@@ -775,11 +822,19 @@ def step_metadata(scenario_path, out_dir, only=None, expected_videos=False):
     run(cmd, check=True, timeout=600)
 
 
-def step_sumo_unified_build(scenario_path, out_dir):
+def step_sumo_unified_build(scenario_path, out_dir, only=None,
+                            keyframe_stride=6,
+                            heading_threshold_deg=1.0,
+                            speed_threshold=0.8):
     scene_path = os.path.join(out_dir, "unified_scene.blend")
     cmd = [BLENDER, "-b", "--python", os.path.join(HERE, "build_unified_scene.py"), "--",
-           "--scenario", scenario_path, "--out", scene_path]
-    run(cmd, check=True, timeout=1800)
+           "--scenario", scenario_path, "--out", scene_path,
+           "--keyframe-stride", str(keyframe_stride),
+           "--heading-threshold-deg", str(heading_threshold_deg),
+           "--speed-threshold", str(speed_threshold)]
+    if only:
+        cmd += ["--only", only]
+    run(cmd, check=True, timeout=7200)
     return scene_path
 
 
@@ -792,7 +847,7 @@ def step_sumo_unified_render(scenario_path, out_dir, jobs, samples, only=None):
            "--jobs", str(max(1, jobs)), "--samples", str(samples)]
     if only:
         cmd += ["--only", only]
-    run(cmd, check=True, timeout=7200)
+    run(cmd, check=True, timeout=None)
 
 
 def step_sumo_metadata(scenario_path, out_dir, only=None):
@@ -862,6 +917,15 @@ def main():
                     help="SUMO-only time-varying demand profile. Currently supports "
                          "spike:start=55,end=65,scale=20 (base demand outside, "
                          "base*scale inside).")
+    ap.add_argument("--keyframe-stride", type=int, default=6,
+                    help="SUMO unified Blender build: fallback keyframe spacing "
+                         "for straight/steady trajectory runs (default 6 = 5 FPS at 30 FPS).")
+    ap.add_argument("--heading-threshold-deg", type=float, default=1.0,
+                    help="SUMO unified Blender build: keep extra keyframes when "
+                         "heading changes by more than this many degrees.")
+    ap.add_argument("--speed-threshold", type=float, default=0.8,
+                    help="SUMO unified Blender build: keep extra keyframes when "
+                         "speed changes by more than this many m/s.")
     ap.add_argument("--simulator", type=str, default=None,
                     choices=["legacy", "micro", "research", "sumo"],
                     help="simulation engine: 'legacy' (event-driven, default) "
@@ -912,14 +976,16 @@ def main():
             scn = step_sumo_scenario(args.seed, seconds, out_dir, fps=fps,
                                      demand_scale=args.demand_scale,
                                      demand_profile=args.demand_profile)
+            scn_blender = write_sumo_blender_scenario(scn, out_dir, args.only)
         else:
             scn = step_scenario(args.seed, seconds, out_dir, fps=fps,
                                 signal=args.signal, signal_mode=args.signal_mode,
                                 demand=args.demand, demand_scale=args.demand_scale,
                                 simulator=args.simulator)
+            scn_blender = scn
 
         print("\n[3/5] Plate pre-generation")
-        step_plates(scn, out_dir)
+        step_plates(scn_blender, out_dir)
 
         if phase == "cpu1":
             print("\n" + "=" * 60)
@@ -930,6 +996,11 @@ def main():
 
     # For gpu / cpu2 phases, scenario.json must already exist
     scn = os.path.join(out_dir, "scenario.json")
+    scn_blender = os.path.join(out_dir, "scenario_blender.json")
+    if sumo_unified and os.path.exists(scn_blender):
+        scn_render = scn_blender
+    else:
+        scn_render = scn
     if phase in ("gpu", "cpu2") and not os.path.exists(scn):
         raise SystemExit(
             f"FAIL: scenario.json not found at {scn}\n"
@@ -939,14 +1010,17 @@ def main():
     if phase in ("all", "gpu"):
         if sumo_unified:
             print("\n[4a/6] Build unified SUMO scene")
-            step_sumo_unified_build(scn, out_dir)
+            step_sumo_unified_build(scn_render, out_dir, args.only,
+                                    keyframe_stride=args.keyframe_stride,
+                                    heading_threshold_deg=args.heading_threshold_deg,
+                                    speed_threshold=args.speed_threshold)
 
             print("\n[4b/6] Render unified SUMO scene")
             n_jobs, _ = _detect_jobs(
                 len(camera_tags_from_only(args.only)), explicit=args.jobs,
                 max_workers_per_gpu=args.max_workers_per_gpu,
                 vram_budget=VRAM_PER_JOB_MIB * 2)
-            step_sumo_unified_render(scn, out_dir, n_jobs, args.samples, args.only)
+            step_sumo_unified_render(scn_render, out_dir, n_jobs, args.samples, args.only)
 
             if phase == "gpu":
                 print("\n" + "=" * 60)

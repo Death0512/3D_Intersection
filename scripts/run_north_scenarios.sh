@@ -6,6 +6,11 @@
 #
 # Example:
 #   bash scripts/run_north_scenarios.sh --out output/north_set --samples 24
+#
+# Defaults are tuned for a 300s North-only SUMO batch on a 16GB RAM / RTX 3060
+# container: only two cameras are rendered, Blender gets a filtered scenario,
+# and straight/steady vehicle tracks are keyframed every 10 frames unless a
+# heading/speed change needs extra detail.
 
 set -euo pipefail
 
@@ -15,6 +20,9 @@ SAMPLES=24
 SEED=42
 OUT_ROOT="output/north_scenarios"
 ONLY="in_N,out_N"
+KEYFRAME_STRIDE=10
+HEADING_THRESHOLD_DEG=1.5
+SPEED_THRESHOLD=1.0
 SKIP_ASSET_CHECK=0
 EXTRA_ARGS=()
 
@@ -31,6 +39,9 @@ while [[ $# -gt 0 ]]; do
     --seed) SEED="$2"; shift 2 ;;
     --out) OUT_ROOT="$2"; shift 2 ;;
     --only) ONLY="$2"; shift 2 ;;
+    --keyframe-stride) KEYFRAME_STRIDE="$2"; shift 2 ;;
+    --heading-threshold-deg) HEADING_THRESHOLD_DEG="$2"; shift 2 ;;
+    --speed-threshold) SPEED_THRESHOLD="$2"; shift 2 ;;
     --skip-asset-check) SKIP_ASSET_CHECK=1; shift ;;
     --jobs|--max-workers-per-gpu|--silence-timeout|--blender|--python)
       EXTRA_ARGS+=("$1" "$2"); shift 2 ;;
@@ -54,6 +65,9 @@ run_one() {
     --seed "$SEED"
     --demand-scale "$scale"
     --only "$ONLY"
+    --keyframe-stride "$KEYFRAME_STRIDE"
+    --heading-threshold-deg "$HEADING_THRESHOLD_DEG"
+    --speed-threshold "$SPEED_THRESHOLD"
     --out "$out_dir"
   )
   [[ "$SKIP_ASSET_CHECK" -eq 1 ]] && args+=(--skip-asset-check)
