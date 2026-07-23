@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.join(HERE, "lib"))
 
 import geometry as G
 
-BLENDER = shutil.which("blender") or "blender"
+BLENDER = (os.environ.get("DOAN_BLENDER") or os.environ.get("BLENDER")
+             or shutil.which("blender") or "/root/.local/bin/blender" or "blender")
 
 
 def _camera_tags(only: str | None) -> list[str]:
@@ -59,6 +60,51 @@ def _encode(frames_dir: str, video_path: str, fps: int) -> None:
         raise RuntimeError(f"ffmpeg failed for {video_path}:\n{tail}")
 
 
+def _video_valid(video_path: str, expected_fps: int,
+                 expected_frames: int, frame_tol: int = 1) -> bool:
+    """Return True if video exists and matches expected fps/frame count."""
+    if not os.path.isfile(video_path):
+        return False
+    try:
+        p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                            "-show_entries", "stream=nb_frames,r_frame_rate",
+                            "-of", "csv=p=0", video_path],
+                           capture_output=True, text=True, timeout=15)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    if p.returncode != 0 or not p.stdout.strip():
+        return False
+    parts = p.stdout.strip().split(",")
+    if len(parts) < 2:
+        return False
+    fps_str, frames_str = parts[0], parts[-1]
+    # parse rational fps e.g. "30/1" or "30000/1001"
+    try:
+        num, den = fps_str.split("/", 1)
+        actual_fps = float(int(num)) / float(int(den))
+    except (ValueError, ZeroDivisionError):
+        return False
+    try:
+        actual_frames = int(frames_str)
+    except ValueError:
+        return False
+    if abs(actual_fps - float(expected_fps)) > 0.51:
+        return False
+    if abs(actual_frames - expected_frames) > frame_tol:
+        return False
+    return True
+
+
+def _gpu_count() -> int:
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return 0
+    if out.returncode != 0:
+        return 1  # ponytail: driver loaded but query failed → assume 1
+    lines = [l for l in out.stdout.splitlines() if l.strip().startswith("GPU")]
+    return max(1, len(lines))
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene", required=True)
@@ -73,11 +119,21 @@ def main():
     fps = int(scenario.get("fps", 30) or 30)
     tags = _camera_tags(ns.only)
     os.makedirs(ns.out, exist_ok=True)
-    jobs = max(1, min(int(ns.jobs), len(tags)))
+    phys_gpus = _gpu_count()
+    jobs = max(1, min(int(ns.jobs), len(tags), phys_gpus if phys_gpus > 0 else 1))
+    print(f"[unified] requested --jobs={ns.jobs}, "
+          f"detected {phys_gpus} nvidia GPU{'s' if phys_gpus != 1 else ''}, "
+          f"effective jobs={jobs}", flush=True)
+    duration_frames = int(scenario.get("duration_frames", 0) or 0)
     for i, tag in enumerate(tags):
+        video = os.path.join(ns.out, f"video_{tag}.mp4")
+        if duration_frames > 0 and _video_valid(video, fps, duration_frames):
+            print(f"[unified:{tag}] SKIP: valid video exists ({duration_frames}f@{fps}fps)", flush=True)
+            frames = os.path.join(ns.out, f"frames_{tag}")
+            shutil.rmtree(frames, ignore_errors=True)
+            continue
         _run_render(ns.scene, ns.out, tag, i % jobs, ns.samples)
         frames = os.path.join(ns.out, f"frames_{tag}")
-        video = os.path.join(ns.out, f"video_{tag}.mp4")
         _encode(frames, video, fps)
         shutil.rmtree(frames, ignore_errors=True)
     print(f"[unified] rendered+encoded {len(tags)} camera(s)", flush=True)
