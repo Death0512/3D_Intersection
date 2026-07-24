@@ -32,11 +32,9 @@ ROOT = os.path.abspath(os.path.join(HERE, ".."))
 sys.path.insert(0, os.path.join(HERE, "lib"))
 
 import geometry as G
-import kinematics as K
 import envfile as ENV
 import traffic_signal as SG
 from gen_plate import random_plate
-import intersection_sim as IS
 import micro_sim as MS
 import research_sim as RS
 from sim.exporter import write_simulation_artifacts
@@ -282,7 +280,7 @@ def make_vehicle(vid: str, rng: random.Random,
         approach = rng.choice(list(G.Direction))
         turn = choose_legal_turn(lane, rng)
     speed_kmh = rng.uniform(*SPEED_KMH_RANGE)
-    speed_ms = K.speed_kmh_to_ms(speed_kmh)
+    speed_ms = speed_kmh / 3.6
     return {
         "id": vid,
         "class": cls,
@@ -298,91 +296,12 @@ def make_vehicle(vid: str, rng: random.Random,
     }
 
 
-def schedule_departures(vehicles: list, duration_frames: int, rng: random.Random,
-                        safety_gap: float = 2.0,
-                        approach_visible_length: float = 40.0) -> list:
-    """Assign a depart_frame to each vehicle so no two in the same
-    (approach, lane) overlap, either at departure OR by catch-up on the
-    approach segment. Uniform-random target per vehicle (legacy behaviour
-    — used when no ``DemandModel`` is provided).
-
-    Two checks per candidate frame against every existing vehicle in the lane:
-      * start-gap headway (min_headway_frames) — no overlap at the depart instant
-      * catch-up safety (catchup_safe) — a faster follower must not close to
-        within safety_gap of a slower leader before the leader enters the
-        Black Box. When a faster vehicle would catch a slower one, its
-        depart_frame is pushed later (speed variety preserved; only timing
-        shifts) until both checks pass.
-    Vehicles are placed in a random order; each is given the earliest feasible
-    frame >= a random target.
-    """
-    # group existing departures by (approach, lane)
-    lanes: dict = {}
-    order = list(range(len(vehicles)))
-    rng.shuffle(order)
-    for i in order:
-        v = vehicles[i]
-        key = (v["approach"], v["lane"])
-        target = rng.randint(0, max(1, duration_frames // 2))
-        # find earliest frame >= target with no conflict in this lane
-        existing = lanes.setdefault(key, [])
-        frame = target
-        step = 1
-        # bounded search
-        for _ in range(2000):
-            ok = True
-            for (ef, el, es) in existing:
-                # 1. start-gap headway (no overlap at the depart instant)
-                needed = K.min_headway_frames(max(v["length"], el),
-                                              max(v["speed_ms"], es), safety_gap)
-                if abs(frame - ef) < needed:
-                    ok = False
-                    break
-                # 2. catch-up on the approach segment — check BOTH orderings:
-                #    the LATER-departing vehicle is the potential follower that
-                #    could close the gap. A slower new vehicle placed BEFORE an
-                #    existing faster one would be rear-ended by it, so the check
-                #    must run in both directions (not only new-as-follower).
-                if frame >= ef:
-                    # new vehicle is the follower
-                    if not K.catchup_safe(ef, es, el, frame, v["speed_ms"],
-                                          approach_visible_length, safety_gap):
-                        ok = False
-                        break
-                else:
-                    # new vehicle is the leader; existing departs later
-                    if not K.catchup_safe(frame, v["speed_ms"], v["length"],
-                                          ef, es, approach_visible_length, safety_gap):
-                        ok = False
-                        break
-            if ok:
-                break
-            frame += step
-        else:
-            # C8: loop exhausted without finding a safe frame — the vehicle
-            # is placed at the last tried frame, which may overlap a prior.
-            # Warn so the user knows the scenario has a headway violation
-            # (dense demand on a short approach is the usual cause).
-            import sys as _sys
-            print(f"[WARN] schedule_departures: cap hit for V{i} "
-                  f"({v['approach']}/lane {v['lane']}, frame {frame}) — "
-                  f"vehicle may overlap prior in same lane",
-                  file=_sys.stderr, flush=True)
-        v["depart_frame"] = int(frame)
-        existing.append((frame, v["length"], v["speed_ms"]))
-    return vehicles
-
-
 def _enforce_lane_safety(vehicles: list, fps: int, safety_gap: float,
                          approach_visible_length: float, rng: random.Random):
     """Push-later-only feasibility pass ensuring no two vehicles in the same
-    (approach, lane) overlap at depart or by catch-up. Used by the Poisson
-    scheduler after raw arrivals are assigned so the headway / catch-up
-    invariants hold (same guarantees as ``schedule_departures``).
-
-    Vehicles are processed in depart_frame order within each lane; for each
-    vehicle the earliest safe frame >= its current frame is found by pushing it
-    later only.
+    (approach, lane) overlap at depart. Vehicles are processed in depart_frame
+    order within each lane; each vehicle is pushed to the earliest frame that
+    satisfies a minimum headway >= (max_length + safety_gap) / max_speed * fps.
     """
     lanes: dict = {}
     for v in vehicles:
@@ -395,28 +314,16 @@ def _enforce_lane_safety(vehicles: list, fps: int, safety_gap: float,
             for _ in range(4000):
                 ok = True
                 for (ef, el, es) in placed:
-                    needed = K.min_headway_frames(max(v["length"], el),
-                                                  max(v["speed_ms"], es), safety_gap)
+                    max_len = max(v["length"], el)
+                    max_spd = max(v["speed_ms"], es)
+                    needed = int(math.ceil((max_len + safety_gap) / max_spd * fps)) if max_spd > 0 else fps
                     if abs(frame - ef) < needed:
                         ok = False
                         break
-                    if frame >= ef:
-                        if not K.catchup_safe(ef, es, el, frame, v["speed_ms"],
-                                              approach_visible_length, safety_gap):
-                            ok = False
-                            break
-                    else:
-                        if not K.catchup_safe(frame, v["speed_ms"], v["length"],
-                                              ef, es, approach_visible_length, safety_gap):
-                            ok = False
-                            break
                 if ok:
                     break
                 frame += 1
             else:
-                # C8: 4000-iter cap exhausted — vehicle placed at last frame,
-                # may overlap. Warn per-vehicle so dense-demand scenarios
-                # surface the constraint violation.
                 import sys as _sys
                 print(f"[WARN] _enforce_lane_safety: cap hit for "
                       f"{v['id']} ({v['approach']}/lane {v['lane']}, "
@@ -518,7 +425,7 @@ def generate(seed: int, seconds: float,
              signal_plan: Optional[SG.SignalPlan] = None,
              demand: Optional[DemandModel] = None,
              signal_mode: str = "fixed",
-             simulator: str = "legacy") -> dict:
+             simulator: str = "micro") -> dict:
     """Generate a scenario and write ``scenario.json``.
 
     Vehicles are generated from a steady-state Poisson stream that starts
@@ -592,7 +499,7 @@ def generate(seed: int, seconds: float,
             jitter = rng.uniform(-5, 5)
             speed_kmh = max(50, min(80, base_speed[lane_key] + jitter))
             v["speed_kmh"] = round(speed_kmh, 2)
-            v["speed_ms"] = round(K.speed_kmh_to_ms(speed_kmh), 3)
+            v["speed_ms"] = round(speed_kmh / 3.6, 3)
             vehicles.append(v)
 
     # Sort by depart_frame, approach, id for reproducibility.
@@ -622,8 +529,10 @@ def generate(seed: int, seconds: float,
         if simulator == "micro":
             return MS.simulate(veh_list, approach_len, fps,
                                signal_plan=signal_plan, seed=seed)
-        return IS.simulate(veh_list, approach_len, fps,
-                           signal_plan=signal_plan, seed=seed)
+        raise SystemExit(
+            f"ERROR: simulator '{simulator}' is not supported. "
+            f"Use 'micro', 'research', or 'sumo' (via run_sumo_unified.py)."
+        )
 
     vehicles, sim_meta = _run_sim(vehicles)
     sim_arrivals = sim_meta.get("arrival_events", {})
@@ -762,7 +671,7 @@ def main():
                     choices=["v2"],
                     help="scheduler version: only v2 (event-driven) "
                          "supported (default: %(default)s)")
-    ap.add_argument("--simulator", type=str, default="legacy",
+    ap.add_argument("--simulator", type=str, default="micro",
                     choices=["legacy", "micro", "research"],
                     help="simulation engine: 'legacy' (event-driven queue, "
                          "default), 'micro' (IDM prototype), or 'research' "

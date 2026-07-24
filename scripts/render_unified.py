@@ -29,12 +29,15 @@ def _camera_tags(only: str | None) -> list[str]:
     return tags
 
 
-def _run_render(scene, out_dir, tag, gpu_id, samples):
+def _run_render(scene, scenario, out_dir, tag, gpu_id, samples, frame_reuse=True):
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     env["PYTHONUNBUFFERED"] = "1"
     cmd = [BLENDER, "-b", "--python", os.path.join(HERE, "render_unified_camera.py"), "--",
-           "--scene", scene, "--camera", tag, "--out", out_dir, "--samples", str(samples)]
+           "--scene", scene, "--camera", tag, "--out", out_dir,
+           "--samples", str(samples), "--scenario", scenario]
+    if not frame_reuse:
+        cmd.append("--no-frame-reuse")
     print(f"[unified:{tag}] $ {' '.join(cmd)} (GPU {gpu_id})", flush=True)
     proc = subprocess.Popen(cmd, cwd=ROOT, env=env, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
@@ -113,6 +116,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--samples", type=int, default=48)
     ap.add_argument("--only", default=None)
+    ap.add_argument("--no-frame-reuse", action="store_true",
+                    help="render every frame instead of copying unchanged frames")
     ns = ap.parse_args()
     with open(ns.scenario) as f:
         scenario = json.load(f)
@@ -132,7 +137,8 @@ def main():
             frames = os.path.join(ns.out, f"frames_{tag}")
             shutil.rmtree(frames, ignore_errors=True)
             continue
-        _run_render(ns.scene, ns.out, tag, i % jobs, ns.samples)
+        _run_render(ns.scene, ns.scenario, ns.out, tag, i % jobs, ns.samples,
+                    frame_reuse=not ns.no_frame_reuse)
         frames = os.path.join(ns.out, f"frames_{tag}")
         _encode(frames, video, fps)
         shutil.rmtree(frames, ignore_errors=True)

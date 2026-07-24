@@ -289,19 +289,112 @@ def write_config(sumo_dir: str, step_length: float, seconds: float) -> str:
 
 
 def _sumo_angle_to_blender_rot_z(angle_deg: float) -> float:
-    # SUMO angle: 0=north/+Y, 90=east/+X, clockwise.  Blender vehicle assets in
-    # this project use +Y-forward before any model forward_offset correction, so
-    # rotation about Z is the same numeric heading measured clockwise from +Y:
-    # rot_z = atan2(dx, dy) = radians(angle_deg) for cardinal directions.
-    return math.radians(float(angle_deg))
+    # SUMO angle: 0=north/+Y, 90=east/+X, clockwise. Blender positive Z rotation
+    # maps local +Y to world (-sin(z), cos(z)), so clockwise SUMO headings need a
+    # negative Blender Z angle. ponytail: one convention shared with geometry.py.
+    return -math.radians(float(angle_deg))
+
+
+def _unwrap_angle(prev: float | None, current: float) -> float:
+    if prev is None:
+        return current
+    while current - prev > math.pi:
+        current -= 2.0 * math.pi
+    while current - prev < -math.pi:
+        current += 2.0 * math.pi
+    return current
+
+
+def _motion_delta_to_blender_rot_z(dx: float, dy: float) -> float:
+    """Blender Z rotation that points a local +Y vehicle nose along ``(dx, dy)``.
+
+    Blender positive Z rotation maps local +Y to world ``(-sin(z), cos(z))``.
+    Solving that for a world movement vector gives ``atan2(-dx, dy)``.
+    """
+    return math.atan2(-float(dx), float(dy))
+
+
+def _apply_motion_derived_rot_z(points: List[dict], epsilon: float = 0.01) -> None:
+    """Replace visual ``rot_z`` in-place using trajectory deltas.
+
+    SUMO ``heading_deg`` is preserved as raw/debug data, but it can lag the actual
+    corrected XY motion on internal junction edges.  The rendered vehicle should
+    visually face the path it follows, so derive yaw from adjacent position deltas.
+    Stationary samples inherit the nearest moving yaw; all-stationary trajectories
+    keep their existing heading-derived fallback.  The final sequence is unwrapped
+    to avoid 0/360 spin jumps in Blender interpolation.
+    """
+    if not points:
+        return
+    eps2 = float(epsilon) * float(epsilon)
+    yaws: List[float | None] = [None] * len(points)
+    for i in range(len(points) - 1):
+        dx = float(points[i + 1]["x"]) - float(points[i]["x"])
+        dy = float(points[i + 1]["y"]) - float(points[i]["y"])
+        if dx * dx + dy * dy >= eps2:
+            yaws[i] = _motion_delta_to_blender_rot_z(dx, dy)
+
+    # Carry yaw through stationary runs after movement.
+    last: float | None = None
+    for i, yaw in enumerate(yaws):
+        if yaw is None:
+            if last is not None:
+                yaws[i] = last
+        else:
+            last = yaw
+
+    # Fill leading stationary samples from the first later moving yaw.
+    nxt: float | None = None
+    for i in range(len(yaws) - 1, -1, -1):
+        if yaws[i] is None:
+            if nxt is not None:
+                yaws[i] = nxt
+        else:
+            nxt = yaws[i]
+
+    # All-stationary fallback: retain the existing SUMO-heading-derived rot_z.
+    prev: float | None = None
+    for i, point in enumerate(points):
+        yaw = yaws[i]
+        if yaw is None:
+            yaw = float(point.get("rot_z", _sumo_angle_to_blender_rot_z(point.get("heading_deg", 0.0))))
+        yaw = _unwrap_angle(prev, yaw)
+        point["rot_z"] = round(yaw, 8)
+        prev = yaw
+
+
+def _read_net_offset(net_xml: str) -> Tuple[float, float]:
+    """Parse netOffset from net.xml so we can shift SUMO world → Blender world.
+    netconvert shifts all node coordinates so the network fits in positive space;
+    we subtract that offset to re-centre the intersection at (0, 0)."""
+    tree = ET.parse(net_xml)
+    loc = tree.getroot().find("location")
+    if loc is None:
+        return (0.0, 0.0)
+    raw = loc.get("netOffset", "0,0")
+    ox, oy = raw.split(",")
+    return (float(ox), float(oy))
 
 
 def run_traci(cfg: str, fps: int, duration_frames: int,
-              vehicles_meta: Dict[str, dict]) -> Dict[str, List[dict]]:
+              vehicles_meta: Dict[str, dict],
+              net_offset: Tuple[float, float] = (0.0, 0.0)) -> Dict[str, List[dict]]:
     try:
         import traci  # type: ignore
-    except ImportError as e:
-        raise SystemExit("FAIL: Python package 'traci' not importable. Run: python3 -m pip install traci") from e
+    except ImportError:
+        # SUMO from distro packages often ships TraCI under SUMO_HOME/tools or
+        # /usr/share/sumo/tools instead of installing a pip package. ponytail:
+        for tools_dir in (os.path.join(os.environ.get("SUMO_HOME", ""), "tools"),
+                          "/usr/share/sumo/tools"):
+            if tools_dir and os.path.isdir(tools_dir) and tools_dir not in sys.path:
+                sys.path.insert(0, tools_dir)
+        try:
+            import traci  # type: ignore
+        except ImportError as e:
+            raise SystemExit(
+                "FAIL: Python package 'traci' not importable. "
+                "Install python3-traci/pip traci or set SUMO_HOME so SUMO_HOME/tools is importable."
+            ) from e
 
     sumo = shutil.which("sumo")
     if not sumo:
@@ -309,23 +402,27 @@ def run_traci(cfg: str, fps: int, duration_frames: int,
     traci.start([sumo, "-c", cfg, "--step-length", f"{1.0 / fps:.8f}",
                  "--no-step-log", "true"])
     trajectories: Dict[str, List[dict]] = defaultdict(list)
+    last_heading_rot_z: Dict[str, float] = {}
     try:
         for frame in range(duration_frames):
             traci.simulationStep()
             for vid in traci.vehicle.getIDList():
                 pos = traci.vehicle.getPosition(vid)
-                x, y = float(pos[0]), float(pos[1])
+                # Shift SUMO world coords → Blender world (intersection centre = 0,0)
+                x, y = float(pos[0]) - net_offset[0], float(pos[1]) - net_offset[1]
                 angle = float(traci.vehicle.getAngle(vid))
                 speed = float(traci.vehicle.getSpeed(vid))
                 accel = float(traci.vehicle.getAcceleration(vid))
                 lane_id = traci.vehicle.getLaneID(vid)
                 edge_id = traci.vehicle.getRoadID(vid)
+                heading_rot_z = _unwrap_angle(last_heading_rot_z.get(vid), _sumo_angle_to_blender_rot_z(angle))
+                last_heading_rot_z[vid] = heading_rot_z
                 pt = {
                     "frame": frame,
                     "time": round(frame / float(fps), 6),
                     "x": round(x, 4), "y": round(y, 4), "z": 0.0,
                     "heading_deg": round(angle, 4),
-                    "rot_z": round(_sumo_angle_to_blender_rot_z(angle), 8),
+                    "rot_z": round(heading_rot_z, 8),
                     "speed": round(speed, 4),
                     "accel": round(accel, 4),
                     "lane_id": lane_id, "edge_id": edge_id,
@@ -336,6 +433,8 @@ def run_traci(cfg: str, fps: int, duration_frames: int,
                     meta["speed_ms"] = max(float(meta.get("speed_ms", 0.0)), speed)
                     if meta.get("depart_frame") is None:
                         meta["depart_frame"] = frame
+        for pts in trajectories.values():
+            _apply_motion_derived_rot_z(pts)
         return trajectories
     finally:
         traci.close(False)
@@ -375,7 +474,9 @@ def main(argv=None) -> int:
     step = 1.0 / fps
 
     print(f"[sumo] writing network/routes in {sumo_dir}", flush=True)
-    write_sumo_network(sumo_dir)
+    net_xml = write_sumo_network(sumo_dir)
+    net_offset = _read_net_offset(net_xml)
+    print(f"[sumo] netOffset={net_offset} (will be subtracted from all coordinates)", flush=True)
     flow_vph = _flow_dict(ns)
     routes_path, vehicles_meta = write_routes(sumo_dir, rng, ns.seconds, flow_vph,
                                               demand_profile=ns.demand_profile)
@@ -383,7 +484,7 @@ def main(argv=None) -> int:
 
     print(f"[sumo] running TraCI at {fps} FPS for {duration_frames} frames "
           f"({len(vehicles_meta)} scheduled vehicles)", flush=True)
-    trajectories = run_traci(cfg, fps, duration_frames, vehicles_meta)
+    trajectories = run_traci(cfg, fps, duration_frames, vehicles_meta, net_offset)
 
     vehicles = []
     for vid, pts in sorted(trajectories.items(), key=lambda kv: (kv[1][0]["frame"], kv[0])):
@@ -416,7 +517,8 @@ def main(argv=None) -> int:
         "seed": ns.seed,
         "flow_vph": flow_vph,
         "demand_profile": ns.demand_profile,
-        "coordinate_system": "SUMO world copied to Blender XY; +X east, +Y north, Z up",
+        "coordinate_system": "Blender world; intersection centre at (0,0,0); +X east, +Y north, Z up. SUMO netOffset subtracted.",
+        "net_offset": list(net_offset),
         "sumo": {
             "dir": os.path.relpath(sumo_dir, out_dir),
             "routes": os.path.relpath(routes_path, out_dir),

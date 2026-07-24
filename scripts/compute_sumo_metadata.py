@@ -41,23 +41,47 @@ def main():
     with open(os.path.join(ROOT, "assets", "road.json")) as f:
         road_meta = json.load(f)
     for tag in G.camera_names():
-        cameras[tag] = ENV.resolve_camera(ENV.load_env(tag, ROOT), road_meta)
+        cameras[tag] = ENV.resolve_camera(ENV.load_env(tag, ROOT), road_meta, unified=True)
+    def _camera_for_edge(edge_id: str | None) -> str | None:
+        """Map SUMO edge id to camera name. Internal junction edges start with ':'. ponytail:"""
+        if not edge_id or edge_id.startswith(":"):
+            return None
+        # edge_id format: "N_in" or "N_out"
+        parts = edge_id.rsplit("_", 1)
+        if len(parts) == 2 and parts[1] in ("in", "out"):
+            d, role = parts
+            cam = f"{'in' if role == 'in' else 'out'}_{d}"
+            if cam in cameras:
+                return cam
+        return None
+
     vehicles = []
     for v in scenario.get("vehicles", []):
         pts = v.get("trajectory") or []
         frames = [{
             "frame": int(p["frame"]),
             "visible": True,
-            "camera": None,
+            "camera": _camera_for_edge(p.get("edge_id")),
             "pose": {"x": p["x"], "y": p["y"], "z": p.get("z", 0.0), "rot_z": p.get("rot_z", 0.0)},
             "speed": p.get("speed", 0.0),
             "lane_id": p.get("lane_id"),
             "edge_id": p.get("edge_id"),
         } for p in pts]
+        approach = v.get("approach")
+        turn = v.get("turn")
+        ex_cam = None
+        if approach and turn:
+            try:
+                ex_dir, _ = G.exit_lane_for_movement(G.Direction(approach), v.get("lane", 0), G.Turn(turn))
+                ex_cam = f"out_{ex_dir.value}"
+            except Exception:
+                pass
         vehicles.append({
             "id": v.get("id"), "class": v.get("class", "car"),
             "plate": v.get("plate"), "color": v.get("color"),
-            "approach": v.get("approach"), "lane": v.get("lane"), "turn": v.get("turn"),
+            "approach": approach, "lane": v.get("lane"), "turn": turn,
+            "in_camera": f"in_{approach}" if approach else None,
+            "out_camera": ex_cam,
             "speed_ms": v.get("speed_ms", 0.0),
             "appear_frame": v.get("appear_frame", pts[0]["frame"] if pts else 0),
             "disappear_frame": v.get("disappear_frame", pts[-1]["frame"] if pts else 0),

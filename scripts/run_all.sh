@@ -52,8 +52,7 @@
 #   --speed-threshold F
 #                       SUMO unified only: keep extra keyframes when speed
 #                       changes more than F m/s (default: 0.8).
-#   --simulator MODE     Simulation engine: 'legacy' (default), 'micro' (IDM
-#                        prototype), or 'research' (formal state-based kernel).
+#   --simulator MODE     Simulation engine: 'sumo' unified pipeline (default).
 #   --blender PATH      Path to blender binary (default: auto-detect)
 #   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
 #   -h, --help          Show this help
@@ -84,7 +83,7 @@ JOBS=0   # 0 = auto-detect from free VRAM
 MAX_WORKERS_PER_GPU=2   # one Blender worker per physical GPU
 SILENCE_TIMEOUT=0   # 0 = use run_pipeline.py default (600s)
 SAMPLES=0           # 0 = use build_scene default (48)
-SIMULATOR="research"        # "" = legacy; "micro" = IDM car-following
+SIMULATOR="sumo"
 NORTH_SCENARIOS=0
 KEYFRAME_STRIDE=""
 HEADING_THRESHOLD_DEG=""

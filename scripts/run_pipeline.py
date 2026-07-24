@@ -402,426 +402,6 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     return jobs, assignment
 
 
-# ---------------------------------------------------------------------------
-# Render workers + watchdog
-# ---------------------------------------------------------------------------
-
-# Default silence timeout: if a Blender worker produces no stdout for this
-# many seconds, the pipeline is assumed hung (Cycles stuck on a black frame,
-# GPU init deadlock, driver timeout, NVENC init hang) and is aborted with
-# diagnostics. Tunable via --silence-timeout.
-DEFAULT_SILENCE_TIMEOUT_S = 600  # 10 min
-
-
-def _camera_worker(args, watchdog_state=None, samples=None, mode="render",
-                   skip_encode=False):
-    """Run one Blender worker for a single camera. Blocks.
-
-    ``args`` is (scenario_path, out_dir, tag, gpu_id).  ``gpu_id`` is the
-    NVIDIA GPU index this worker should bind to via CUDA_VISIBLE_DEVICES,
-    so multi-GPU hosts run one Blender per physical GPU for render mode.
-
-    ``mode`` is either ``"build"`` (create cached scene_<tag>.blend) or
-    ``"render"`` (render from that cached scene). Splitting these phases keeps
-    each camera's scene isolated while avoiding repeated build work during the
-    GPU-bound render stage.
-
-    ``skip_encode`` (render mode only): when True, the Blender worker writes
-    JPEG frames only and exits without calling ffmpeg.  The encode step is then
-    handled by ``step_encode_all`` with a semaphore so at most
-    ``MAX_NVENC_CONCURRENT`` ffmpeg NVENC sessions run simultaneously — avoiding
-    NVENC driver contention when multiple workers finish their Cycles render at
-    the same time.
-
-    ``samples`` (optional int) threads the --samples flag through to render.py
-    so Cycles uses the user's sample count (lower = faster, noisier).
-
-    Output is streamed in real-time (prefixed by [tag]) so the user can see
-    progress during long renders.  Returns (camera_tag, success, wall_s).
-    Metadata is deferred to a separate pass.
-
-    ``watchdog_state`` is an optional shared-dict slot used by the watchdog
-    in ``step_render_parallel`` to detect silent workers: this function updates
-    ``watchdog_state['last_output_time']`` and ``watchdog_state['last_line']``
-    on every received stdout line, so a separate thread can detect "no output
-    for N seconds" and abort the whole pool (hard-kill policy chosen by user).
-    """
-    import sys as _sys
-
-    scenario_path, out_dir, tag, gpu_id = args
-    cmd = [
-        BLENDER, "-b", "--python", os.path.join(HERE, "render.py"), "--",
-        "--scenario", scenario_path, "--out", out_dir,
-        "--only", tag, "--no-metadata",
-    ]
-    if mode == "build":
-        cmd.append("--build-only")
-    elif mode == "render":
-        cmd.append("--render-only")
-    else:
-        raise ValueError(f"unknown camera worker mode: {mode}")
-    if samples is not None:
-        cmd += ["--samples", str(samples)]
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    # Force Python-level stdout unbuffered in the Blender child so every
-    # `print(..., flush=True)` from render.py / build_scene.py reaches the
-    # OS pipe immediately. Without this, the 8-hour silent-hang scenario
-    # (block-buffered stdout under non-TTY) reappears.
-    env["PYTHONUNBUFFERED"] = "1"
-    if skip_encode and mode == "render":
-        # Signal the child to leave JPEG frames on disk; the pipeline encodes
-        # in a dedicated step with NVENC semaphore.
-        env["RENDER_SKIP_ENCODE"] = "1"
-    tag_label = f"[{mode}:{tag}]"
-    gpu_note = f"GPU {gpu_id}" if mode == "render" else "build"
-    print(f"\n{tag_label} $ {' '.join(cmd)}  ({gpu_note})", flush=True)
-    t0 = time.time()
-    ok = True
-    # Stream output in real-time so long renders show progress.
-    with subprocess.Popen(
-        cmd, cwd=ROOT, text=True, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        bufsize=1,
-    ) as proc:
-        if watchdog_state is not None:
-            watchdog_state["proc"] = proc
-            watchdog_state["last_output_time"] = time.time()
-            watchdog_state["last_line"] = ""
-            watchdog_state["started_at"] = t0
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if line:
-                # Suppress noisy warnings and frame save messages
-                if "HIPEW initialization failed" in line or "Saved:" in line:
-                    continue
-                _sys.stdout.write(f"  {tag_label} {line}\n")
-                _sys.stdout.flush()
-                if watchdog_state is not None:
-                    watchdog_state["last_output_time"] = time.time()
-                    watchdog_state["last_line"] = line
-        proc.wait()
-        dt = time.time() - t0
-        ok = proc.returncode == 0
-    status = "OK" if ok else "FAILED"
-    print(f"{tag_label} {status} ({dt:.1f}s)", flush=True)
-    if watchdog_state is not None:
-        watchdog_state["done"] = True
-    return tag, ok, dt
-
-
-def _render_worker(args, watchdog_state=None, samples=None, skip_encode=False):
-    return _camera_worker(args, watchdog_state=watchdog_state,
-                          samples=samples, mode="render",
-                          skip_encode=skip_encode)
-
-
-def _build_worker(args, watchdog_state=None, samples=None):
-    return _camera_worker(args, watchdog_state=watchdog_state,
-                          samples=samples, mode="build")
-
-
-def _watchdog(workers_state, silence_timeout_s, stop_event):
-    """Background thread that aborts the pool if any worker goes silent.
-
-    ``workers_state`` is a dict tag → state-dict (with keys: last_output_time,
-    last_line, started_at, proc, optional 'done').  If any *non-done* worker's
-    ``time.time() - last_output_time`` exceeds ``silence_timeout_s``, the
-    watchdog kills ALL worker procs and signals the main thread via
-    ``stop_event``, which causes ``step_render_parallel`` to raise SystemExit
-    with a diagnostic banner (hard-kill policy per user choice).
-
-    Also times out workers whose TOTAL wall time exceeds 6× the silence
-    timeout (catches the case where a worker emits periodic short lines but
-    takes punitively long).
-    """
-    while not stop_event.is_set():
-        now = time.time()
-        for tag, st in workers_state.items():
-            if st.get("done"):
-                continue
-            last_t = st.get("last_output_time", st.get("started_at", now))
-            silent_for = now - last_t
-            if silent_for > silence_timeout_s:
-                # Hard-kill whole pool. Kill every live proc.
-                for _, st2 in workers_state.items():
-                    p = st2.get("proc")
-                    if p and p.poll() is None:
-                        try:
-                            p.terminate()
-                        except Exception:
-                            pass
-                # Give procs 5s to terminate, then SIGKILL.
-                time.sleep(5)
-                for _, st2 in workers_state.items():
-                    p = st2.get("proc")
-                    if p and p.poll() is None:
-                        try:
-                            p.kill()
-                        except Exception:
-                            pass
-                stop_event.set()
-                print("\n" + "=" * 70, file=sys.stderr, flush=True)
-                print(f"PIPELINE ABORTED — worker [{tag}] silent for "
-                      f"{silent_for:.0f}s (> {silence_timeout_s}s timeout)",
-                      file=sys.stderr, flush=True)
-                for t, s in workers_state.items():
-                    last = s.get("last_line", "")[:80]
-                    print(f"  [{t}] last: {last!r}", file=sys.stderr, flush=True)
-                print("=" * 70, file=sys.stderr, flush=True)
-                return
-        time.sleep(5)
-
-
-def step_encode_all(out_dir, camera_tags, scenario_path, fps=None):
-    """Encode all cameras' JPEG frame directories to MP4 with an NVENC semaphore.
-
-    Called after step_render_parallel when ``skip_encode=True`` — at that
-    point each camera has a ``frames_<tag>/`` directory on disk with all JPEGs
-    rendered.  This step encodes them one-at-a-time up to MAX_NVENC_CONCURRENT
-    at once using a threading.Semaphore to avoid saturating the NVENC encoder.
-
-    Consumer NVIDIA GPUs allow at most 3 concurrent NVENC sessions; keeping
-    sessions ≤ MAX_NVENC_CONCURRENT prevents the driver-level stall that occurs
-    when multiple ffmpeg processes compete for the same encoder chip.
-    """
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import json as _json
-
-    # Reuse render.py's ffmpeg helper — it already has the correct
-    # "-start_number 0" flag (scene.frame_start = 0) and the NVENC
-    # availability probe with proper diagnostics; duplicating that command
-    # here previously dropped frame 0 and skipped the NVENC probe.
-    sys.path.insert(0, HERE)
-    import render as _render
-
-    # Derive FPS from scenario.json if not provided.
-    if fps is None:
-        try:
-            with open(scenario_path) as f:
-                fps = _json.load(f).get("fps", 30)
-        except Exception:
-            fps = 30
-
-    sema = threading.Semaphore(MAX_NVENC_CONCURRENT)
-
-    def _encode_one(tag):
-        frames_dir = os.path.join(out_dir, f"frames_{tag}")
-        video_path = os.path.join(out_dir, f"video_{tag}.mp4")
-        if not os.path.isdir(frames_dir):
-            print(f"  [encode:{tag}] SKIP — frames dir not found: {frames_dir}",
-                  flush=True)
-            return tag, False
-        with sema:
-            print(f"  [encode:{tag}] encoding {frames_dir} → {video_path}",
-                  flush=True)
-            t0 = time.time()
-            ok = _render._ffmpeg_encode(frames_dir, video_path, fps)
-            dt = time.time() - t0
-            if ok:
-                print(f"  [encode:{tag}] OK ({dt:.1f}s)", flush=True)
-                try:
-                    shutil.rmtree(frames_dir)
-                except Exception as e:
-                    print(f"  [encode:{tag}] [WARN] rmtree failed: {e}",
-                          flush=True)
-                return tag, True
-            else:
-                print(f"  [encode:{tag}] FAILED after {dt:.1f}s "
-                      f"(see ffmpeg diagnostics above)", flush=True)
-                return tag, False
-
-    results = {}
-    with ThreadPoolExecutor(max_workers=MAX_NVENC_CONCURRENT) as pool:
-        futs = {pool.submit(_encode_one, tag): tag for tag in camera_tags}
-        for fut in as_completed(futs):
-            tag, ok = fut.result()
-            results[tag] = ok
-
-    failed = [t for t, ok in results.items() if not ok]
-    if failed:
-        raise SystemExit(
-            f"PIPELINE ABORTED — encode failed for: {', '.join(failed)}. "
-            f"JPEG frames preserved in {out_dir}/frames_* for manual recovery.")
-    print(f"  [encode] all {len(camera_tags)} camera(s) encoded OK", flush=True)
-
-
-def step_render_parallel(scenario_path, out_dir, jobs=2, gpu_assignment=None,
-                         only=None, silence_timeout_s=DEFAULT_SILENCE_TIMEOUT_S,
-                         samples=None, skip_encode=False, camera_tags=None):
-    """Render all 8 (or ``only``, or explicit ``camera_tags``) cameras. If
-    ``gpu_assignment`` is set, each worker binds to a different GPU via
-    CUDA_VISIBLE_DEVICES (round-robins when there are more cameras than
-    GPUs). Otherwise all workers share GPU 0.
-
-    ``samples`` threads --samples through to render.py (None = use the
-    build_scene default of 48).
-
-    ``skip_encode`` defers ffmpeg encoding out of the Blender workers so the
-    pipeline can control NVENC concurrency via a semaphore (see
-    ``step_encode_all``).  Workers write JPEG frames to ``frames_<tag>/`` and
-    exit; the caller then runs ``step_encode_all`` after all workers finish.
-
-    ``camera_tags`` overrides the camera set entirely (used by the GPU-error
-    retry path to re-render only the cameras that failed in the first pass,
-    instead of re-rendering all 8).
-
-    A background watchdog kills the entire pool (hard-kill policy) if any
-    worker is silent for ``silence_timeout_s`` seconds — converts a
-    multi-hour silent hang into a fast, diagnosable abort.
-    """
-    if camera_tags is None:
-        camera_tags = camera_tags_from_only(only)
-
-    def _worker_with_skip(args, watchdog_state=None, samples=None):
-        return _render_worker(args, watchdog_state=watchdog_state,
-                              samples=samples, skip_encode=skip_encode)
-
-    _step_camera_phase(
-        "render", _worker_with_skip, scenario_path, out_dir, camera_tags,
-        jobs=jobs, gpu_assignment=gpu_assignment,
-        silence_timeout_s=silence_timeout_s, samples=samples)
-
-
-def step_build_scenes_parallel(scenario_path, out_dir, only=None,
-                               silence_timeout_s=DEFAULT_SILENCE_TIMEOUT_S):
-    """Build cached per-camera .blend scenes before GPU rendering.
-
-    These are still isolated one-scene-per-camera builds, preserving the current
-    data integrity model. The split lets the later render phase open an already
-    built .blend and focus on GPU rendering/encoding.
-    """
-    camera_tags = camera_tags_from_only(only)
-    # Build processes are CPU/startup bound. Cap at camera count; GPU assignment
-    # is irrelevant, but keep a stable zero for the worker environment.
-    _step_camera_phase(
-        "build", _build_worker, scenario_path, out_dir, camera_tags,
-        jobs=min(len(camera_tags), MAX_BUILD_WORKERS),
-        gpu_assignment=[0] * max(1, min(len(camera_tags), MAX_BUILD_WORKERS)),
-        silence_timeout_s=silence_timeout_s, samples=None)
-
-
-def _step_camera_phase(phase, worker, scenario_path, out_dir, camera_tags,
-                       jobs=2, gpu_assignment=None,
-                       silence_timeout_s=DEFAULT_SILENCE_TIMEOUT_S,
-                       samples=None):
-    """Shared executor for per-camera build/render phases."""
-    n_cams = len(camera_tags)
-
-    # D12: short-circuit BEFORE building the parallel banner, so a single-
-    # camera render doesn't print a misleading "N parallel workers" line.
-    if jobs <= 1 or n_cams == 1:
-        print(f"[{phase}] serial/single-camera phase — 1 worker")
-        results = {}
-        for tag in camera_tags:
-            args = (scenario_path, out_dir, tag,
-                    gpu_assignment[0] if gpu_assignment else 0)
-            tag_r, ok, dt = worker(args, samples=samples)
-            results[tag_r] = (ok, dt)
-        _print_phase_summary(phase, results, camera_tags)
-        failed = sum(1 for ok, _ in results.values() if not ok)
-        if failed:
-            raise SystemExit(
-                f"PIPELINE ABORTED — {failed} {phase} worker(s) failed. "
-                f"Partial renders may exist in {out_dir}.")
-        return
-
-    n_gpus = len(gpu_assignment) if gpu_assignment else 0
-    # gpu_assignment is the exact per-worker GPU id list (length == jobs);
-    # pair each camera tag with its GPU id in order. If we have more cameras
-    # than assignments, fall back to GPU 0 for the overflow.
-    tasks = [(scenario_path, out_dir, tag,
-              gpu_assignment[i % n_gpus] if n_gpus else 0)
-             for i, tag in enumerate(camera_tags)]
-    results = {}
-
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import threading
-
-    # Shared watchdog state: tag → mutable dict of progress markers.
-    workers_state = {tag: {} for tag in camera_tags}
-    stop_event = threading.Event()
-    wd = threading.Thread(
-        target=_watchdog,
-        args=(workers_state, silence_timeout_s, stop_event),
-        daemon=True,
-        name="render-watchdog",
-    )
-    wd.start()
-    aborted = False
-    try:
-        with ThreadPoolExecutor(max_workers=jobs) as pool:
-            futs = {}
-            for i, t in enumerate(tasks):
-                tag = t[2]
-                # Pass the per-tag watchdog slot so the worker updates it.
-                futs[pool.submit(worker, t, workers_state[tag], samples)] = i
-            try:
-                for fut in as_completed(futs, timeout=None):
-                    if stop_event.is_set():
-                        aborted = True
-                        break
-                    try:
-                        tag, ok, dt = fut.result(timeout=5)
-                        results[tag] = (ok, dt)
-                    except Exception:
-                        # Worker raised (e.g. proc killed by watchdog). Mark
-                        # the corresponding tag FAILED; don't abort the pool
-                        # mid-collection (the watchdog already decided).
-                        i = futs[fut]
-                        tag = tasks[i][2]
-                        results[tag] = (False, 0.0)
-            except Exception:
-                aborted = True
-    finally:
-        stop_event.set()
-        wd.join(timeout=2)
-
-    if aborted:
-        # Any worker not yet recorded as a result is presumed killed.
-        for tag in camera_tags:
-            if tag not in results:
-                results[tag] = (False, 0.0)
-        _print_phase_summary(phase, results, camera_tags)
-        raise SystemExit(
-            f"PIPELINE ABORTED — {phase} watchdog killed the pool (see stderr "
-            f"above for which worker went silent and its last line). "
-            f"Partial renders may exist in {out_dir}.")
-    _print_phase_summary(phase, results, camera_tags)
-    failed = sum(1 for ok, _ in results.values() if not ok)
-    if failed:
-        raise SystemExit(
-            f"PIPELINE ABORTED — {failed} {phase} worker(s) failed. "
-            f"Partial renders may exist in {out_dir}.")
-
-
-def _print_phase_summary(phase, results, camera_tags):
-    print()
-    print(f"  {phase.title()} summary ({len(results)}/{len(camera_tags)} cameras):")
-    for tag in camera_tags:
-        ok, dt = results.get(tag, (False, 0))
-        print(f"    {tag:6s} {'OK' if ok else 'FAILED'}  ({dt:.1f}s)")
-    failed = sum(1 for ok, _ in results.values() if not ok)
-    if failed:
-        print(f"  {failed} camera(s) FAILED — pipeline will abort")
-
-
-def step_metadata(scenario_path, out_dir, only=None, expected_videos=False):
-    """Generate metadata.json. FATAL — the whole point of the run is the
-    metadata ground-truth; a silent partial write here wastes all the render
-    compute. Bounded to 600s (pure-Python per-frame pose loop, bounded by
-    vehicles × visible frames)."""
-    cmd = [PYTHON, os.path.join(HERE, "render.py"), "--",
-           "--scenario", scenario_path, "--out", out_dir,
-           "--metadata-only"]
-    if only:
-        cmd += ["--only", only]
-    if expected_videos:
-        cmd.append("--metadata-expected-videos")
-    run(cmd, check=True, timeout=600)
-
-
 def step_sumo_unified_build(scenario_path, out_dir, only=None,
                             keyframe_stride=6,
                             heading_threshold_deg=1.0,
@@ -884,11 +464,6 @@ def main():
                     help=f"cap on Blender render workers per GPU regardless of "
                          f"free VRAM (default {MAX_WORKERS_PER_GPU}). One worker "
                          f"per GPU avoids VRAM/context contention.")
-    ap.add_argument("--silence-timeout", type=int,
-                    default=DEFAULT_SILENCE_TIMEOUT_S,
-                    help=f"seconds a render worker may go silent before the "
-                         f"watchdog kills the whole pool (default "
-                         f"{DEFAULT_SILENCE_TIMEOUT_S})")
     ap.add_argument("--samples", type=int, default=48,
                     help="Cycles render samples per frame (default 48; lower "
                          "= faster, noisier — denoiser compensates. Use 16-24 "
@@ -926,12 +501,9 @@ def main():
     ap.add_argument("--speed-threshold", type=float, default=0.8,
                     help="SUMO unified Blender build: keep extra keyframes when "
                          "speed changes by more than this many m/s.")
-    ap.add_argument("--simulator", type=str, default=None,
-                    choices=["legacy", "micro", "research", "sumo"],
-                    help="simulation engine: 'legacy' (event-driven, default) "
-                         "'micro' (IDM prototype), 'research' "
-                         "(formal state-based simulation kernel), or 'sumo' "
-                         "(SUMO/TraCI unified trajectory pipeline)")
+    ap.add_argument("--simulator", type=str, default="sumo",
+                    choices=["sumo"],
+                    help="simulation engine: 'sumo' (SUMO/TraCI unified trajectory pipeline)")
     ap.add_argument("--phase", type=str, default="all",
                     choices=["all", "cpu1", "gpu", "cpu2"],
                     help="pipeline phase to run: "
@@ -946,7 +518,7 @@ def main():
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
     fps_label = f"{fps} fps" if fps else "default fps"
-    sim_label = args.simulator or "legacy"
+    sim_label = args.simulator
     print("=" * 60)
     print(f"PIPELINE  seed={args.seed}  "
           f"seconds={seconds}s ({fps_label})  out={out_dir}")
@@ -956,7 +528,6 @@ def main():
     print("=" * 60)
 
     phase = args.phase
-    sumo_unified = args.simulator == "sumo"
 
     ENV.validate_all_envs(ROOT)
     print("[0/5] Env files OK")
@@ -968,21 +539,14 @@ def main():
             step_assets_validate()
 
         print("\n[2/5] Scenario generation")
-        if sumo_unified:
-            if args.signal:
-                print("[sumo] --signal ignored: SUMO build uses a traffic-light junction")
-            if args.demand:
-                print("[sumo] --demand JSON ignored in unified mode; use --demand-scale")
-            scn = step_sumo_scenario(args.seed, seconds, out_dir, fps=fps,
-                                     demand_scale=args.demand_scale,
-                                     demand_profile=args.demand_profile)
-            scn_blender = write_sumo_blender_scenario(scn, out_dir, args.only)
-        else:
-            scn = step_scenario(args.seed, seconds, out_dir, fps=fps,
-                                signal=args.signal, signal_mode=args.signal_mode,
-                                demand=args.demand, demand_scale=args.demand_scale,
-                                simulator=args.simulator)
-            scn_blender = scn
+        if args.signal:
+            print("[sumo] --signal ignored: SUMO build uses a traffic-light junction")
+        if args.demand:
+            print("[sumo] --demand JSON ignored in unified mode; use --demand-scale")
+        scn = step_sumo_scenario(args.seed, seconds, out_dir, fps=fps,
+                                 demand_scale=args.demand_scale,
+                                 demand_profile=args.demand_profile)
+        scn_blender = write_sumo_blender_scenario(scn, out_dir, args.only)
 
         print("\n[3/5] Plate pre-generation")
         step_plates(scn_blender, out_dir)
@@ -990,17 +554,14 @@ def main():
         if phase == "cpu1":
             print("\n" + "=" * 60)
             print("PHASE cpu1 COMPLETE — copy output dir to GPU host, then run:")
-            print(f"  bash scripts/run_gpu.sh --out {out_dir} [render options]")
+            print(f"  bash scripts/run_VM.sh --out {out_dir} [render options]")
             print("=" * 60)
             return
 
     # For gpu / cpu2 phases, scenario.json must already exist
     scn = os.path.join(out_dir, "scenario.json")
     scn_blender = os.path.join(out_dir, "scenario_blender.json")
-    if sumo_unified and os.path.exists(scn_blender):
-        scn_render = scn_blender
-    else:
-        scn_render = scn
+    scn_render = scn_blender if os.path.exists(scn_blender) else scn
     if phase in ("gpu", "cpu2") and not os.path.exists(scn):
         raise SystemExit(
             f"FAIL: scenario.json not found at {scn}\n"
@@ -1008,97 +569,30 @@ def main():
 
     # ---- gpu: step 4 --------------------------------------------------------
     if phase in ("all", "gpu"):
-        if sumo_unified:
-            print("\n[4a/6] Build unified SUMO scene")
-            step_sumo_unified_build(scn_render, out_dir, args.only,
-                                    keyframe_stride=args.keyframe_stride,
-                                    heading_threshold_deg=args.heading_threshold_deg,
-                                    speed_threshold=args.speed_threshold)
+        print("\n[4a/6] Build unified SUMO scene")
+        step_sumo_unified_build(scn_render, out_dir, args.only,
+                                keyframe_stride=args.keyframe_stride,
+                                heading_threshold_deg=args.heading_threshold_deg,
+                                speed_threshold=args.speed_threshold)
 
-            print("\n[4b/6] Render unified SUMO scene")
-            n_jobs, _ = _detect_jobs(
-                len(camera_tags_from_only(args.only)), explicit=args.jobs,
-                max_workers_per_gpu=args.max_workers_per_gpu,
-                vram_budget=VRAM_PER_JOB_MIB * 2)
-            step_sumo_unified_render(scn_render, out_dir, n_jobs, args.samples, args.only)
+        print("\n[4b/6] Render unified SUMO scene")
+        n_jobs, _ = _detect_jobs(
+            len(camera_tags_from_only(args.only)), explicit=args.jobs,
+            max_workers_per_gpu=args.max_workers_per_gpu,
+            vram_budget=VRAM_PER_JOB_MIB * 2)
+        step_sumo_unified_render(scn_render, out_dir, n_jobs, args.samples, args.only)
 
-            if phase == "gpu":
-                print("\n" + "=" * 60)
-                print("PHASE gpu COMPLETE — copy output dir back to CPU host, then run:")
-                print(f"  bash scripts/run_cpu2.sh --out {out_dir} --simulator sumo")
-                print("=" * 60)
-                return
-        else:
-            print("\n[4a/6] Build cached camera scenes")
-            step_build_scenes_parallel(scn, out_dir, only=args.only,
-                                       silence_timeout_s=args.silence_timeout)
-
-            # Per-scene VRAM estimate: scale budget up if the scenario has many
-            # vehicles (>8 means a heavy scene; each extra vehicle adds BVH nodes,
-            # textures, and frame buffer pressure).  This lets _detect_jobs choose
-            # fewer workers automatically on heavy runs without user intervention.
-            _veh_count = 0
-            try:
-                with open(scn) as _f:
-                    _veh_count = len(json.load(_f).get("vehicles", []))
-            except Exception:
-                pass
-            _vram_budget = VRAM_PER_JOB_MIB if _veh_count <= 8 else (
-                VRAM_PER_JOB_MIB + (_veh_count - 8) * 60)
-
-            print("\n[4b/6] Render cached camera scenes sequentially "
-                  "(JPEG frames; encode+cleanup after each camera)")
-            _n_jobs_detected, _gpu_assign_detected = _detect_jobs(
-                len(camera_tags_from_only(args.only)), explicit=args.jobs,
-                max_workers_per_gpu=args.max_workers_per_gpu,
-                vram_budget=_vram_budget)
-            # Storage-optimized Option A: force one render worker at a time.
-            # With skip_encode=False, render.py encodes the camera immediately
-            # and removes frames before the next camera starts.
-            n_jobs = 1
-            gpu_assign = [_gpu_assign_detected[0] if _gpu_assign_detected else 0]
-
-            render_error = None
-            try:
-                step_render_parallel(scn, out_dir, jobs=n_jobs,
-                                     gpu_assignment=gpu_assign,
-                                     only=args.only,
-                                     silence_timeout_s=args.silence_timeout,
-                                     samples=args.samples,
-                                      skip_encode=False)
-            except SystemExit as e:
-                render_error = e
-            except Exception as e:
-                render_error = e
-
-            if render_error is not None:
-                raise SystemExit(render_error)
-
-            if phase == "gpu":
-                print("\n" + "=" * 60)
-                print("PHASE gpu COMPLETE — copy output dir back to CPU host, then run:")
-                print(f"  bash scripts/run_cpu2.sh --out {out_dir}")
-                print("=" * 60)
-                return
+        if phase == "gpu":
+            print("\n" + "=" * 60)
+            print("PHASE gpu COMPLETE — run metadata/validation with:")
+            print(f"  python scripts/run_pipeline.py --out {out_dir} --phase cpu2 --simulator sumo")
+            print("=" * 60)
+            return
 
     # ---- cpu2: steps 5-6 ---------------------------------------------------
     if phase in ("all", "cpu2"):
-        # In split mode metadata wasn't run alongside render, so run it now.
-        if phase == "cpu2":
-            print("\n[5/6] Metadata generation")
-            if sumo_unified:
-                step_sumo_metadata(scn, out_dir, args.only)
-            else:
-                step_metadata(scn, out_dir, args.only, True)
-        elif phase == "all":
-            # 'all' mode: metadata ran in parallel with render above, but the
-            # parallel ThreadPoolExecutor was removed in the gpu block refactor.
-            # Run it sequentially here so 'all' mode still produces metadata.
-            print("\n[5/6] Metadata generation")
-            if sumo_unified:
-                step_sumo_metadata(scn, out_dir, args.only)
-            else:
-                step_metadata(scn, out_dir, args.only, True)
+        print("\n[5/6] Metadata generation")
+        step_sumo_metadata(scn, out_dir, args.only)
 
         print("\n[6/6] Run validation")
         step_validate_run(out_dir)

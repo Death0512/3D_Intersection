@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Run six SUMO unified scenarios for the North road only (in_N + out_N).
+# Run six SUMO unified scenarios for the North road only (in_N + out_S).
 #
 # Scenarios:
 #   empty, sparse, moderate, dense, surge_spike, signal_cycle
 #
 # Example:
-#   bash scripts/run_north_scenarios.sh --out output/north_set --samples 24
+#   bash scripts/run_north_scenarios.sh --phase cpu1 --out output/north_set --samples 12
+#   nohup bash scripts/run_north_scenarios.sh --phase vm --out output/north_set --samples 12 > output/north_set/run_VM.nohup.log 2>&1 &
 #
 # Defaults are tuned for a 300s North-only SUMO batch on a 16GB RAM / RTX 3060
 # container: only two cameras are rendered, Blender gets a filtered scenario,
@@ -14,12 +15,13 @@
 
 set -euo pipefail
 
-SECONDS_VAL=120
+SECONDS_VAL=300
 FPS=30
-SAMPLES=24
+SAMPLES=12
 SEED=42
-OUT_ROOT="output/north_scenarios"
-ONLY="in_N,out_N"
+OUT_ROOT="output/north"
+ONLY="in_N,out_S"
+PHASE="all"
 KEYFRAME_STRIDE=10
 HEADING_THRESHOLD_DEG=1.5
 SPEED_THRESHOLD=1.0
@@ -39,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --seed) SEED="$2"; shift 2 ;;
     --out) OUT_ROOT="$2"; shift 2 ;;
     --only) ONLY="$2"; shift 2 ;;
+    --phase) PHASE="$2"; shift 2 ;;
     --keyframe-stride) KEYFRAME_STRIDE="$2"; shift 2 ;;
     --heading-threshold-deg) HEADING_THRESHOLD_DEG="$2"; shift 2 ;;
     --speed-threshold) SPEED_THRESHOLD="$2"; shift 2 ;;
@@ -53,6 +56,11 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 mkdir -p "$OUT_ROOT"
+
+case "$PHASE" in
+  all|cpu1|vm) ;;
+  *) echo "Unknown --phase: $PHASE (expected all, cpu1, vm)" >&2; exit 1 ;;
+esac
 
 run_one() {
   local name="$1" scale="$2" profile="${3:-}"
@@ -74,21 +82,25 @@ run_one() {
   [[ -n "$profile" ]] && args+=(--demand-profile "$profile")
   args+=("${EXTRA_ARGS[@]}")
   echo "============================================================"
-  echo "NORTH SCENARIO: $name  scale=$scale  profile=${profile:-none}"
+  echo "NORTH SCENARIO: $name  phase=$PHASE  scale=$scale  profile=${profile:-none}"
   echo "out: $out_dir"
   echo "============================================================"
-  bash "$SCRIPT_DIR/run_all.sh" "${args[@]}"
+  case "$PHASE" in
+    cpu1) bash "$SCRIPT_DIR/run_cpu1.sh" "${args[@]}" ;;
+    vm)   bash "$SCRIPT_DIR/run_VM.sh" "${args[@]}" ;;
+    all)  bash "$SCRIPT_DIR/run_all.sh" "${args[@]}" ;;
+  esac
 }
 
 run_one empty        0
 run_one sparse       1
-run_one moderate     2.5
-run_one dense        6
+run_one moderate     3
+run_one dense        8
 # Brief overload near the middle, followed by enough time for recovery.
 SPIKE_START=$(( SECONDS_VAL * 2 / 5 ))
 SPIKE_END=$(( SPIKE_START + SECONDS_VAL / 15 ))
 run_one surge_spike  1 "spike:start=$SPIKE_START,end=$SPIKE_END,scale=8"
-run_one signal_cycle 2
+run_one signal_cycle 4
 
 echo ""
 echo "All North scenarios complete: $OUT_ROOT"

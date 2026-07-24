@@ -34,6 +34,12 @@ OUT_BLEND = os.path.join(HERE, "..", "assets", "road.blend")
 OUT_JSON = os.path.join(HERE, "..", "assets", "road.json")
 COLLECTION = "ENV_road"
 
+SEMANTIC_DEFAULTS = {
+    "approach_length": 54.751,
+    "crosswalk_y": 27.846,
+    "stop_line_y": 27.846,
+}
+
 
 def bbox_world(obj):
     mn = Vector((1e18, 1e18, 1e18))
@@ -54,6 +60,10 @@ def apply_transforms(obj, loc=True, rot=True, sca=True):
 
 
 def main() -> None:
+    previous_meta = {}
+    if os.path.exists(OUT_JSON):
+        with open(OUT_JSON) as f:
+            previous_meta = json.load(f)
     if os.path.abspath(bpy.data.filepath) != os.path.abspath(ROAD_SOURCE):
         bpy.ops.wm.open_mainfile(filepath=ROAD_SOURCE)
 
@@ -99,10 +109,8 @@ def main() -> None:
     mn, mx = bbox_world(road)
     width = mx.x - mn.x
     length = mx.y - mn.y
-    # crosswalk dashes cluster at the +Y extreme of the original; the +Y end
-    # is the stop-line/crosswalk reference for an approach camera.
-    crosswalk_y = mx.y
-    stop_line_y = mx.y  # stop line sits just inside the crosswalk
+    mesh_y_min = mn.y
+    mesh_y_max = mx.y
 
     # 5. Drop any stray cameras/lights.
     for o in list(bpy.data.objects):
@@ -127,9 +135,13 @@ def main() -> None:
         "lane_width": LANE_WIDTH,
         "num_lanes": NUM_LANES,
         "lane_centerlines_x": LANE_CENTERLINES,
-        "approach_length": round(length, 3),
-        "crosswalk_y": round(crosswalk_y, 3),
-        "stop_line_y": round(stop_line_y, 3),
+        # Visual mesh placement metadata. Semantic camera/sim fields below are
+        # intentionally preserved instead of being re-derived from mesh bbox.
+        "mesh_y_min": round(mesh_y_min, 6),
+        "mesh_y_max": round(mesh_y_max, 6),
+        "approach_length": previous_meta.get("approach_length", SEMANTIC_DEFAULTS["approach_length"]),
+        "crosswalk_y": previous_meta.get("crosswalk_y", SEMANTIC_DEFAULTS["crosswalk_y"]),
+        "stop_line_y": previous_meta.get("stop_line_y", SEMANTIC_DEFAULTS["stop_line_y"]),
         "forward_axis": "+Y",
     }
     with open(OUT_JSON, "w") as f:
@@ -138,7 +150,7 @@ def main() -> None:
     print("=" * 60)
     print("ROAD PREP OK")
     print(f"  source width : {cur_w:.3f} m  ->  {width:.3f} m  (x{s:.4f})")
-    print(f"  length       : {length:.3f} m   crosswalk_y={crosswalk_y:.3f}")
+    print(f"  length       : {length:.3f} m   mesh_y=[{mesh_y_min:.3f}, {mesh_y_max:.3f}]")
     print(f"  lane X       : {LANE_CENTERLINES}")
     print(f"  saved        : {OUT_BLEND}")
     print("=" * 60)

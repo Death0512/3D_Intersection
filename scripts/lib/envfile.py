@@ -36,10 +36,8 @@ from typing import Dict, List, Optional, Tuple
 
 try:                                   # imported as lib.envfile (tests)
     from . import geometry as G
-    from . import kinematics as K
 except ImportError:                    # imported as top-level envfile (build_scene)
     import geometry as G
-    import kinematics as K
 
 
 SCHEMA_VERSION = 2
@@ -92,7 +90,7 @@ def vehicles_on_camera(scenario: dict, approach: G.Direction,
 # Generator (geometry-derived v2 schema; used by tests / regeneration tool)
 # ---------------------------------------------------------------------------
 
-def compute_env(tag: str, road_meta: dict) -> dict:
+def compute_env(tag: str, road_meta: dict, unified: bool = False) -> dict:
     """Build the v2 env dict for one camera tag from geometry.py.
 
     The lane_defaults are per-lane spawn anchors: for an in-camera this is the
@@ -102,8 +100,8 @@ def compute_env(tag: str, road_meta: dict) -> dict:
     unedited env file reproduces the procedural output exactly.
     """
     approach, is_in = parse_tag(tag)
-    cam_loc, look_at = G.camera_pose(approach, is_in, road_meta)
-    road_loc, road_rot = G.road_arm_transform(approach, road_meta, is_entry=is_in)
+    cam_loc, look_at = G.camera_pose(approach, is_in, road_meta, unified=unified)
+    road_loc, road_rot = G.road_arm_transform(approach, road_meta, is_entry=is_in, unified=unified)
 
     lane_defaults: Dict[str, dict] = {}
     for lane in range(G.NUM_LANES):
@@ -268,7 +266,7 @@ def lane_default_anchor(env: dict, lane: int) -> Tuple[Tuple[float, float, float
 # the Blender pixels and the metadata ground-truth agree exactly.
 # ---------------------------------------------------------------------------
 
-def resolve_camera(env: dict, road_meta: dict) -> dict:
+def resolve_camera(env: dict, road_meta: dict, unified: bool = False) -> dict:
     """Return the resolved camera spec for the env's tag.
 
     Mirrors ``build_scene.place_camera`` precedence exactly:
@@ -287,7 +285,7 @@ def resolve_camera(env: dict, road_meta: dict) -> dict:
     render and the metadata share one resolved value per tag.
     """
     approach, is_in = parse_tag(env["camera_tag"])
-    cam_loc, look_at = G.camera_pose(approach, is_in, road_meta)
+    cam_loc, look_at = G.camera_pose(approach, is_in, road_meta, unified=unified)
     ec = env.get("camera") or {}
     location = ec.get("location")
     if location is None:

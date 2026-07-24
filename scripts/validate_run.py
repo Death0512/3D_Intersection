@@ -22,7 +22,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "lib"))
 
 import geometry as G
-import kinematics as K
 import envfile as ENV
 
 TRACE_POS_TOL_M = 0.01
@@ -116,13 +115,7 @@ def main():
         print("=" * 60)
         sys.exit(0 if ok else 1)
 
-    if scn is not None:
-        lanes = {}
-        for v in scn["vehicles"]:
-            lanes.setdefault((v["approach"], v["lane"]), []).append(
-                (v["depart_frame"], v["length"], v["speed_ms"]))
-        bad = [k for k, s in lanes.items() if not K.conflict_free(s)]
-        ok &= check("no lane headway conflicts", not bad, f"bad lanes: {bad}" if bad else "")
+
 
     # per-vehicle timing + identity
     for v in meta["vehicles"]:

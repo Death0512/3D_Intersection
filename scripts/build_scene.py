@@ -110,26 +110,29 @@ def instantiate_linked_collection(linked_coll, instance_name: str,
 # ---------------------------------------------------------------------------
 
 def place_road(approach: G.Direction, road_meta: dict, is_entry: bool = True,
-               env_road: dict = None):
+               env_road: dict = None, unified: bool = False):
     """Link the road arm and orient + position it for the given approach.
 
-    Each road arm is a self-contained 14 m-wide, ~54.75 m-long asset whose
-    local +Y end carries the crosswalk / stop-line (crosswalk_y ≈ +27.85) and
-    whose local −Y end is the far/back end (≈ −26.9).
+    Each road arm is a self-contained 14 m-wide linked asset. Metadata records
+    both semantic road markings and mesh placement anchors:
+        mesh_y_max  -> local +Y mesh head/visual edge
+        crosswalk_y -> local crosswalk / stop-line position
+        mesh_y_min  -> local -Y mesh tail edge
 
     Per-shot frame: road axis centred on (0,0,0); no carriageway lateral offset.
     Lane centrelines sit at x = LANE_CENTERLINES[k] in the arm's local frame,
     which aligns with world x after rotation by approach_rotation(approach).
 
     Entry road (is_entry=True):
-        The arm's local +Y (crosswalk/stop-line) is placed at the box near-edge
-        (−approach × BOX/2) and extends outward.
-        origin = near_edge − forward × crosswalk_y.
+        The arm's local +Y mesh head is placed at the box near-edge
+        (−approach × BOX/2) and the mesh extends outward via local -Y.
 
     Exit road (is_entry=False):
-        The arm's local −Y (back) end is placed at the box far edge
-        (+approach × BOX/2) and extends outward to approach_length.
-        origin = far_edge + forward × arm_back.
+        The arm's local +Y mesh head is also placed at the box
+        far edge (+approach × BOX/2), so entry and exit road heads both point
+        inward toward the blind zone. The mesh extends outward from there using
+        local −Y. Vehicles on exit roads still travel outward along ``approach``;
+        do not infer vehicle heading from the road instance's local +Y.
 
     If ``env_road`` (the env file's ``road`` block) is given, its location and
     rotation_euler OVERRIDE the computed transform (override layer).
@@ -138,7 +141,8 @@ def place_road(approach: G.Direction, road_meta: dict, is_entry: bool = True,
         os.path.join(HERE, "..", road_meta["blend"]),
         road_meta["collection"])
 
-    (ox, oy, oz), rot = G.road_arm_transform(approach, road_meta, is_entry=is_entry)
+    (ox, oy, oz), rot = G.road_arm_transform(
+        approach, road_meta, is_entry=is_entry, unified=unified)
     if env_road is not None:
         loc = env_road.get("location")
         rot_e = env_road.get("rotation_euler")
@@ -503,7 +507,8 @@ def _set_step_interpolation(obj, data_path):
 # ---------------------------------------------------------------------------
 
 def place_camera(approach: G.Direction, is_in: bool, road_meta: dict,
-                 env_camera: dict = None, env: dict = None):
+                 env_camera: dict = None, env: dict = None,
+                 unified: bool = False):
     """Place a telephoto CCTV camera that films the REAR license plate.
 
     The camera sits at the NEAR end of the road arm (the end closest to the
@@ -526,7 +531,7 @@ def place_camera(approach: G.Direction, is_in: bool, road_meta: dict,
     if env is None:
         tag = f"{'in' if is_in else 'out'}_{approach.value}"
         env = {"camera_tag": tag, "camera": env_camera or {}}
-    resolved = ENV.resolve_camera(env, road_meta)
+    resolved = ENV.resolve_camera(env, road_meta, unified=unified)
     cam_loc = tuple(resolved["location"])
     look_ground = tuple(resolved["look_at"])
     lens_mm = resolved["lens_mm"]

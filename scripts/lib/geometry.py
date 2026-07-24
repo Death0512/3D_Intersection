@@ -46,13 +46,19 @@ AXIS_WIDTH = 2 * ARM_WIDTH + MEDIAN         # 30 m (full carriageway)
 # lane centre lines relative to the centre of one 4-lane direction (arm-local)
 LANE_CENTERLINES = [-5.25, -1.75, 1.75, 5.25]
 
+# Lateral offset from the shared road axis to the centre of a single-direction
+# carriageway.  Each approach has 4 lanes on the RIGHT side of the road axis;
+# the opposing direction's 4 lanes sit on the left, separated by MEDIAN.
+# offset = ARM_WIDTH/2 + MEDIAN/2 = 7 + 1 = 8 m, applied along approach_right.
+CARRIAGEWAY_OFFSET = ARM_WIDTH / 2 + MEDIAN / 2   # 8.0 m
+
 FPS = 30
 
 
 # Camera parameters (single source of truth — shared by build_scene.place_camera
 # and render.compute_metadata). Keeping them here means the Blender camera and
 # the per-frame pose ground truth in metadata.json always agree.
-CAM_HEIGHT = 7.0       # camera elevation (m)
+CAM_HEIGHT = 10.0       # camera elevation (m)
 CAM_BACK_DIST = 100.0   # how far past the box edge the out-camera looks (m)
 LENS_MM = 60.0         # telephoto focal length
 SENSOR_MM = 36.0       # full-frame sensor width (set on the Blender camera too)
@@ -140,13 +146,14 @@ def approach_right(approach: Direction) -> Tuple[float, float]:
 
 
 def lane_lateral_offset(direction: Direction, lane_index: int) -> Tuple[float, float]:
-    """Lateral (x, y) offset from the road axis to the centre of a specific
-    lane.  In the per-shot frame the road is centred on the axis (x = 0), so
-    the offset is purely the arm-local lane centerline rotated into the
-    approach's right-hand perpendicular direction."""
+    """Arm-local lateral (x, y) offset from the carriageway centre to the
+    centre of a specific lane.
+
+    This is an arm-local offset. Legacy per-shot coordinates assume the arm is
+    centred on the intersection axis, so this offset represents the full world offset.
+    Unified scene mode adds CARRIAGEWAY_OFFSET via road_arm_transform."""
     rx, ry = approach_right(direction)
-    off = LANE_CENTERLINES[lane_index]
-    return (rx * off, ry * off)
+    return (rx * LANE_CENTERLINES[lane_index], ry * LANE_CENTERLINES[lane_index])
 
 
 def lane_entry_box_edge(approach: Direction, lane_index: int) -> Tuple[float, float]:
@@ -206,31 +213,42 @@ def approach_rotation(approach: Direction) -> float:
     that its forward (+Y) aligns with the given approach's forward direction.
     """
     fx, fy = approach_forward(approach)
-    # arm forward is +Y = (0,1); we need to rotate (0,1) -> (fx,fy)
-    return math.atan2(fx, fy)
+    # Blender positive Z rotation maps local +Y to world (-sin(z), cos(z)).
+    # ponytail: keep one Blender-facing convention; SUMO heading conversion uses
+    # the same sign, so E/W vehicles do not drive forward with their rear first.
+    return math.atan2(-fx, fy)
 
 
 def road_arm_transform(approach: Direction, road_meta: dict,
-                       is_entry: bool) -> Tuple[Tuple[float, float, float], float]:
-    """World (location xyz, rotation_z) for the road arm empty in the per-shot
-    frame.  Mirrors build_scene.place_road exactly — kept here as the single
-    source of truth so the env-file generator and the Blender placement agree.
+                       is_entry: bool, unified: bool = False) -> Tuple[Tuple[float, float, float], float]:
+    """World (location xyz, rotation_z) for the road arm empty.
 
-    Entry (is_entry=True): arm +Y (crosswalk) at box near-edge, body outward.
-    Exit (is_entry=False): arm −Y (back) at box far edge, body outward.
+    If unified=True, applies CARRIAGEWAY_OFFSET so entry and exit arms sit side-by-side.
+    If unified=False, assumes per-shot layout where the arm is exactly on the road axis.
     """
     fx, fy = approach_forward(approach)
+    rx, ry = approach_right(approach)
+    mesh_y_min = road_meta.get("mesh_y_min")
+    mesh_y_max = road_meta.get("mesh_y_max")
     crosswalk_y = road_meta.get("crosswalk_y", 0.0)
     approach_length = road_meta.get("approach_length", crosswalk_y)
-    arm_back = approach_length - crosswalk_y
+    front_y = float(mesh_y_max) if mesh_y_max is not None else float(crosswalk_y)
+    back_y = float(mesh_y_min) if mesh_y_min is not None else -float(approach_length - crosswalk_y)
     half = BOX_SIZE / 2
-    rot = approach_rotation(approach)
+    # Lateral shift
+    lx, ly = (rx * CARRIAGEWAY_OFFSET, ry * CARRIAGEWAY_OFFSET) if unified else (0.0, 0.0)
     if is_entry:
-        edge = (-fx * half, -fy * half)
-        ox, oy = edge[0] - fx * crosswalk_y, edge[1] - fy * crosswalk_y
+        rot = approach_rotation(approach)
+        edge = (-fx * half + lx, -fy * half + ly)
+        ox, oy = edge[0] - fx * front_y, edge[1] - fy * front_y
     else:
-        edge = (fx * half, fy * half)
-        ox, oy = edge[0] + fx * arm_back, edge[1] + fy * arm_back
+        # Exit roads use the same visual convention as entry roads: the asset's
+        # semantic head/crosswalk edge (local +Y / mesh_y_max) sits at the blind
+        # zone boundary. Vehicles still travel outward along ``approach`` on top
+        # of this road, so do not infer exit-vehicle heading from road local +Y.
+        rot = math.atan2(fx, -fy)  # maps local +Y to -approach_forward(approach)
+        edge = (fx * half + lx, fy * half + ly)
+        ox, oy = edge[0] + fx * front_y, edge[1] + fy * front_y
     return ((ox, oy, 0.0), rot)
 
 
@@ -253,41 +271,28 @@ def visible_heading(motion: "VehicleMotion", is_in_camera: bool,
 
 def camera_pose(approach: Direction, is_in: bool, road_meta: dict,
                 cam_height: float = CAM_HEIGHT,
-                cam_back_dist: float = CAM_BACK_DIST):
+                cam_back_dist: float = CAM_BACK_DIST,
+                unified: bool = False):
     """Return (cam_loc (x,y,z), look_at (x,y,z)) for the telephoto CCTV.
 
-    SINGLE SOURCE OF TRUTH — shared by build_scene.place_camera (Blender) and
-    render.compute_metadata (pure-python per-frame pose).
-
-    Per-shot frame: each .blend is independent; road axis centred at (0,0,0).
-    Camera sits on the road axis centre line (lateral x = 0 in the approach's
-    rotated frame) at road_length/2 from the road centre, elevated CAM_HEIGHT.
-
-    Entry (in_<D>): camera at the back/outer end of the entry arm (farthest
-    from box), at -approach × (half + approach_length), looking toward the box.
-    Cars appear near the camera and drive toward the stop line.
-
-    Exit (out_<D>): camera at the box's far (outbound) edge, at
-    +approach × half, looking outward. Cars emerge just ahead and drive away;
-    the box is behind the camera.
+    If unified=True, camera sits on the carriageway centre line (offset by CARRIAGEWAY_OFFSET).
+    If unified=False, camera sits exactly on the intersection axis.
     """
     fx, fy = approach_forward(approach)
+    rx, ry = approach_right(approach)
     half = BOX_SIZE / 2
     approach_length = road_meta.get("approach_length", 0.0)
-    crosswalk_y = road_meta.get("crosswalk_y", 0.0)
+    # Lateral offset
+    lx, ly = (rx * CARRIAGEWAY_OFFSET, ry * CARRIAGEWAY_OFFSET) if unified else (0.0, 0.0)
     if is_in:
-        # Camera at the outer/back end of the entry arm.
-        # arm extends approach_length from the stop line outward;
-        # stop line is at -approach * half from world origin.
-        cam_ground = (-fx * (half + approach_length),
-                      -fy * (half + approach_length))
-        look_ground = (-fx * (half - 2.0),
-                       -fy * (half - 2.0), 0.0)
+        cam_ground = (-fx * (half + approach_length) + lx,
+                      -fy * (half + approach_length) + ly)
+        look_ground = (-fx * (half - 2.0) + lx,
+                       -fy * (half - 2.0) + ly, 0.0)
     else:
-        # Camera at the box far edge, looking outward.
-        cam_ground = (fx * half, fy * half)
-        look_ground = (fx * (half + cam_back_dist),
-                       fy * (half + cam_back_dist), 0.0)
+        cam_ground = (fx * half + lx, fy * half + ly)
+        look_ground = (fx * (half + cam_back_dist) + lx,
+                       fy * (half + cam_back_dist) + ly, 0.0)
     cam_loc = (cam_ground[0], cam_ground[1], cam_height)
     return cam_loc, look_ground
 

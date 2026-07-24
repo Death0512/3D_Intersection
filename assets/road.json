@@ -11,6 +11,8 @@
     1.75,
     5.25
   ],
+  "mesh_y_min": -37.6671,
+  "mesh_y_max": 38.9843,
   "approach_length": 54.751,
   "crosswalk_y": 27.846,
   "stop_line_y": 27.846,

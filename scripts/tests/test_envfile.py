@@ -22,11 +22,19 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 from lib import geometry as G
-from lib import kinematics as K
 from lib import envfile as ENV
 
 
 ROAD_META = {"crosswalk_y": 27.846, "approach_length": 54.751, "blend": "road.blend", "collection": "ENV_road"}
+
+
+def _rotated_local_y(rot_z: float) -> tuple[float, float]:
+    """World vector of Blender local +Y after a Z rotation."""
+    return (-math.sin(rot_z), math.cos(rot_z))
+
+
+def _assert_close(a: float, b: float, msg: str = "") -> None:
+    assert abs(a - b) < 1e-4, f"{msg}: expected {b:.6f}, got {a:.6f}"
 
 
 # ---------------------------------------------------------------------------
@@ -76,23 +84,22 @@ def test_compute_env_emits_lane_defaults_for_all_lanes():
                 assert len(rot) == 3
 
 
-def test_compute_env_lane_defaults_match_geometry_anchors():
-    # in-camera lane_defaults[lane] == appear_pos; out-camera == reappear_pos.
+def test_compute_env_lane_defaults_have_correct_rotation():
+    # in-camera lane_defaults rotation_euler[2] == approach_rotation(d)
     for d in G.Direction:
         for lane in range(G.NUM_LANES):
             env_in = ENV.compute_env(f"in_{d.value}", ROAD_META)
-            m = K.plan_motion("v", d, lane, G.Turn.STRAIGHT,
-                              K.speed_kmh_to_ms(40), 0, fps=30)
-            ld = env_in["vehicles"]["lane_defaults"][str(lane)]["location"]
-            assert abs(ld[0] - m.appear_pos[0]) < 1e-6, f"in_{d.value} lane {lane} x"
-            assert abs(ld[1] - m.appear_pos[1]) < 1e-6, f"in_{d.value} lane {lane} y"
             assert abs(env_in["vehicles"]["lane_defaults"][str(lane)]["rotation_euler"][2]
                        - G.approach_rotation(d)) < 1e-6
-            # out-camera: reappear anchor for the exit lane (straight -> same dir/lane)
-            env_out = ENV.compute_env(f"out_{d.value}", ROAD_META)
-            rld = env_out["vehicles"]["lane_defaults"][str(lane)]["location"]
-            assert abs(rld[0] - m.reappear_pos[0]) < 1e-6, f"out_{d.value} lane {lane} x"
-            assert abs(rld[1] - m.reappear_pos[1]) < 1e-6, f"out_{d.value} lane {lane} y"
+
+
+def test_approach_rotation_maps_local_y_to_forward():
+    for d in G.Direction:
+        rot = G.approach_rotation(d)
+        vx, vy = _rotated_local_y(rot)
+        fx, fy = G.approach_forward(d)
+        _assert_close(vx, fx, f"{d.value} forward x")
+        _assert_close(vy, fy, f"{d.value} forward y")
 
 
 def test_schema_version_is_two():
@@ -261,6 +268,66 @@ def test_validate_all_envs_passes_against_real_assets():
     ENV.validate_all_envs(ROOT)  # no raise
 
 
+def test_real_env_rotations_match_geometry():
+    for d in G.Direction:
+        expected = G.approach_rotation(d)
+        for is_in in (True, False):
+            tag = ("in" if is_in else "out") + f"_{d.value}"
+            env = ENV.load_env(tag, ROOT)
+            for lane in range(G.NUM_LANES):
+                actual = env["vehicles"]["lane_defaults"][str(lane)]["rotation_euler"][2]
+                _assert_close(actual, expected, f"{tag} lane {lane} rot")
+
+
+def test_real_env_road_head_direction_matches_role():
+    for d in G.Direction:
+        fx, fy = G.approach_forward(d)
+        for is_in in (True, False):
+            tag = ("in" if is_in else "out") + f"_{d.value}"
+            env = ENV.load_env(tag, ROOT)
+            rot = env["road"]["rotation_euler"][2]
+            vx, vy = _rotated_local_y(rot)
+            expected_x, expected_y = (fx, fy) if is_in else (-fx, -fy)
+            _assert_close(vx, expected_x, f"{tag} road local +Y x")
+            _assert_close(vy, expected_y, f"{tag} road local +Y y")
+
+
+def test_real_env_road_mesh_edges_meet_box_boundary():
+    road_meta_path = os.path.join(ROOT, "assets", "road.json")
+    with open(road_meta_path) as f:
+        road_meta = json.load(f)
+    mesh_y_min = float(road_meta["mesh_y_min"])
+    mesh_y_max = float(road_meta["mesh_y_max"])
+    half = G.BOX_SIZE / 2.0
+    for d in G.Direction:
+        fx, fy = G.approach_forward(d)
+        rx, ry = G.approach_right(d)
+        lx, ly = rx * G.CARRIAGEWAY_OFFSET, ry * G.CARRIAGEWAY_OFFSET
+        for is_in in (True, False):
+            tag = ("in" if is_in else "out") + f"_{d.value}"
+            env = ENV.load_env(tag, ROOT)
+            loc = env["road"]["location"]
+            rot = env["road"]["rotation_euler"][2]
+            vx, vy = _rotated_local_y(rot)
+            # The road asset's semantic head/crosswalk edge is local +Y
+            # (mesh_y_max). Both entry and exit road heads must meet the blind
+            # zone boundary; exit road meshes extend outward via local -Y.
+            actual_x = float(loc[0]) + vx * mesh_y_max
+            actual_y = float(loc[1]) + vy * mesh_y_max
+            sign = -1.0 if is_in else 1.0
+            expected_x = sign * fx * half + lx
+            expected_y = sign * fy * half + ly
+            _assert_close(actual_x, expected_x, f"{tag} road edge x")
+            _assert_close(actual_y, expected_y, f"{tag} road edge y")
+
+            tail_x = float(loc[0]) + vx * mesh_y_min
+            tail_y = float(loc[1]) + vy * mesh_y_min
+            outward_x, outward_y = (-fx, -fy) if is_in else (fx, fy)
+            edge_to_tail = ((tail_x - actual_x) * outward_x
+                            + (tail_y - actual_y) * outward_y)
+            assert edge_to_tail > 0.0, f"{tag} road tail should extend outward"
+
+
 # ---------------------------------------------------------------------------
 # lane_default_anchor
 # ---------------------------------------------------------------------------
@@ -316,58 +383,6 @@ def test_real_env_files_valid_and_structure_correct():
                 ld = real["vehicles"]["lane_defaults"][str(lane)]
                 assert "location" in ld and len(ld["location"]) == 3
                 assert "rotation_euler" in ld and len(ld["rotation_euler"]) == 3
-
-
-def test_metadata_emits_camera_block_for_all_8():
-    """compute_metadata must emit a `cameras` entry per tag whose values equal
-    envfile.resolve_camera (the same spec build_scene.place_camera applies),
-    so metadata is projection-complete and render==metadata for the camera too.
-    """
-    import render
-    v = K.speed_kmh_to_ms(45)
-    scn = {"seed": 1, "fps": 30, "duration_frames": 400, "box_size": G.BOX_SIZE,
-           "vehicles": [{"id": "V0", "class": "car", "color": [0.1, 0.2, 0.8, 1.0],
-                         "color_name": "blue", "plate": "59X-1234", "approach": "N",
-                         "lane": 3, "turn": "right", "speed_ms": v, "speed_kmh": 45,
-                         "length": 4.47, "depart_frame": 5}]}
-    meta = render.compute_metadata(scn, ROOT)
-    assert "cameras" in meta
-    cams = meta["cameras"]
-    assert len(cams) == 8
-    for d in G.Direction:
-        for is_in in (True, False):
-            tag = ("in" if is_in else "out") + f"_{d.value}"
-            assert tag in cams, f"missing {tag}"
-            entry = cams[tag]
-            env = ENV.load_env(tag, ROOT)
-            resolved = ENV.resolve_camera(env, {"crosswalk_y": 27.846,
-                                                "approach_length": 54.751})
-            for k in ("location", "look_at", "rotation_euler", "lens_mm", "sensor_mm"):
-                assert entry[k] == resolved[k], f"{tag}.{k} mismatch"
-            assert entry["sensor_fit"] == "HORIZONTAL"
-            assert entry["resolution"] == [G.RES_X, G.RES_Y]
-
-
-def test_metadata_camera_block_reflects_override():
-    """The metadata camera block must reflect the env override (not geometry)
-    when the env file has been hand-edited — proving the override layer is
-    respected by metadata, matching what place_camera renders."""
-    import render
-    # in_N.json committed file has location (0,-90,10) vs geometry (0,-69.751,7).
-    v = K.speed_kmh_to_ms(45)
-    scn = {"seed": 1, "fps": 30, "duration_frames": 400, "box_size": G.BOX_SIZE,
-           "vehicles": [{"id": "V0", "class": "car", "color": [0.1, 0.2, 0.8, 1.0],
-                         "color_name": "blue", "plate": "59X-1234", "approach": "N",
-                         "lane": 3, "turn": "right", "speed_ms": v, "speed_kmh": 45,
-                         "length": 4.47, "depart_frame": 5}]}
-    meta = render.compute_metadata(scn, ROOT)
-    in_n = meta["cameras"]["in_N"]
-    # Must be the overridden env value, not the geometry default.
-    assert in_n["location"][1] == -90.0
-    assert in_n["location"][2] == 10.0
-    # And not the geometry default (which is y=-69.751, z=7)
-    assert in_n["location"][1] != -69.751
-    assert in_n["location"][2] != 7.0
 
 
 def _run_all():

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -12,6 +13,12 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 from compare_sumo import main as compare_main
+from run_sumo_unified import (
+    _apply_motion_derived_rot_z,
+    _motion_delta_to_blender_rot_z,
+    _sumo_angle_to_blender_rot_z,
+    _unwrap_angle,
+)
 from sim.sumo import (
     export_sumo_files,
     parse_sumo_tripinfo,
@@ -36,6 +43,61 @@ def _scenario():
 
 
 class TestSUMOComparison(unittest.TestCase):
+    def test_sumo_heading_conversion_uses_blender_z_convention(self):
+        self.assertAlmostEqual(_sumo_angle_to_blender_rot_z(0.0), 0.0)
+        self.assertAlmostEqual(_sumo_angle_to_blender_rot_z(90.0), -1.5707963267948966)
+        self.assertAlmostEqual(abs(_sumo_angle_to_blender_rot_z(180.0)), 3.141592653589793)
+        self.assertAlmostEqual(_sumo_angle_to_blender_rot_z(270.0), -4.71238898038469)
+
+    def test_sumo_heading_unwrap_prevents_zero_360_spin(self):
+        prev = _sumo_angle_to_blender_rot_z(0.0)
+        cur = _unwrap_angle(prev, _sumo_angle_to_blender_rot_z(359.9))
+        self.assertLess(abs(cur - prev), 0.01)
+
+    def test_motion_delta_rot_z_maps_local_y_to_motion(self):
+        cases = [
+            ((0.0, 1.0), (0.0, 1.0)),
+            ((1.0, 0.0), (1.0, 0.0)),
+            ((0.0, -1.0), (0.0, -1.0)),
+            ((-1.0, 0.0), (-1.0, 0.0)),
+            ((1.0, 1.0), (2 ** -0.5, 2 ** -0.5)),
+        ]
+        for (dx, dy), expected in cases:
+            z = _motion_delta_to_blender_rot_z(dx, dy)
+            front = (-math.sin(z), math.cos(z))
+            self.assertAlmostEqual(front[0], expected[0], places=6)
+            self.assertAlmostEqual(front[1], expected[1], places=6)
+
+    def test_motion_derived_rot_z_carries_stationary_samples(self):
+        pts = [
+            {"x": 0.0, "y": 0.0, "heading_deg": 90.0, "rot_z": _sumo_angle_to_blender_rot_z(90.0)},
+            {"x": 0.0, "y": 0.0, "heading_deg": 90.0, "rot_z": _sumo_angle_to_blender_rot_z(90.0)},
+            {"x": 0.0, "y": 1.0, "heading_deg": 90.0, "rot_z": _sumo_angle_to_blender_rot_z(90.0)},
+            {"x": 0.0, "y": 1.0, "heading_deg": 90.0, "rot_z": _sumo_angle_to_blender_rot_z(90.0)},
+        ]
+        _apply_motion_derived_rot_z(pts)
+        for pt in pts:
+            self.assertAlmostEqual(pt["rot_z"], 0.0, places=6)
+            self.assertEqual(pt["heading_deg"], 90.0)
+
+    def test_motion_derived_rot_z_all_stationary_keeps_heading_fallback(self):
+        pts = [
+            {"x": 1.0, "y": 2.0, "heading_deg": 90.0, "rot_z": _sumo_angle_to_blender_rot_z(90.0)},
+            {"x": 1.0, "y": 2.0, "heading_deg": 90.0, "rot_z": _sumo_angle_to_blender_rot_z(90.0)},
+        ]
+        _apply_motion_derived_rot_z(pts)
+        self.assertAlmostEqual(pts[0]["rot_z"], -1.57079633, places=6)
+        self.assertAlmostEqual(pts[1]["rot_z"], -1.57079633, places=6)
+
+    def test_motion_derived_rot_z_unwraps_turn_continuity(self):
+        pts = [
+            {"x": 0.0, "y": 0.0, "heading_deg": 0.0, "rot_z": 0.0},
+            {"x": -1.0, "y": -0.01, "heading_deg": 0.0, "rot_z": 0.0},
+            {"x": -2.0, "y": 0.01, "heading_deg": 0.0, "rot_z": 0.0},
+        ]
+        _apply_motion_derived_rot_z(pts)
+        self.assertLess(abs(pts[1]["rot_z"] - pts[0]["rot_z"]), 0.1)
+
     def test_scenario_metrics(self):
         m = scenario_metrics(_scenario())
         self.assertEqual(m["vehicle_count"], 2.0)

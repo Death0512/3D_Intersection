@@ -6,12 +6,12 @@
   "generated_from": "geometry.camera_pose + geometry.road_arm_transform",
   "camera": {
     "location": [
-      0.0,
-      -90.0,
-      10.0
+      8.0,
+      -115.0,
+      12.0
     ],
     "look_at": [
-      0.0,
+      8.0,
       -55.0,
       0.0
     ],
@@ -22,8 +22,8 @@
   "road": {
     "object": "Road_N_in",
     "location": [
-      0.0,
-      -42.846,
+      8.0,
+      -53.9843,
       0.0
     ],
     "rotation_euler": [
@@ -53,7 +53,7 @@
         "rotation_euler": [
           0.0,
           0.0,
-          3.141592
+          0.0
         ]
       },
       "1": {
@@ -65,7 +65,7 @@
         "rotation_euler": [
           0.0,
           0.0,
-          3.141592
+          0.0
         ]
       },
       "2": {
@@ -77,7 +77,7 @@
         "rotation_euler": [
           0.0,
           0.0,
-          3.141592
+          0.0
         ]
       },
       "3": {
@@ -89,7 +89,7 @@
         "rotation_euler": [
           0.0,
           0.0,
-          3.141592
+          0.0
         ]
       }
     }

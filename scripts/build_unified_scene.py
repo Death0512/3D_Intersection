@@ -192,14 +192,14 @@ def build_unified_scene(scenario: dict, out_blend: str, only: str | None = None,
     gc.collect()
 
     for d in G.Direction:
-        BS.place_road(d, road_meta, is_entry=True)
-        BS.place_road(d, road_meta, is_entry=False)
+        BS.place_road(d, road_meta, is_entry=True, unified=True)
+        BS.place_road(d, road_meta, is_entry=False, unified=True)
     _add_center_plane()
 
     for tag in selected_tags:
         env = ENV.load_env(tag, ROOT)
         direction, is_in = BS.parse_camera_tag(tag)
-        cam = BS.place_camera(direction, is_in, road_meta, env=env)
+        cam = BS.place_camera(direction, is_in, road_meta, env=env, unified=True)
         cam.name = f"Camera_{tag}"
 
     frame_end = max(0, int(scenario.get("duration_frames", 1)) - 1)

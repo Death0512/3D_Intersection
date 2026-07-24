@@ -236,8 +236,7 @@ def apply_samples_to_motion(motion: G.VehicleMotion,
         road_meta=road_meta,
     )
     if len(track) < 2:
-        # Fallback to legacy kinematics if trajectory data is too sparse to
-        # define an approach path. Callers still clamp emitted/rendered frames.
+        # Trajectory data too sparse to define an approach path; return motion unchanged.
         return motion
     motion.track_in = track
     if _has_release_track_sample(sample_list):

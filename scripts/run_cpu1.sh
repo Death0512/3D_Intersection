@@ -7,7 +7,7 @@
 #   [3/5] Plate pre-generation
 #
 # Produces scenario.json + plates/ in --out dir. Transfer that dir to the
-# GPU host, then run: bash scripts/run_gpu.sh --out <same-dir> [render opts]
+# GPU host, then run: bash scripts/run_VM.sh --out <same-dir> [render opts]
 #
 # All options mirror run_all.sh (render/GPU flags are accepted but ignored).
 #
@@ -24,7 +24,7 @@
 #   --signal-mode MODE  'fixed' or 'adaptive' (default: adaptive)
 #   --demand SPEC       Path to demand JSON
 #   --demand-scale F    Density multiplier on default demand model
-#   --simulator MODE    'legacy', 'micro', or 'research' (default: research)
+#   --simulator MODE    'sumo' unified pipeline (default: sumo)
 #   --python PATH       Path to python binary
 #   --blender PATH      Path to blender binary (only needed for asset check)
 #   -h, --help          Show this help
@@ -42,7 +42,7 @@ DEMAND=""
 DEMAND_SCALE=""
 BLENDER_BIN=""
 PYTHON_BIN=""
-SIMULATOR="research"
+SIMULATOR="sumo"
 
 usage() { grep '^#' "$0" | grep -v '#!/' | sed 's/^# \?//'; exit 0; }
 
@@ -60,8 +60,9 @@ while [[ $# -gt 0 ]]; do
         --blender)         BLENDER_BIN="$2";   shift 2 ;;
         --python)          PYTHON_BIN="$2";    shift 2 ;;
         --simulator)       SIMULATOR="$2";     shift 2 ;;
-        # render/gpu flags silently accepted so callers can pass the same args to all three scripts
+        # VM/render flags silently accepted so batch callers can pass shared args.
         --jobs|--max-workers-per-gpu|--silence-timeout|--samples|--only) shift 2 ;;
+        --keyframe-stride|--heading-threshold-deg|--speed-threshold|--demand-profile) shift 2 ;;
         -h|--help) usage ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -142,7 +143,7 @@ if [[ "$RC" -eq 0 ]]; then
     echo "PHASE cpu1 DONE.  Transfer output dir to GPU host:"
     echo "  rsync -av $OUT_DIR/ <gpu-host>:<path>/output/run1/"
     echo "Then on the GPU host:"
-    echo "  bash scripts/run_gpu.sh --out <path>/output/run1 [--samples N ...]"
+    echo "  bash scripts/run_VM.sh --out <path>/output/run1 [--samples N ...]"
     echo "============================================================"
 else
     echo "FAILED (exit $RC)  log: $LOG_FILE"
