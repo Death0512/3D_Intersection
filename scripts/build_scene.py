@@ -251,7 +251,8 @@ def assign_plate_and_color(coll, plate_str: str, plates_dir: str, rgba=None,
 def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
                           anchor_loc, anchor_rot_z: float, is_in_camera: bool,
                           road_meta: dict,
-                          trajectory_samples=None):
+                          trajectory_samples=None,
+                          out_blend_dir: str | None = None):
     """Append + duplicate one vehicle at its env-JSON spawn anchor, assign
     plate+color. Returns (root_object, motion).
 
@@ -278,7 +279,8 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
     # CI, another machine) without re-running asset_prep.
     tex_dir = os.path.join(HERE, "..", "models", cls, "textures")
     if os.path.isdir(tex_dir):
-        _remapped = bu.remap_textures_to_local(tex_dir)
+        _remapped = bu.remap_textures_to_local(tex_dir,
+                                               relative_to_dir=out_blend_dir)
         if _remapped:
             print(f"  [tex] {veh['id']}: remapped {_remapped} textures to {tex_dir}")
 
@@ -289,7 +291,9 @@ def make_vehicle_instance(veh: dict, veh_manifest: dict, plates_dir: str,
     # material-assignment errors internally; this outer guard covers the
     # render_plate() call (line 201) which isn't in that internal try/except.
     try:
-        assign_plate_and_color(coll, veh["plate"], plates_dir, rgba=veh.get("color"))
+        assign_plate_and_color(coll, veh["plate"], plates_dir,
+                               rgba=veh.get("color"),
+                               out_blend_dir=out_blend_dir)
     except Exception as e:
         print(f"  [{veh['id']}] [WARN] plate/color generation failed: {e} "
               f"— vehicle will render without a plate", flush=True)
@@ -786,7 +790,8 @@ def build_shot(scenario: dict, camera_tag: str, out_blend: str):
             veh, veh_manifest, plates_dir,
             anchor_loc=anchor_loc, anchor_rot_z=anchor_rot_z,
             is_in_camera=is_in, road_meta=road_meta,
-            trajectory_samples=traj_index.get(veh["id"]))
+            trajectory_samples=traj_index.get(veh["id"]),
+            out_blend_dir=os.path.dirname(out_blend))
         keyframe_motion(empty, motion, is_in_camera=is_in, frame_end=frame_end)
         scene_objs.append(empty)
         motions.append((veh, motion))

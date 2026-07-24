@@ -64,7 +64,7 @@ def _make_vehicle_root(veh: dict, veh_manifest: dict, plates_dir: str,
         new_name=f"VEH_{veh['id']}_{cls}")
     tex_dir = os.path.join(ROOT, "models", cls, "textures")
     if os.path.isdir(tex_dir):
-        bu.remap_textures_to_local(tex_dir)
+        bu.remap_textures_to_local(tex_dir, relative_to_dir=out_blend_dir)
     BS.assign_plate_and_color(coll, veh.get("plate", veh["id"]), plates_dir,
                               rgba=veh.get("color"),
                               out_blend_dir=out_blend_dir)

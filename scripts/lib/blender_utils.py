@@ -100,18 +100,25 @@ def set_origin_to_ground_center(objs: List[bpy.types.Object]) -> None:
 # Texture remapping
 # ---------------------------------------------------------------------------
 
-def _blend_relative_path(path: str) -> str:
-    """Return a Blender-relative path when possible, otherwise absolute.
+def _blend_relative_path(path: str, relative_to_dir: Optional[str] = None) -> str:
+    """Return a Blender ``//`` path relative to the target .blend directory.
 
-    Blender stores project-relative external paths with a leading ``//``.  Using
-    them avoids baking developer-machine paths such as
-    ``/home/death/Documents/3D_Intersection_Video/...`` into generated .blend
-    files that later render on a VM checkout under another root.
+    Blender's leading ``//`` is relative to the saved .blend file, not the repo
+    root.  Generated scenes live under output directories, so a repo texture like
+    ``models/car/textures/foo.png`` must be saved as e.g.
+    ``//../../models/car/textures/foo.png`` for ``output/sparse/scene.blend``.
     """
+    abs_path = os.path.abspath(path)
+    if relative_to_dir is not None:
+        try:
+            rel = os.path.relpath(abs_path, os.path.abspath(relative_to_dir))
+            return "//" + rel.replace(os.sep, "/")
+        except Exception:
+            return abs_path
     try:
-        return bpy.path.relpath(os.path.abspath(path))
+        return bpy.path.relpath(abs_path)
     except Exception:
-        return os.path.abspath(path)
+        return abs_path
 
 
 def _texture_match_keys(value: str) -> list[str]:
@@ -138,13 +145,15 @@ def _texture_match_keys(value: str) -> list[str]:
     return keys
 
 
-def remap_textures_to_local(tex_dir: str, missing_log: Optional[List[str]] = None) -> int:
+def remap_textures_to_local(tex_dir: str, missing_log: Optional[List[str]] = None,
+                            relative_to_dir: Optional[str] = None) -> int:
     """Remap every image-block's filepath to a file inside tex_dir.
 
     Matching is extension-insensitive on the base name. Matched filepaths are
-    stored as Blender-relative ``//...`` paths so generated scenes remain
-    portable across checkout roots. Returns the number of images successfully
-    remapped. Unresolved paths are appended to missing_log.
+    stored as Blender-relative paths from ``relative_to_dir`` (normally the
+    output directory containing the generated .blend) so scenes remain portable
+    across checkout roots. Returns the number of images successfully remapped.
+    Unresolved paths are appended to missing_log.
     """
     if not os.path.isdir(tex_dir):
         if missing_log is not None:
@@ -169,7 +178,7 @@ def remap_textures_to_local(tex_dir: str, missing_log: Optional[List[str]] = Non
             if candidates:
                 break
         if candidates:
-            img.filepath = _blend_relative_path(candidates[0])
+            img.filepath = _blend_relative_path(candidates[0], relative_to_dir)
             try:
                 img.reload()
             except RuntimeError:
