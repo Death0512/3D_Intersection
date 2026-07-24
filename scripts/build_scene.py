@@ -196,10 +196,16 @@ def _find_body_material_in_collection(coll):
     return None, None
 
 
-def assign_plate_and_color(coll, plate_str: str, plates_dir: str, rgba=None):
+def assign_plate_and_color(coll, plate_str: str, plates_dir: str, rgba=None,
+                           out_blend_dir: str | None = None):
     """Edit the (local/appended) collection's materials:
       * load the unique plate PNG into LicensePlate_Mat's Image Texture node
       * set the body-paint material base color to rgba (if given)
+
+    When out_blend_dir is provided and plates_dir is inside it, store the image
+    path relative to the generated .blend (e.g. ``//plates/ABC.png``) so CPU1
+    artifacts can be copied to a VM without baking the source machine's absolute
+    output path into the scene.
     """
     safe = "".join(c if c.isalnum() else "_" for c in plate_str) + ".png"
     plate_path = os.path.abspath(os.path.join(plates_dir, safe))
@@ -218,6 +224,12 @@ def assign_plate_and_color(coll, plate_str: str, plates_dir: str, rgba=None):
                 if bsdf and out:
                     nt.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
             img = bpy.data.images.load(plate_path)
+            if out_blend_dir is not None:
+                try:
+                    rel = os.path.relpath(plate_path, os.path.abspath(out_blend_dir))
+                    img.filepath = "//" + rel.replace(os.sep, "/")
+                except Exception:
+                    pass
             tex_node.image = img
         except Exception as e:
             print(f"  (plate assign warn: {e})")

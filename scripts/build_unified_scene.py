@@ -55,7 +55,8 @@ def _set_linear(obj, data_path: str):
             kp.interpolation = "LINEAR"
 
 
-def _make_vehicle_root(veh: dict, veh_manifest: dict, plates_dir: str):
+def _make_vehicle_root(veh: dict, veh_manifest: dict, plates_dir: str,
+                       out_blend_dir: str | None = None):
     cls = veh.get("class", "car")
     meta = veh_manifest[cls]
     coll = BS.append_collection_from_blend(
@@ -65,7 +66,8 @@ def _make_vehicle_root(veh: dict, veh_manifest: dict, plates_dir: str):
     if os.path.isdir(tex_dir):
         bu.remap_textures_to_local(tex_dir)
     BS.assign_plate_and_color(coll, veh.get("plate", veh["id"]), plates_dir,
-                              rgba=veh.get("color"))
+                              rgba=veh.get("color"),
+                              out_blend_dir=out_blend_dir)
 
     bpy.ops.object.empty_add(type="PLAIN_AXES", location=(0.0, 0.0, 0.0))
     root = bpy.context.view_layer.objects.active
@@ -206,7 +208,8 @@ def build_unified_scene(scenario: dict, out_blend: str, only: str | None = None,
     print(f"[unified] placing {len(selected_vehicles)}/{total_vehicles} SUMO vehicles for {len(selected_tags)} camera(s)", flush=True)
     n = 0
     for veh in selected_vehicles:
-        root = _make_vehicle_root(veh, veh_manifest, plates_dir)
+        root = _make_vehicle_root(veh, veh_manifest, plates_dir,
+                                  out_blend_dir=os.path.dirname(out_blend))
         if _keyframe_sumo_trajectory(root, veh, frame_end,
                                      keyframe_stride=keyframe_stride,
                                      heading_threshold_deg=heading_threshold_deg,

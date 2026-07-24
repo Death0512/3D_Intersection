@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from typing import Iterable, List, Optional, Tuple
 
 import bpy
@@ -99,11 +100,51 @@ def set_origin_to_ground_center(objs: List[bpy.types.Object]) -> None:
 # Texture remapping
 # ---------------------------------------------------------------------------
 
+def _blend_relative_path(path: str) -> str:
+    """Return a Blender-relative path when possible, otherwise absolute.
+
+    Blender stores project-relative external paths with a leading ``//``.  Using
+    them avoids baking developer-machine paths such as
+    ``/home/death/Documents/3D_Intersection_Video/...`` into generated .blend
+    files that later render on a VM checkout under another root.
+    """
+    try:
+        return bpy.path.relpath(os.path.abspath(path))
+    except Exception:
+        return os.path.abspath(path)
+
+
+def _texture_match_keys(value: str) -> list[str]:
+    """Return candidate basename keys for Blender image names/filepaths.
+
+    Some imported assets carry filepaths with backslashes even on Linux, and
+    Blender may uniquify duplicate image datablocks as ``lights2.png.001``.  A
+    plain ``os.path.basename`` / ``splitext`` misses those, leaving stale
+    absolute paths in generated scenes.
+    """
+    if not value:
+        return []
+    normalized = str(value).replace("\\", "/")
+    base = os.path.basename(normalized)
+    candidates = [base]
+    stripped = re.sub(r"\.\d{3}$", "", base)
+    if stripped != base:
+        candidates.append(stripped)
+    keys: list[str] = []
+    for candidate in candidates:
+        stem, _ext = os.path.splitext(candidate)
+        if stem:
+            keys.append(stem.lower())
+    return keys
+
+
 def remap_textures_to_local(tex_dir: str, missing_log: Optional[List[str]] = None) -> int:
     """Remap every image-block's filepath to a file inside tex_dir.
 
-    Matching is extension-insensitive on the base name. Returns the number of
-    images successfully remapped. Unresolved paths are appended to missing_log.
+    Matching is extension-insensitive on the base name. Matched filepaths are
+    stored as Blender-relative ``//...`` paths so generated scenes remain
+    portable across checkout roots. Returns the number of images successfully
+    remapped. Unresolved paths are appended to missing_log.
     """
     if not os.path.isdir(tex_dir):
         if missing_log is not None:
@@ -122,15 +163,13 @@ def remap_textures_to_local(tex_dir: str, missing_log: Optional[List[str]] = Non
         if img.name == "Render Result":
             continue
         filepath = bpy.path.abspath(img.filepath)
-        base = os.path.splitext(os.path.basename(filepath))[0]
-        key = base.lower()
-        candidates = local.get(key, [])
-        if not candidates:
-            # Try the image's own name as a fallback (sometimes filepath is empty).
-            base2 = os.path.splitext(img.name)[0]
-            candidates = local.get(base2.lower(), [])
+        candidates = []
+        for key in _texture_match_keys(filepath) + _texture_match_keys(img.name):
+            candidates = local.get(key, [])
+            if candidates:
+                break
         if candidates:
-            img.filepath = candidates[0]
+            img.filepath = _blend_relative_path(candidates[0])
             try:
                 img.reload()
             except RuntimeError:
