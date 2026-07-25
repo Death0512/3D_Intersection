@@ -1,0 +1,27 @@
+============================================================
+NORTH SCENARIO: empty  phase=all  scale=0  profile=none
+out: output/empty
+============================================================
+============================================================
+PIPELINE  seed=42  seconds=300s @ 30fps  out=/home/death/Documents/3D_Intersection/output/empty
+  python : /home/death/miniconda3/bin/python3
+  blender: /usr/bin/snap
+  only   : in_N,out_S
+  signal : off
+  demand : default model (scale=0)
+  simulator: sumo
+============================================================
+
+$ /home/death/miniconda3/bin/python3 /home/death/Documents/3D_Intersection/scripts/run_pipeline.py --seed 42 --fps 30 --seconds 300 --out /home/death/Documents/3D_Intersection/output/empty --only in_N,out_S --max-workers-per-gpu 2 --demand-scale 0 --samples 12 --keyframe-stride 10 --heading-threshold-deg 1.5 --speed-threshold 1.0 --simulator sumo
+============================================================
+PIPELINE  seed=42  seconds=300.0s (30 fps)  out=/home/death/Documents/3D_Intersection/output/empty
+  python    : /home/death/miniconda3/bin/python3
+  blender   : /snap/bin/blender
+  simulator : sumo
+============================================================
+[env] all 8 env files present and valid
+[0/5] Env files OK
+
+[1/5] Asset validation
+
+$ /snap/bin/blender -b --python /home/death/Documents/3D_Intersection/scripts/validate_assets.py
