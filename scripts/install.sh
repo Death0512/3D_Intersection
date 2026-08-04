@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — One-shot setup for Blender 5.1.x + Python deps + ffmpeg + SUMO.
+# install.sh — One-shot setup for Blender 5.2.x + Python deps + ffmpeg + SUMO.
 #
 # After running this, `bash scripts/run_all.sh` just works. The installer writes
 # scripts/env.sh which run_all.sh auto-sources. You can also `source scripts/env.sh`
@@ -10,7 +10,7 @@
 #
 # Options:
 #   --yes               Non-interactive: pass -y to apt, skip prompts.
-#   --blender PATH      Skip download; use this existing blender binary (must be 5.1.x).
+#   --blender PATH      Skip download; use this existing blender binary (must be 5.2.x).
 #   --python PYTHON3    Base python3 for venv creation (default: python3 on PATH).
 #   --venv DIR          Venv directory (default: ./venv, project root).
 #   --env-file FILE     Path to write the activation env file (default: scripts/env.sh).
@@ -25,14 +25,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-install.sh — One-shot setup for Blender 5.1.x + Python deps + ffmpeg + SUMO.
+install.sh — One-shot setup for Blender 5.2.x + Python deps + ffmpeg + SUMO.
 
 Usage:
   bash scripts/install.sh [OPTIONS]
 
 Options:
   --yes               Non-interactive: pass -y to apt, skip prompts.
-  --blender PATH      Skip download; use this existing blender binary (must be 5.1.x).
+  --blender PATH      Skip download; use this existing blender binary (must be 5.2.x).
   --python PYTHON3    Base python3 for venv creation (default: python3 on PATH).
   --venv DIR          Venv directory (default: ./venv, project root).
   --env-file FILE     Path to write activation env file (default: scripts/env.sh).
@@ -64,8 +64,8 @@ GPU_TUNE=0
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPTS_DIR/.." && pwd)"
-BLENDER_VERSION="5.1.2"
-BLENDER_URL="https://download.blender.org/release/Blender5.1/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+BLENDER_VERSION="5.2.0"
+BLENDER_URL="https://download.blender.org/release/Blender5.2/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
 BLENDER_INSTALL_DIR="$HOME/.local/opt/blender-${BLENDER_VERSION}"
 BLENDER_SYMLINK="$HOME/.local/bin/blender"
 
@@ -228,7 +228,7 @@ if [[ "${#APT_INSTALL[@]}" -gt 0 ]]; then
   echo "  apt: OK"
 fi
 
-# ---- 2. Blender 5.1.x -------------------------------------------------------
+# ---- 2. Blender 5.2.x -------------------------------------------------------
 echo ""
 echo "--- [2/3] Blender ${BLENDER_VERSION} ---"
 
@@ -377,7 +377,7 @@ cat > "$ENV_FILE" <<EOF
 # run_all.sh auto-sources it, so \`bash scripts/run_all.sh\` just works.
 #
 # After sourcing:
-#   - blender  →  $BLENDER_INSTALLED_BIN  (Blender 5.1.x)
+#   - blender  →  $BLENDER_INSTALLED_BIN  (Blender 5.2.x)
 #   - python3  →  $VENV_PYTHON  $([[ "$IS_KAGGLE" -eq 1 ]] && echo "(system, with Pillow)" || echo "(venv with Pillow)")
 #   - \$DOAN_PYTHON is set  →  $VENV_PYTHON
 
@@ -412,8 +412,7 @@ fi
 echo "  env     : $ENV_FILE"
 echo ""
 echo "Quick start:"
-echo "  source $ENV_FILE"
-echo "  bash scripts/run_all.sh --seconds 5 --demand-scale 3 --out output/test"
+echo "  bash $SCRIPTS_DIR/run_all.sh --seconds 60 --demand-scale 3 --out output/run1"
 echo ""
 
 # ---- GPU tuning (opt-in, --gpu-tune flag required) --------------------------

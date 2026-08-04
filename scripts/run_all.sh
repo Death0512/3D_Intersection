@@ -49,9 +49,6 @@
 #   --storage-limit-gib N
 #                       Hard cap total output dir storage in GiB (default 50).
 #                       A Linux filesystem reservation covers every output file.
-#   --engine {cycles,eevee}
-#                       Render engine (default cycles). EEVEE uses
-#                       BLENDER_EEVEE_NEXT, skips GPU/Cycles setup.
 #   --blender PATH      Path to blender binary (default: auto-detect)
 #   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
 #   -h, --help          Show this help
@@ -86,8 +83,6 @@ SPEED_THRESHOLD=""
 PHASE="all"
 SCENARIOS=0
 STORAGE_LIMIT_GIB=50
-ENGINE="cycles"
-
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
@@ -118,17 +113,10 @@ while [[ $# -gt 0 ]]; do
         --heading-threshold-deg) HEADING_THRESHOLD_DEG="$2"; shift 2 ;;
         --speed-threshold)  SPEED_THRESHOLD="$2";   shift 2 ;;
         --storage-limit-gib)  STORAGE_LIMIT_GIB="$2"; shift 2 ;;
-        --engine)            ENGINE="$2";          shift 2 ;;
         -h|--help)          usage ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
-
-# Validate --engine
-case "$ENGINE" in
-    cycles|eevee) ;;
-    *) echo "ERROR: --engine must be 'cycles' or 'eevee'" >&2; exit 2 ;;
-esac
 
 # ---------------------------------------------------------------------------
 # Resolve paths + detect host (Kaggle vs local Ubuntu)
@@ -160,7 +148,6 @@ if [[ "$SCENARIOS" -eq 1 ]]; then
     [[ -n "$HEADING_THRESHOLD_DEG" ]] && _base_flags+=(--heading-threshold-deg "$HEADING_THRESHOLD_DEG")
     [[ -n "$SPEED_THRESHOLD" ]] && _base_flags+=(--speed-threshold "$SPEED_THRESHOLD")
     [[ "$STORAGE_LIMIT_GIB" -gt 0 ]] && _base_flags+=(--storage-limit-gib "$STORAGE_LIMIT_GIB")
-    _base_flags+=(--engine "$ENGINE")
     [[ -n "$BLENDER_BIN" ]] && _base_flags+=(--blender "$BLENDER_BIN")
     [[ -n "$PYTHON_BIN" ]] && _base_flags+=(--python "$PYTHON_BIN")
 
@@ -269,7 +256,7 @@ if [[ -z "$BLENDER_BIN" ]]; then
     if [[ -z "$BLENDER_BIN" ]]; then
         echo "ERROR: blender not found on PATH. Run scripts/install.sh first or use --blender /path/to/blender" >&2
         if [[ "$IS_KAGGLE" -eq 1 ]]; then
-            echo "        (On Kaggle: bash scripts/install.sh --yes  — installs Blender 5.1.x under \$HOME/.local)" >&2
+            echo "        (On Kaggle: bash scripts/install.sh --yes  — installs Blender 5.2.x under \$HOME/.local)" >&2
         fi
         exit 1
     fi
@@ -319,7 +306,6 @@ PIPELINE_ARGS=(
 [[ -n "$HEADING_THRESHOLD_DEG" ]] && PIPELINE_ARGS+=(--heading-threshold-deg "$HEADING_THRESHOLD_DEG")
 [[ -n "$SPEED_THRESHOLD" ]]  && PIPELINE_ARGS+=(--speed-threshold "$SPEED_THRESHOLD")
 [[ "$STORAGE_LIMIT_GIB" -gt 0 ]] && PIPELINE_ARGS+=(--storage-limit-gib "$STORAGE_LIMIT_GIB")
-PIPELINE_ARGS+=(--engine "$ENGINE")
 
 # C5: force Python stdout unbuffered so every print(..., flush=True) in
 # render.py / build_scene.py / run_pipeline.py reaches the terminal/log
