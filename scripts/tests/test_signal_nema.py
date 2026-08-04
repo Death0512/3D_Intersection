@@ -8,8 +8,6 @@ Verifies the fundamental NEMA invariants:
   * Heavy demand is served more green time than light demand (MaxPressure).
   * ``next_green_frame`` always returns a frame whose combo serves the
     movement (or appends a correct fallback interval).
-  * Closed-loop integration: v2 ``scenario_gen.generate`` writes a valid
-    adaptive timeline.
 """
 import os
 import sys
@@ -250,100 +248,6 @@ def test_next_green_frame_within_interval_is_self():
         if 6 in combo:  # phase 6 = N through/right
             mid = (s + e) // 2
             assert sp.next_green_frame(D.N, T.STRAIGHT, mid) == mid
-
-
-# ---------------------------------------------------------------------------
-# Closed-loop integration with v2 scenario generation
-# ---------------------------------------------------------------------------
-def test_generate_adaptive_release_frames_are_in_timeline():
-    """v2 adaptive generation releases every queued vehicle during an exported
-    green interval for its movement."""
-    import tempfile
-    import scenario_gen as S
-    with tempfile.TemporaryDirectory() as td:
-        scn = S.generate(101, 20.0, td, fps=FPS,
-                         signal_mode="adaptive",
-                         demand=S.DemandModel.default())
-
-    intervals = scn["signal_timeline"]
-    bad = []
-    for v in scn["vehicles"]:
-        phase = _movement_to_phase(G.Direction(v["approach"]), G.Turn(v["turn"]))
-        rf = v.get("release_frame")
-        if rf is None:
-            bad.append((v["id"], "unreleased"))
-        elif not any(iv["start"] <= rf < iv["end"] and phase in iv["phases"]
-                     for iv in intervals):
-            bad.append((v["id"], rf))
-    assert not bad, f"{len(bad)} vehicles released on red: {bad[:3]}"
-
-
-def test_generate_adaptive_uses_v2_generator():
-    import scenario_gen as S
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        scn = S.generate(202, 10.0, td, fps=FPS,
-                         signal_mode="adaptive",
-                         demand=S.DemandModel.default())
-    assert scn["generator"] == "v2"
-    assert scn["signal_timeline"]
-
-
-def test_generate_adaptive_writes_signal_timeline():
-    """``generate(signal_mode='adaptive')`` writes a scenario.json containing
-    a non-empty ``signal_timeline`` and ``signal_mode == 'adaptive'``."""
-    import tempfile
-    import scenario_gen as S
-    import json
-    with tempfile.TemporaryDirectory() as td:
-        scn = S.generate(7, 20.0, td, fps=FPS,
-                          signal_mode="adaptive",
-                          demand=S.DemandModel.default())
-        with open(os.path.join(td, "scenario.json")) as f:
-            on_disk = json.load(f)
-        assert on_disk["signal_mode"] == "adaptive"
-        assert on_disk["signal_timeline"]
-        assert all({"start", "end", "phases"} <= set(iv)
-                    for iv in on_disk["signal_timeline"])
-
-
-def test_generate_fixed_mode_builds_signal_timeline_without_explicit_plan():
-    """Direct Python API calls should match the CLI/pipeline fixed-signal
-    behavior: ``generate(signal_mode='fixed')`` constructs a fixed SignalPlan
-    when no explicit plan is supplied."""
-    import tempfile
-    import scenario_gen as S
-    import json
-    with tempfile.TemporaryDirectory() as td:
-        S.generate(9, 20.0, td, fps=FPS,
-                   signal_mode="fixed",
-                   demand=S.DemandModel.default())
-        with open(os.path.join(td, "scenario.json")) as f:
-            scn = json.load(f)
-    assert scn["signal_mode"] == "fixed"
-    assert scn["signal_timeline"]
-    assert all({"start", "phase"} <= set(iv)
-               for iv in scn["signal_timeline"])
-
-
-def test_generate_adaptive_no_conflicting_intervals():
-    """The exported signal timeline has zero cross-barrier conflicting
-    combos (a property of the dual-ring controller)."""
-    import tempfile
-    import scenario_gen as S
-    import json
-    with tempfile.TemporaryDirectory() as td:
-        S.generate(11, 20.0, td, fps=FPS,
-                    signal_mode="adaptive",
-                    demand=S.DemandModel.default())
-        with open(os.path.join(td, "scenario.json")) as f:
-            scn = json.load(f)
-    for iv in scn["signal_timeline"]:
-        p1, p2 = iv["phases"]
-        side1 = "NS" if p1 in _NS_SIDE else "EW"
-        side2 = "NS" if p2 in _NS_SIDE else "EW"
-        assert side1 == side2, (
-            f"cross-barrier combo in {iv}: phases {p1},{p2}")
 
 
 def _run_all():

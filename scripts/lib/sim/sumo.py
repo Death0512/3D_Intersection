@@ -130,7 +130,6 @@ def export_sumo_files(scenario: dict, out_dir: str) -> Dict[str, str]:
         f.write("```bash\n")
         f.write("netconvert --node-files intersection.nod.xml --edge-files intersection.edg.xml --output-file net.net.xml\n")
         f.write("sumo -c run.sumocfg\n")
-        f.write("python3 scripts/compare_sumo.py --scenario scenario.json --sumo-tripinfo sumo/tripinfo.xml --out comparison\n")
         f.write("```\n")
 
     return {

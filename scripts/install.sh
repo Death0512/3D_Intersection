@@ -413,13 +413,7 @@ echo "  env     : $ENV_FILE"
 echo ""
 echo "Quick start:"
 echo "  source $ENV_FILE"
-echo "  python3 scripts/scenario_gen.py --seed 42 --seconds 5 --demand-scale 3 --out output/test"
-echo ""
-echo "Or run the full pipeline:"
 echo "  bash scripts/run_all.sh --seconds 5 --demand-scale 3 --out output/test"
-echo ""
-echo "SUMO unified pipeline:"
-echo "  python3 scripts/run_pipeline.py --simulator sumo --seconds 5 --demand-scale 3 --out output/sumo_test"
 echo ""
 
 # ---- GPU tuning (opt-in, --gpu-tune flag required) --------------------------

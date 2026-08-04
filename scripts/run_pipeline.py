@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""Phase 5 — Pipeline driver.
+"""Phase 5 — Pipeline driver (SUMO unified).
 
 Orchestrates the full dataset generation:
-  [0/5] Validate env files       (conda/venv python: envfile)
+  [0/5] Validate env files       (venv python: envfile)
   [1/5] (Optional) Validate assets  (blender headless: validate_assets.py)
-  [2/5] Generate scenario         (conda/venv python: scenario_gen.py)
+  [2/5] SUMO simulation + trajectory export  (run_sumo_unified.py)
   [3/5] Pre-generate plate PNGs   (conda/venv python: gen_plate batch)
-  [4/5] Render all 8 cameras      (blender headless: render.py, parallel)
-  [5/5] Metadata + run validation (conda/venv python)
+  [4/5] Build + render all cameras (blender headless: build_unified_scene + render_unified)
+  [5/5] Metadata + run validation (python)
 
-``--seconds`` sets the rendered clip length. Scenario generation uses a
-steady-state warm-up stream and admits vehicles whose motion intersects that
-fixed window; render/metadata clamp per-frame outputs to the clip bounds.
+--seconds sets the rendered clip length. SUMO generates a steady-state
+warm-up stream and admits vehicles whose motion intersects the fixed window;
+render/metadata clamp per-frame outputs to the clip bounds.
 
-Run (from the project root, with venv python):
-    python3 scripts/run_pipeline.py --seed 42 --seconds 12.0 --out output/run1
+Called by scripts/run_all.sh, the sole supported entry point.
 
 Blender is invoked via subprocess; the python interpreter with Pillow is
 resolved from the DOAN_PYTHON env var (set by scripts/env.sh).
@@ -124,30 +123,6 @@ def step_assets_validate():
     start and exit within seconds; a hang here means a corrupt .blend / driver."""
     run([BLENDER, "-b", "--python", os.path.join(HERE, "validate_assets.py")],
         timeout=120)
-
-
-def step_scenario(seed, seconds, out_dir, fps=None,
-                   signal=False, signal_mode="fixed", demand=None,
-                   demand_scale=None, simulator=None):
-    """Run scenario_gen.py. Bounded to 600s; v2 simulation should finish fast,
-    so a hang here means the event loop horizon/queue release logic regressed."""
-    cmd = [PYTHON, os.path.join(HERE, "scenario_gen.py"),
-           "--seed", str(seed),
-           "--seconds", str(seconds),
-           "--out", out_dir]
-    if fps is not None:
-        cmd += ["--fps", str(fps)]
-    if signal:
-        cmd += ["--signal"]
-        cmd += ["--signal-mode", str(signal_mode)]
-    if demand is not None:
-        cmd += ["--demand", str(demand)]
-    if demand_scale is not None:
-        cmd += ["--demand-scale", str(demand_scale)]
-    if simulator is not None:
-        cmd += ["--simulator", str(simulator)]
-    run(cmd, timeout=600)
-    return os.path.join(out_dir, "scenario.json")
 
 
 def camera_tags_from_only(only):
@@ -418,13 +393,16 @@ def step_sumo_unified_build(scenario_path, out_dir, only=None,
     return scene_path
 
 
-def step_sumo_unified_render(scenario_path, out_dir, jobs, samples, only=None):
+def step_sumo_unified_render(scenario_path, out_dir, jobs, samples, only=None,
+                              storage_limit_gib=50, engine="cycles"):
     scene_path = os.path.join(out_dir, "unified_scene.blend")
     if not os.path.exists(scene_path):
         raise SystemExit(f"FAIL: unified scene not found: {scene_path}")
     cmd = [PYTHON, os.path.join(HERE, "render_unified.py"),
            "--scene", scene_path, "--scenario", scenario_path, "--out", out_dir,
-           "--jobs", str(max(1, jobs)), "--samples", str(samples)]
+           "--jobs", str(max(1, jobs)), "--samples", str(samples),
+           "--engine", engine,
+           "--storage-limit-gib", str(storage_limit_gib)]
     if only:
         cmd += ["--only", only]
     run(cmd, check=True, timeout=None)
@@ -467,20 +445,11 @@ def main():
     ap.add_argument("--samples", type=int, default=48,
                     help="Cycles render samples per frame (default 48; lower "
                          "= faster, noisier — denoiser compensates. Use 16-24 "
-                         "for quick test runs, 48 for production.")
+                         "for quick test runs, 48 for production. N/A for EEVEE.)")
+    ap.add_argument("--engine", choices=["cycles", "eevee"], default="cycles",
+                    help="render engine: cycles (GPU, samples+denoise) or eevee "
+                         "(CPU, BLENDER_EEVEE_NEXT, fast preview)")
     ap.add_argument("--skip-asset-check", action="store_true")
-    ap.add_argument("--signal", action="store_true",
-                    help="enable traffic signal SPaT gating + queue")
-    ap.add_argument("--signal-mode", type=str, default="fixed",
-                    choices=["fixed", "adaptive"],
-                    help="signal controller type when --signal is set: "
-                         "'fixed' (default, 70s cycle permissive-left) or "
-                         "'adaptive' (NEMA 8-phase MaxPressure, closed-loop "
-                         "on realised arrivals)")
-    ap.add_argument("--demand", type=str, default=None,
-                    help="path to a demand JSON (per-approach flow veh/h + "
-                          "turning split). When omitted, the default demand "
-                         "model is used.")
     ap.add_argument("--demand-scale", type=float, default=None,
                     help="density multiplier on the default demand model "
                          "(default: 1.0 when --demand is not given). E.g. "
@@ -501,9 +470,6 @@ def main():
     ap.add_argument("--speed-threshold", type=float, default=0.8,
                     help="SUMO unified Blender build: keep extra keyframes when "
                          "speed changes by more than this many m/s.")
-    ap.add_argument("--simulator", type=str, default="sumo",
-                    choices=["sumo"],
-                    help="simulation engine: 'sumo' (SUMO/TraCI unified trajectory pipeline)")
     ap.add_argument("--phase", type=str, default="all",
                     choices=["all", "cpu1", "gpu", "cpu2"],
                     help="pipeline phase to run: "
@@ -511,6 +477,8 @@ def main():
                          "'cpu1' (steps 0-3: env+assets+scenario+plates, CPU only), "
                          "'gpu' (step 4: build+render+encode, GPU required), "
                          "'cpu2' (steps 5-6: metadata+validation, CPU only)")
+    ap.add_argument("--storage-limit-gib", type=int, default=50,
+                help="hard storage cap for the entire output dir in GiB (default 50)")
     args = ap.parse_args()
 
     fps = args.fps
@@ -518,13 +486,12 @@ def main():
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
     fps_label = f"{fps} fps" if fps else "default fps"
-    sim_label = args.simulator
     print("=" * 60)
     print(f"PIPELINE  seed={args.seed}  "
           f"seconds={seconds}s ({fps_label})  out={out_dir}")
     print(f"  python    : {PYTHON}")
     print(f"  blender   : {BLENDER}")
-    print(f"  simulator : {sim_label}")
+    print("  simulator : sumo")
     print("=" * 60)
 
     phase = args.phase
@@ -539,10 +506,6 @@ def main():
             step_assets_validate()
 
         print("\n[2/5] Scenario generation")
-        if args.signal:
-            print("[sumo] --signal ignored: SUMO build uses a traffic-light junction")
-        if args.demand:
-            print("[sumo] --demand JSON ignored in unified mode; use --demand-scale")
         scn = step_sumo_scenario(args.seed, seconds, out_dir, fps=fps,
                                  demand_scale=args.demand_scale,
                                  demand_profile=args.demand_profile)
@@ -554,7 +517,7 @@ def main():
         if phase == "cpu1":
             print("\n" + "=" * 60)
             print("PHASE cpu1 COMPLETE — copy output dir to GPU host, then run:")
-            print(f"  bash scripts/run_VM.sh --out {out_dir} [render options]")
+            print(f"  bash scripts/run_all.sh --out {out_dir} --phase vm [render options]")
             print("=" * 60)
             return
 
@@ -565,7 +528,7 @@ def main():
     if phase in ("gpu", "cpu2") and not os.path.exists(scn):
         raise SystemExit(
             f"FAIL: scenario.json not found at {scn}\n"
-            f"  Run cpu1 phase first: bash scripts/run_cpu1.sh --out {out_dir} ...")
+            f"  Run cpu1 phase first: bash scripts/run_all.sh --out {out_dir} --phase cpu1 ...")
 
     # ---- gpu: step 4 --------------------------------------------------------
     if phase in ("all", "gpu"):
@@ -580,12 +543,14 @@ def main():
             len(camera_tags_from_only(args.only)), explicit=args.jobs,
             max_workers_per_gpu=args.max_workers_per_gpu,
             vram_budget=VRAM_PER_JOB_MIB * 2)
-        step_sumo_unified_render(scn_render, out_dir, n_jobs, args.samples, args.only)
+        step_sumo_unified_render(scn_render, out_dir, n_jobs, args.samples, args.only,
+                                 storage_limit_gib=args.storage_limit_gib,
+                                 engine=args.engine)
 
         if phase == "gpu":
             print("\n" + "=" * 60)
             print("PHASE gpu COMPLETE — run metadata/validation with:")
-            print(f"  python scripts/run_pipeline.py --out {out_dir} --phase cpu2 --simulator sumo")
+            print(f"  bash scripts/run_all.sh --out {out_dir} --phase cpu2")
             print("=" * 60)
             return
 

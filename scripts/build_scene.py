@@ -651,53 +651,56 @@ def configure_gpu():
 # Render settings
 # ---------------------------------------------------------------------------
 
-def setup_render(env_lights: dict = None, samples: int = None):
-    """Configure Cycles GPU rendering at 1080p, 30 fps, JPEG sequence.
+def setup_render(env_lights: dict = None, samples: int = None,
+                 engine="cycles"):
+    """Configure Cycles/EEVEE GPU rendering at 1080p, 30 fps, JPEG sequence.
 
-    Denoising is GPU-only: use the OPTIX denoiser only when Blender selected
-    the OPTIX backend and the NVIDIA OptiX weights file exists. On CUDA-only
-    devices (e.g. Kaggle P100, or T4 exposed only as CUDA), denoising is
-    disabled instead of falling back to OpenImageDenoise, which can silently
-    consume CPU time and caused very slow Kaggle renders.
+    ``engine``: "cycles" (default) or "eevee" (Blender 4.x+ BLENDER_EEVEE_NEXT).
+    EEVEE skips Cycles-only properties (samples, denoiser, device).
+
+    Cycles denoising is GPU-only: use the probe denoiser when Blender selected
+    the back end and the NVIDIA OptiX weights file exists. On CUDA-only
+    devices denoising is disabled instead of falling back to OpenImageDenoise.
 
     ``samples`` (optional int) overrides the module-level CYCLES_SAMPLES so
     callers (render.py --samples) can trade quality for speed without editing
-    this file.  None/0 keeps the default (48).
+    this file.  None/0 keeps the default (48).  N/A for EEVEE.
 
     If ``env_lights`` (the env file's ``lights`` block) is given, the Sun
     light's rotation/energy are overridden from it.
     """
     scene = bpy.context.scene
-    # Engine: Cycles (EEVEE cannot use the GPU in headless -b mode).
-    scene.render.engine = "CYCLES"
-    scene.cycles.device = "GPU"
-    # M9: honor --samples override (None → default 48). Lower sample counts
-    # (16-24) let users iterate faster; denoising remains GPU-only below.
-    scene.cycles.samples = samples if samples else CYCLES_SAMPLES
-    scene.cycles.use_denoising = False
-    # GPU-only denoise policy. Do NOT fall back to OpenImageDenoise: on Kaggle
-    # that may run on CPU and dominate render time. If OptiX denoise is not
-    # definitely available, render without denoising and let sample count/scene
-    # settings control quality/performance.
-    backend = bpy.context.preferences.addons["cycles"].preferences.compute_device_type
-    optix_weights_ok = os.path.exists("/usr/share/nvidia/nvoptix.bin")
-    if backend == "OPTIX" and optix_weights_ok:
-        try:
-            scene.cycles.denoiser = "OPTIX"
-            actual = str(scene.cycles.denoiser)
-            if actual == "OPTIX":
-                scene.cycles.use_denoising = True
-                print("  [denoiser] OPTIX active", flush=True)
-            else:
-                print(f"  [denoiser] disabled: wanted OPTIX but got {actual}",
+    # Engine: Cycles (default) or EEVEE (Blender 4.x+ BLENDER_EEVEE_NEXT).
+    scene.render.engine = "BLENDER_EEVEE_NEXT" if engine == "eevee" else "CYCLES"
+    if engine == "cycles":
+        scene.cycles.device = "GPU"
+        # M9: honor --samples override (None → default 48). Lower sample counts
+        # (16-24) let users iterate faster; denoising remains GPU-only below.
+        scene.cycles.samples = samples if samples else CYCLES_SAMPLES
+        scene.cycles.use_denoising = False
+        # GPU-only denoise policy. Do NOT fall back to OpenImageDenoise: on Kaggle
+        # that may run on CPU and dominate render time. If OptiX denoise is not
+        # definitely available, render without denoising and let sample count/scene
+        # settings control quality/performance.
+        backend = bpy.context.preferences.addons["cycles"].preferences.compute_device_type
+        optix_weights_ok = os.path.exists("/usr/share/nvidia/nvoptix.bin")
+        if backend == "OPTIX" and optix_weights_ok:
+            try:
+                scene.cycles.denoiser = "OPTIX"
+                actual = str(scene.cycles.denoiser)
+                if actual == "OPTIX":
+                    scene.cycles.use_denoising = True
+                    print("  [denoiser] OPTIX active", flush=True)
+                else:
+                    print(f"  [denoiser] disabled: wanted OPTIX but got {actual}",
+                          flush=True)
+            except Exception:
+                print("  [denoiser] disabled: OPTIX denoiser assignment failed",
                       flush=True)
-        except Exception:
-            print("  [denoiser] disabled: OPTIX denoiser assignment failed",
+        else:
+            reason = "CUDA backend" if backend != "OPTIX" else "missing nvoptix.bin"
+            print(f"  [denoiser] disabled ({reason}; no CPU/OIDN fallback)",
                   flush=True)
-    else:
-        reason = "CUDA backend" if backend != "OPTIX" else "missing nvoptix.bin"
-        print(f"  [denoiser] disabled ({reason}; no CPU/OIDN fallback)",
-              flush=True)
     # Resolution / fps / output format
     scene.render.resolution_x = RES_X
     scene.render.resolution_y = RES_Y

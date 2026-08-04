@@ -218,7 +218,6 @@ def build_unified_scene(scenario: dict, out_blend: str, only: str | None = None,
             if n == 1 or n % 10 == 0:
                 print(f"  [unified] keyframed {n} vehicles", flush=True)
 
-    BS.configure_gpu()
     BS.setup_render(samples=48)
     scene = bpy.context.scene
     scene.frame_start = 0

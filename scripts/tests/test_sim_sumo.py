@@ -1,4 +1,4 @@
-"""Tests for Phase 7 SUMO export/comparison scaffolding."""
+"""Tests for SUMO export/comparison scaffolding."""
 from __future__ import annotations
 
 import json
@@ -12,7 +12,6 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from compare_sumo import main as compare_main
 from run_sumo_unified import (
     _apply_motion_derived_rot_z,
     _motion_delta_to_blender_rot_z,
@@ -140,17 +139,6 @@ class TestSUMOComparison(unittest.TestCase):
             with open(paths["json"]) as f:
                 report = json.load(f)
         self.assertEqual(report["ours"]["mean_wait_s"], 1.0)
-
-    def test_compare_sumo_script_writes_manifest(self):
-        with tempfile.TemporaryDirectory() as td:
-            scenario_path = os.path.join(td, "scenario.json")
-            with open(scenario_path, "w") as f:
-                json.dump(_scenario(), f)
-            out = os.path.join(td, "cmp")
-            rc = compare_main(["--scenario", scenario_path, "--out", out])
-            self.assertEqual(rc, 0)
-            self.assertTrue(os.path.exists(os.path.join(out, "manifest.json")))
-            self.assertTrue(os.path.exists(os.path.join(out, "sumo", "routes.rou.xml")))
 
 
 if __name__ == "__main__":
