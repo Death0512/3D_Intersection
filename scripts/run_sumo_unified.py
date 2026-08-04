@@ -21,6 +21,7 @@ import math
 import os
 import random
 import shutil
+import signal
 import string
 import subprocess
 import sys
@@ -156,7 +157,32 @@ def write_sumo_network(sumo_dir: str, speed_ms: float = 16.67,
         "--no-turnarounds", "true",
         "--output-file", net,
     ]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        # ponytail: netconvert 1.21.1 can SIGSEGV with explicit TLS cycle timing
+        # options; retry without them and keep static TLS defaults.
+        if e.returncode == -signal.SIGSEGV:
+            # Remove any partial output from the crashed run.
+            if os.path.exists(net):
+                os.unlink(net)
+            print("[sumo] WARNING: netconvert crashed (SIGSEGV) with --tls.cycle.time, "
+                  "--tls.yellow.time, --tls.allred.time; retrying without them "
+                  "(static TLS remains)", flush=True)
+            fallback_cmd = [
+                netconvert,
+                "--node-files", nod,
+                "--edge-files", edg,
+                "--connection-files", con,
+                "--tls.default-type", "static",
+                "--no-turnarounds", "true",
+                "--output-file", net,
+            ]
+            subprocess.run(fallback_cmd, check=True)
+        else:
+            raise
+    if not os.path.isfile(net) or os.path.getsize(net) == 0:
+        raise SystemExit(f"FAIL: netconvert produced no output at {net}")
     return net
 
 

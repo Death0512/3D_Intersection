@@ -4,9 +4,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
@@ -17,6 +20,7 @@ from run_sumo_unified import (
     _motion_delta_to_blender_rot_z,
     _sumo_angle_to_blender_rot_z,
     _unwrap_angle,
+    write_sumo_network,
 )
 from sim.sumo import (
     export_sumo_files,
@@ -139,6 +143,117 @@ class TestSUMOComparison(unittest.TestCase):
             with open(paths["json"]) as f:
                 report = json.load(f)
         self.assertEqual(report["ours"]["mean_wait_s"], 1.0)
+
+
+class TestNetconvertRetry(unittest.TestCase):
+    def setUp(self):
+        self._netconvert_patcher = mock.patch(
+            "shutil.which", return_value="/fake/netconvert"
+        )
+        self.mock_which = self._netconvert_patcher.start()
+        self.tempdir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._netconvert_patcher.stop()
+        self.tempdir.cleanup()
+
+    def _touch_nonempty(self, path):
+        """Create a non-empty mock .net.xml for post-run assertions."""
+        with open(path, "w") as f:
+            f.write("<net/>\n")
+
+    def _call(self, *, first_crash: bool):
+        side_effects = []
+        if first_crash:
+            side_effects.append(
+                subprocess.CalledProcessError(-signal.SIGSEGV, ["netconvert"])
+            )
+        side_effects.append(0)  # fallback (or first) success
+        with (
+            mock.patch("run_sumo_unified.subprocess.run") as mock_run,
+            mock.patch("run_sumo_unified._write_xml"),
+            mock.patch("os.path.isfile", return_value=True),
+            mock.patch("os.path.getsize", return_value=1024),
+        ):
+            mock_run.side_effect = side_effects
+            result = write_sumo_network(self.tempdir.name)
+
+        self.assertEqual(result, os.path.join(self.tempdir.name, "intersection.net.xml"))
+
+        if first_crash:
+            self.assertEqual(mock_run.call_count, 2,
+                             "expected retry after SIGSEGV")
+        else:
+            self.assertEqual(mock_run.call_count, 1,
+                             "expected single call on clean success")
+
+    def test_netconvert_retries_on_sigsegv(self):
+        self._touch_nonempty(
+            os.path.join(self.tempdir.name, "intersection.net.xml")
+        )
+        self._call(first_crash=True)
+
+    def test_netconvert_no_retry_on_nonzero(self):
+        # Non-SIGSEGV failures must raise immediately.
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                mock.patch("shutil.which", return_value="/fake/netconvert"),
+                mock.patch("run_sumo_unified.subprocess.run") as mock_run,
+                mock.patch("run_sumo_unified._write_xml"),
+            ):
+                mock_run.side_effect = subprocess.CalledProcessError(
+                    1, ["netconvert"]
+                )
+                with self.assertRaises(subprocess.CalledProcessError):
+                    write_sumo_network(td)
+                self.assertEqual(mock_run.call_count, 1, "no retry for non-SIGSEGV")
+
+    def test_clean_first_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            net_path = os.path.join(td, "intersection.net.xml")
+            with (
+                mock.patch("shutil.which", return_value="/fake/netconvert"),
+                mock.patch("run_sumo_unified.subprocess.run",
+                           return_value=mock.DEFAULT),
+                mock.patch("run_sumo_unified._write_xml"),
+                mock.patch("os.path.isfile", return_value=True),
+                mock.patch("os.path.getsize", return_value=1024),
+            ):
+                result = write_sumo_network(td)
+                self.assertEqual(result, net_path)
+
+    def test_fallback_omits_timing_options(self):
+        with (
+            mock.patch("run_sumo_unified.subprocess.run") as mock_run,
+            mock.patch("run_sumo_unified._write_xml"),
+            mock.patch("os.path.isfile", return_value=True),
+            mock.patch("os.path.getsize", return_value=1024),
+        ):
+            mock_run.side_effect = [
+                subprocess.CalledProcessError(-signal.SIGSEGV, ["netconvert"]),
+                0,
+            ]
+            write_sumo_network(self.tempdir.name)
+
+        fallback = mock_run.call_args_list[1].args[0]
+        self.assertIn("--tls.default-type", fallback)
+        self.assertIn("static", fallback)
+        self.assertNotIn("--tls.cycle.time", fallback)
+        self.assertNotIn("--tls.yellow.time", fallback)
+        self.assertNotIn("--tls.allred.time", fallback)
+
+    def test_missing_output_after_success_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                mock.patch("shutil.which", return_value="/fake/netconvert"),
+                mock.patch("run_sumo_unified.subprocess.run",
+                           return_value=mock.DEFAULT),
+                mock.patch("run_sumo_unified._write_xml"),
+                mock.patch("os.path.isfile", return_value=False),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    write_sumo_network(td)
+                self.assertIn("produced no output", str(ctx.exception))
 
 
 if __name__ == "__main__":
