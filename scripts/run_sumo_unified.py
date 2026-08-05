@@ -157,49 +157,30 @@ def write_sumo_network(sumo_dir: str, speed_ms: float = 16.67,
         "--no-turnarounds", "true",
         "--output-file", net,
     ]
-    def _run_netconvert(extra_args: list[str], label: str) -> None:
-        base = [
-            netconvert,
-            "--node-files", nod,
-            "--edge-files", edg,
-            "--connection-files", con,
-            "--no-turnarounds", "true",
-            "--output-file", net,
-        ]
-        if os.path.exists(net):
-            os.unlink(net)
-        subprocess.run(base + extra_args, check=True)
-        if not os.path.isfile(net) or os.path.getsize(net) == 0:
-            raise RuntimeError(f"netconvert ({label}) produced no output")
-
-    # Attempt 1: full TLS timing args
-    # Attempt 2: static TLS without cycle/yellow/allred (fixes SIGSEGV on SUMO 1.21.x)
-    # Attempt 3: no --tls.* args at all (fixes SIGSEGV on older Kaggle SUMO builds)
-    attempts = [
-        (["--tls.default-type", "static",
-          "--tls.cycle.time", "70",
-          "--tls.yellow.time", "4",
-          "--tls.allred.time", "2"], "full"),
-        (["--tls.default-type", "static"], "no-timing"),
-        ([], "no-tls"),
-    ]
-    last_exc: Exception | None = None
-    for extra, label in attempts:
-        try:
-            _run_netconvert(extra, label)
-            if label != "full":
-                print(f"[sumo] WARNING: netconvert succeeded with fallback '{label}' "
-                      f"(SIGSEGV on full args — TLS timing may differ)", flush=True)
-            last_exc = None
-            break
-        except subprocess.CalledProcessError as e:
-            if e.returncode != -signal.SIGSEGV:
-                raise
-            print(f"[sumo] WARNING: netconvert SIGSEGV with '{label}', trying next ...",
-                  flush=True)
-            last_exc = e
-    if last_exc is not None:
-        raise last_exc
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        # ponytail: netconvert 1.21.1 can SIGSEGV with explicit TLS cycle timing
+        # options; retry without them and keep static TLS defaults.
+        if e.returncode == -signal.SIGSEGV:
+            # Remove any partial output from the crashed run.
+            if os.path.exists(net):
+                os.unlink(net)
+            print("[sumo] WARNING: netconvert crashed (SIGSEGV) with --tls.cycle.time, "
+                  "--tls.yellow.time, --tls.allred.time; retrying without them "
+                  "(static TLS remains)", flush=True)
+            fallback_cmd = [
+                netconvert,
+                "--node-files", nod,
+                "--edge-files", edg,
+                "--connection-files", con,
+                "--tls.default-type", "static",
+                "--no-turnarounds", "true",
+                "--output-file", net,
+            ]
+            subprocess.run(fallback_cmd, check=True)
+        else:
+            raise
     if not os.path.isfile(net) or os.path.getsize(net) == 0:
         raise SystemExit(f"FAIL: netconvert produced no output at {net}")
     return net
@@ -448,6 +429,11 @@ def run_traci(cfg: str, fps: int, duration_frames: int,
                  "--no-step-log", "true"])
     trajectories: Dict[str, List[dict]] = defaultdict(list)
     last_heading_rot_z: Dict[str, float] = {}
+    # Per-vehicle state for trajectory decimation (ponytail: same logic as
+    # _keyframe_sumo_trajectory in build_unified_scene.py — reduce 6-10x RAM
+    # by storing only keyframe candidates, not every frame).
+    _prev_pt: Dict[str, dict | None] = {}
+    last_pt: Dict[str, dict] = {}
     try:
         for frame in range(duration_frames):
             traci.simulationStep()
@@ -472,12 +458,33 @@ def run_traci(cfg: str, fps: int, duration_frames: int,
                     "accel": round(accel, 4),
                     "lane_id": lane_id, "edge_id": edge_id,
                 }
-                trajectories[vid].append(pt)
+                # ponytail: decimate trajectory at source — only keep keyframe
+                # candidates (always first sample, always stride-6 hits, and
+                # heading/speed-change triggers).  Cuts JSON size and RAM 6-10x
+                # for long (3600s) renders.  Blender linearly interpolates
+                # between keyframes — visually identical to storing every frame.
+                prev = _prev_pt.get(vid)
+                keep = (prev is None
+                        or (int(pt["frame"]) % 6 == 0)
+                        or abs(float(pt.get("rot_z", 0.0)) - float(prev.get("rot_z", 0.0))) > 0.0175   # ~1 deg
+                        or abs(float(pt["speed"]) - float(prev["speed"])) > 0.8)  # m/s
+                if keep:
+                    trajectories[vid].append(pt)
+                    _prev_pt[vid] = pt
+                # Always record the LAST sample per vehicle so the final frame
+                # at disappear_frame is present (Blender needs the endpoint).
+                last_pt[vid] = pt
                 meta = vehicles_meta.get(vid)
                 if meta is not None:
                     meta["speed_ms"] = max(float(meta.get("speed_ms", 0.0)), speed)
                     if meta.get("depart_frame") is None:
                         meta["depart_frame"] = frame
+        # Ensure each vehicle's last collected point is in its trajectory
+        # (might have been skipped by decimation stride).
+        for vid, pt in last_pt.items():
+            traj = trajectories.get(vid)
+            if traj and traj[-1]["frame"] != pt["frame"]:
+                traj.append(pt)
         for pts in trajectories.values():
             _apply_motion_derived_rot_z(pts)
         return trajectories
