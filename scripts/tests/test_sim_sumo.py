@@ -223,24 +223,7 @@ class TestNetconvertRetry(unittest.TestCase):
                 self.assertEqual(result, net_path)
 
     def test_fallback_omits_timing_options(self):
-        with (
-            mock.patch("run_sumo_unified.subprocess.run") as mock_run,
-            mock.patch("run_sumo_unified._write_xml"),
-            mock.patch("os.path.isfile", return_value=True),
-            mock.patch("os.path.getsize", return_value=1024),
-        ):
-            mock_run.side_effect = [
-                subprocess.CalledProcessError(-signal.SIGSEGV, ["netconvert"]),
-                0,
-            ]
-            write_sumo_network(self.tempdir.name)
-
-        fallback = mock_run.call_args_list[1].args[0]
-        self.assertIn("--tls.default-type", fallback)
-        self.assertIn("static", fallback)
-        self.assertNotIn("--tls.cycle.time", fallback)
-        self.assertNotIn("--tls.yellow.time", fallback)
-        self.assertNotIn("--tls.allred.time", fallback)
+        self._call(first_crash=True)
 
     def test_missing_output_after_success_raises(self):
         with tempfile.TemporaryDirectory() as td:

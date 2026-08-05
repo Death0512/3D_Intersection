@@ -394,14 +394,13 @@ def step_sumo_unified_build(scenario_path, out_dir, only=None,
 
 
 def step_sumo_unified_render(scenario_path, out_dir, jobs, samples, only=None,
-                              storage_limit_gib=50, engine="cycles"):
+                              storage_limit_gib=50):
     scene_path = os.path.join(out_dir, "unified_scene.blend")
     if not os.path.exists(scene_path):
         raise SystemExit(f"FAIL: unified scene not found: {scene_path}")
     cmd = [PYTHON, os.path.join(HERE, "render_unified.py"),
            "--scene", scene_path, "--scenario", scenario_path, "--out", out_dir,
            "--jobs", str(max(1, jobs)), "--samples", str(samples),
-           "--engine", engine,
            "--storage-limit-gib", str(storage_limit_gib)]
     if only:
         cmd += ["--only", only]
@@ -445,10 +444,7 @@ def main():
     ap.add_argument("--samples", type=int, default=48,
                     help="Cycles render samples per frame (default 48; lower "
                          "= faster, noisier — denoiser compensates. Use 16-24 "
-                         "for quick test runs, 48 for production. N/A for EEVEE.)")
-    ap.add_argument("--engine", choices=["cycles", "eevee"], default="cycles",
-                    help="render engine: cycles (GPU, samples+denoise) or eevee "
-                         "(CPU, BLENDER_EEVEE_NEXT, fast preview)")
+                         "for quick test runs, 48 for production.)")
     ap.add_argument("--skip-asset-check", action="store_true")
     ap.add_argument("--demand-scale", type=float, default=None,
                     help="density multiplier on the default demand model "
@@ -544,8 +540,7 @@ def main():
             max_workers_per_gpu=args.max_workers_per_gpu,
             vram_budget=VRAM_PER_JOB_MIB * 2)
         step_sumo_unified_render(scn_render, out_dir, n_jobs, args.samples, args.only,
-                                 storage_limit_gib=args.storage_limit_gib,
-                                 engine=args.engine)
+                                 storage_limit_gib=args.storage_limit_gib)
 
         if phase == "gpu":
             print("\n" + "=" * 60)

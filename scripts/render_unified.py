@@ -54,28 +54,28 @@ def _run_one_camera(scene, scenario, out_dir, tag, gpu_id, samples,
                      batch_size, frame_reuse, bitrate: str,
                      storage_cap_bytes: int,
                      segment_limit_bytes: int,
-                     concat_limit_bytes: int,
-                     engine: str = "cycles") -> str:
+                     concat_limit_bytes: int) -> str:
     """Run one Blender camera subprocess on specified GPU.
     Returns the camera tag on success, raises on failure."""
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     env["PYTHONUNBUFFERED"] = "1"
+    # WSL2: NVIDIA GPU accessible via /usr/lib/wsl/lib; Snap isolates env so inject here
+    wsl_lib = "/usr/lib/wsl/lib"
+    if os.path.isdir(wsl_lib):
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{wsl_lib}:{existing}" if existing else wsl_lib
     blender_args = [
         "-b", "--python",
         os.path.join(ROOT, "scripts", "render_unified_camera.py"), "--",
         "--scene", scene, "--camera", tag, "--out", out_dir,
         "--samples", str(samples), "--scenario", scenario,
-        "--engine", engine,
         "--batch-size", str(batch_size), "--bitrate", bitrate,
         "--storage-cap-bytes", str(storage_cap_bytes),
         "--segment-limit-bytes", str(segment_limit_bytes),
         "--concat-limit-bytes", str(concat_limit_bytes),
     ]
-    if engine == "eevee":
-        cmd = ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", BLENDER] + blender_args
-    else:
-        cmd = [BLENDER] + blender_args
+    cmd = [BLENDER] + blender_args
     if not frame_reuse:
         cmd.append("--no-frame-reuse")
     print(f"[unified:{tag}] $ {' '.join(cmd)} (GPU {gpu_id})", flush=True)
@@ -125,7 +125,7 @@ def _bitrate_kbps(total_bytes: int, duration_s: float) -> str:
         duration_s = 1.0
     # ponytail: leave room below the 85% per-segment hard ceiling for muxing.
     bps = int(total_bytes * 8 * 0.75 / duration_s)
-    kbps = max(50, bps // 1_000)
+    kbps = max(50, min(50_000, bps // 1_000))  # h264_nvenc: H.264 level 5.2 max ~240 Mbps; cap at 50 Mbps for 1080p
     return f"{kbps}k"
 
 
@@ -136,8 +136,6 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--samples", type=int, default=48)
-    ap.add_argument("--engine", choices=["cycles", "eevee"], default="cycles",
-                    help="render engine (cycles or eevee)")
     ap.add_argument("--only", default=None)
     ap.add_argument("--no-frame-reuse", action="store_true",
                     help="render every frame instead of copying unchanged frames")
@@ -247,8 +245,7 @@ def main():
             f = ex.submit(_run_one_camera, ns.scene, ns.scenario, ns.out,
                           tag, gpu_id, ns.samples, batch_size, frame_reuse,
                           per_camera_bitrate, per_camera_cap_bytes,
-                          segment_limit_bytes, concat_limit_bytes,
-                          engine=ns.engine)
+                          segment_limit_bytes, concat_limit_bytes)
             futures[f] = (tag, gpu_id)
 
         for f in concurrent.futures.as_completed(futures):

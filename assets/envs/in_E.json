@@ -6,12 +6,12 @@
   "generated_from": "geometry.camera_pose + geometry.road_arm_transform",
   "camera": {
     "location": [
-      -115.0,
+      -125.0,
       -8.0,
-      14.3
+      20.0
     ],
     "look_at": [
-      -74.99938,
+      -69.45151,
       -8.0,
       0.0
     ],
