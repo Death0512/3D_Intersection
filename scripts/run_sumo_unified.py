@@ -157,30 +157,49 @@ def write_sumo_network(sumo_dir: str, speed_ms: float = 16.67,
         "--no-turnarounds", "true",
         "--output-file", net,
     ]
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        # ponytail: netconvert 1.21.1 can SIGSEGV with explicit TLS cycle timing
-        # options; retry without them and keep static TLS defaults.
-        if e.returncode == -signal.SIGSEGV:
-            # Remove any partial output from the crashed run.
-            if os.path.exists(net):
-                os.unlink(net)
-            print("[sumo] WARNING: netconvert crashed (SIGSEGV) with --tls.cycle.time, "
-                  "--tls.yellow.time, --tls.allred.time; retrying without them "
-                  "(static TLS remains)", flush=True)
-            fallback_cmd = [
-                netconvert,
-                "--node-files", nod,
-                "--edge-files", edg,
-                "--connection-files", con,
-                "--tls.default-type", "static",
-                "--no-turnarounds", "true",
-                "--output-file", net,
-            ]
-            subprocess.run(fallback_cmd, check=True)
-        else:
-            raise
+    def _run_netconvert(extra_args: list[str], label: str) -> None:
+        base = [
+            netconvert,
+            "--node-files", nod,
+            "--edge-files", edg,
+            "--connection-files", con,
+            "--no-turnarounds", "true",
+            "--output-file", net,
+        ]
+        if os.path.exists(net):
+            os.unlink(net)
+        subprocess.run(base + extra_args, check=True)
+        if not os.path.isfile(net) or os.path.getsize(net) == 0:
+            raise RuntimeError(f"netconvert ({label}) produced no output")
+
+    # Attempt 1: full TLS timing args
+    # Attempt 2: static TLS without cycle/yellow/allred (fixes SIGSEGV on SUMO 1.21.x)
+    # Attempt 3: no --tls.* args at all (fixes SIGSEGV on older Kaggle SUMO builds)
+    attempts = [
+        (["--tls.default-type", "static",
+          "--tls.cycle.time", "70",
+          "--tls.yellow.time", "4",
+          "--tls.allred.time", "2"], "full"),
+        (["--tls.default-type", "static"], "no-timing"),
+        ([], "no-tls"),
+    ]
+    last_exc: Exception | None = None
+    for extra, label in attempts:
+        try:
+            _run_netconvert(extra, label)
+            if label != "full":
+                print(f"[sumo] WARNING: netconvert succeeded with fallback '{label}' "
+                      f"(SIGSEGV on full args — TLS timing may differ)", flush=True)
+            last_exc = None
+            break
+        except subprocess.CalledProcessError as e:
+            if e.returncode != -signal.SIGSEGV:
+                raise
+            print(f"[sumo] WARNING: netconvert SIGSEGV with '{label}', trying next ...",
+                  flush=True)
+            last_exc = e
+    if last_exc is not None:
+        raise last_exc
     if not os.path.isfile(net) or os.path.getsize(net) == 0:
         raise SystemExit(f"FAIL: netconvert produced no output at {net}")
     return net
