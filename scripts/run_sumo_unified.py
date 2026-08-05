@@ -186,36 +186,53 @@ def write_sumo_network(sumo_dir: str, speed_ms: float = 16.67,
     return net
 
 
-def _demand_multiplier(profile: str | None) -> Callable[[float], float]:
-    """Return a time→multiplier function for optional time-varying demand.
-
-    Supported syntax:
-      spike:start=55,end=65,scale=20
-
-    Outside [start,end) the multiplier is 1.0; inside it is ``scale``.  The
-    route writer uses thinning from the maximum rate, so the spike window is
-    sampled correctly without needing a full non-homogeneous Poisson solver.
-    """
-    if not profile:
-        return lambda _t: 1.0
-    kind, _, rest = profile.partition(":")
-    if kind.strip().lower() != "spike":
-        raise SystemExit(f"FAIL: unsupported --demand-profile {profile!r}; expected spike:start=55,end=65,scale=20")
-    opts = {"start": 55.0, "end": 65.0, "scale": 20.0}
-    if rest:
-        for part in rest.split(","):
+def _parse_spike_windows(rest: str) -> list[tuple[float, float, float]]:
+    """Parse semicolon-separated spike windows: start=55,end=65,scale=20;start=90,end=100,scale=30"""
+    windows: list[tuple[float, float, float]] = []
+    for segment in rest.split(";"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        opts = {"start": 55.0, "end": 65.0, "scale": 20.0}
+        for part in segment.split(","):
             if not part.strip():
                 continue
             k, sep, v = part.partition("=")
             if not sep or k.strip() not in opts:
                 raise SystemExit(f"FAIL: bad --demand-profile component {part!r}")
             opts[k.strip()] = float(v)
-    start, end, scale = opts["start"], opts["end"], opts["scale"]
-    if end <= start:
-        raise SystemExit("FAIL: demand spike end must be greater than start")
-    if scale < 0:
-        raise SystemExit("FAIL: demand spike scale must be >= 0")
-    return lambda t: scale if start <= float(t) < end else 1.0
+        s, e, sc = opts["start"], opts["end"], opts["scale"]
+        if e <= s:
+            raise SystemExit("FAIL: demand spike end must be greater than start")
+        if sc < 0:
+            raise SystemExit("FAIL: demand spike scale must be >= 0")
+        windows.append((s, e, sc))
+    return windows
+
+
+def _demand_multiplier(profile: str | None) -> tuple[Callable[[float], float], list[float]]:
+    """Return (multiplier_fn, probe_times) for time-varying demand.
+
+    Supported syntax:
+      spike:start=55,end=65,scale=20               # single spike
+      spike:start=55,end=65,scale=20;start=90,end=100,scale=30  # multiple
+    """
+    if not profile:
+        return lambda _t: 1.0, [0.0]
+    kind, _, rest = profile.partition(":")
+    if kind.strip().lower() != "spike":
+        raise SystemExit(f"FAIL: unsupported --demand-profile {profile!r}; expected spike:start=55,end=65,scale=20")
+    windows = _parse_spike_windows(rest)
+    if not windows:
+        return lambda _t: 1.0, [0.0]
+    # ponytail: linear scan over small window list; full partition table is overkill.
+    def multi_spike(t: float) -> float:
+        for s, e, sc in windows:
+            if s <= t < e:
+                return sc
+        return 1.0
+    probes = [1.0] + [s for s, _, _ in windows] + [e for _, e, _ in windows]
+    return multi_spike, probes
 
 
 def write_routes(sumo_dir: str, rng: random.Random, seconds: float,
@@ -225,19 +242,8 @@ def write_routes(sumo_dir: str, rng: random.Random, seconds: float,
     per_route_counter = defaultdict(int)
     vehicles = []
 
-    multiplier = _demand_multiplier(demand_profile)
-
-    # Rejection/thinning from a conservative max-rate proposal.  This preserves
-    # a Poisson-like arrival process while allowing short high-flow windows.
-    probe_times = [0.0, seconds]
-    if demand_profile and demand_profile.startswith("spike:"):
-        opts = {"start": 55.0, "end": 65.0, "scale": 20.0}
-        for part in demand_profile.partition(":")[2].split(","):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                if k.strip() in opts:
-                    opts[k.strip()] = float(v)
-        probe_times += [opts["start"], opts["end"]]
+    multiplier, spike_probes = _demand_multiplier(demand_profile)
+    probe_times = [0.0, seconds] + spike_probes
     max_mult = max(1.0, *(multiplier(t) for t in probe_times))
 
     for ap in DIRECTIONS:
