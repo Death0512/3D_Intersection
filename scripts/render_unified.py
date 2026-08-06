@@ -175,10 +175,12 @@ def main():
     total_limit = ns.storage_limit_gib * _GIB
     existing = _existing_usage(ns.out)
 
-    # Conservative JPEG peak: 1080p RGB raw-size bound (worst-case)
-    # ponytail: 8 MiB/frame is the absolute ceiling for a 1920×1080×3 RRB buffer;
-    # actual JPEG quality 95 is ~250-500 KiB but we use the raw bound as guarantee.
-    reserve = 2 * _GIB + jobs * batch_size * 8 * 1024 * 1024
+    # JPEG peak: actual JPEG at quality 95 for 1080p is ~250-500 KiB/frame.
+    # Use 512 KiB/frame as the reservation (1 MiB safety factor over worst-case
+    # quality-95 JPEG) instead of the raw RGB buffer bound (8 MiB) which was
+    # far too conservative and blocked runs on hosts with <34 GiB free disk.
+    _JPEG_BYTES_PER_FRAME = 512 * 1024  # 512 KiB
+    reserve = 2 * _GIB + jobs * batch_size * _JPEG_BYTES_PER_FRAME
     remaining = total_limit - existing - reserve
     if remaining <= (n_cameras + jobs) * 10_000_000:
         # Floor: each camera needs at least ~10 MB for a tiny final video
@@ -187,7 +189,7 @@ def main():
             f"  limit   = {total_limit >> 20} MiB ({ns.storage_limit_gib} GiB)\n"
             f"  existing= {existing >> 20} MiB\n"
             f"  reserve = {reserve >> 20} MiB "
-            f"(2 GiB base + {jobs}×{batch_size}×8 MiB peak JPEGs)\n"
+            f"(2 GiB base + {jobs}×{batch_size}×512 KiB peak JPEGs)\n"
             f"  remaining = {remaining >> 20} MiB for {n_cameras} cameras + "
             f"{jobs} transient concat copies\n"
             f"  → per-camera media < 10 MiB — cannot encode video."
@@ -212,14 +214,14 @@ def main():
 
     # Per-camera scoped backstop allows its transient segments + final concat.
     # Global pre-partition above still bounds all camera peaks below total_limit.
-    per_camera_cap_bytes = 2 * camera_media_budget + batch_size * 8 * 1024 * 1024
+    per_camera_cap_bytes = 2 * camera_media_budget + batch_size * _JPEG_BYTES_PER_FRAME
 
     free = shutil.disk_usage(ns.out).free
     if free < reserve:
         raise SystemExit(
             f"Not enough disk space on {ns.out}: "
             f"{free >> 20} MiB free, need >= {reserve >> 20} MiB "
-            f"(reserved: 2 GiB + {jobs}×{batch_size}×8 MiB peak JPEGs)")
+            f"(reserved: 2 GiB + {jobs}×{batch_size}×512 KiB peak JPEGs)")
 
     print(f"[unified] requested --jobs={ns.jobs}, "
           f"detected {phys_gpus} nvidia GPU{'s' if phys_gpus != 1 else ''}, "
