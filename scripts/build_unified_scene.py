@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import gc
 import json
 import math
 import os
 import sys
+
+import site as _site_module
+_user_site = _site_module.getusersitepackages()
+if _user_site not in sys.path:
+    sys.path.insert(0, _user_site)
+
+import ijson
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -23,6 +29,36 @@ import build_scene as BS
 
 
 ROAD_JSON = os.path.join(ROOT, "assets", "road.json")
+
+# ponytail: template cache per class — append each vehicle .blend once and clone
+# mesh objects + plate/body materials per vehicle.  Cleared after reset_scene.
+_TEMPLATE_CACHE: dict[str, bpy.types.Collection] = {}
+
+
+def _template_for_class(cls: str, veh_manifest: dict,
+                        out_blend_dir: str | None = None) -> bpy.types.Collection:
+    """Return the master appended collection for a vehicle class, appending once."""
+    if cls in _TEMPLATE_CACHE:
+        return _TEMPLATE_CACHE[cls]
+    meta = veh_manifest[cls]
+    tmpl = BS.append_collection_from_blend(
+        os.path.join(ROOT, meta["blend"]), meta["collection"],
+        new_name=f"TEMPLATE_{cls}")
+    # Remap textures once per class, relative to the output .blend dir
+    tex_dir = os.path.join(ROOT, "models", cls, "textures")
+    if os.path.isdir(tex_dir):
+        bu.remap_textures_to_local(tex_dir, relative_to_dir=out_blend_dir)
+    # Hide template objects and unlink from scene so they don't render
+    for obj in tmpl.objects:
+        obj.hide_render = True
+        obj.hide_viewport = True
+    _TEMPLATE_CACHE[cls] = tmpl
+    return tmpl
+
+
+def _reset_template_cache():
+    """Clear template cache after reset_scene invalidates Blender data."""
+    _TEMPLATE_CACHE.clear()
 
 
 def _vehicle_mesh_children(root):
@@ -45,41 +81,81 @@ def _keyframe_visibility(root, start: int, end: int):
         obj.hide_viewport = True
         obj.keyframe_insert(data_path="hide_render", frame=end + 1)
         obj.keyframe_insert(data_path="hide_viewport", frame=end + 1)
-        BS._set_step_interpolation(obj, "hide_render")
-        BS._set_step_interpolation(obj, "hide_viewport")
-
-
-def _set_linear(obj, data_path: str):
-    for fc in BS._fcurves_for(obj, data_path):
-        for kp in fc.keyframe_points:
-            kp.interpolation = "LINEAR"
+        for dp in ("hide_render", "hide_viewport"):
+            for fc in BS._fcurves_for(obj, dp):
+                fc.keyframe_points.foreach_set("interpolation", [0] * len(fc.keyframe_points))
 
 
 def _make_vehicle_root(veh: dict, veh_manifest: dict, plates_dir: str,
                        out_blend_dir: str | None = None):
+    """Clone vehicle mesh objects from the per-class template, isolating
+    plate/body materials per vehicle.  All other mesh data stays shared."""
     cls = veh.get("class", "car")
     meta = veh_manifest[cls]
-    coll = BS.append_collection_from_blend(
-        os.path.join(ROOT, meta["blend"]), meta["collection"],
-        new_name=f"VEH_{veh['id']}_{cls}")
-    tex_dir = os.path.join(ROOT, "models", cls, "textures")
-    if os.path.isdir(tex_dir):
-        bu.remap_textures_to_local(tex_dir, relative_to_dir=out_blend_dir)
+    tmpl = _template_for_class(cls, veh_manifest, out_blend_dir=out_blend_dir)
+
+    # Find plate and body materials on the template BEFORE cloning so we know
+    # which material slots to duplicate per-vehicle.
+    tmpl_plate_mat, _tmpl_plate_obj = BS._find_plate_material_in_collection(tmpl)
+    tmpl_body_mat, _tmpl_body_obj = BS._find_body_material_in_collection(tmpl)
+
+    # Build a per-vehicle map: template-material → cloned copy (or None = shared)
+    mat_copies: dict[bpy.types.Material, bpy.types.Material | None] = {}
+    if tmpl_plate_mat is not None:
+        mat_copies[tmpl_plate_mat] = tmpl_plate_mat.copy()
+    if tmpl_body_mat is not None:
+        mat_copies[tmpl_body_mat] = tmpl_body_mat.copy()
+
+    # Clone every object from the template.
+    new_objs = []
+    for obj in tmpl.objects:
+        new_obj = obj.copy()
+        new_obj.hide_render = False
+        new_obj.hide_viewport = False
+        new_obj.animation_data_clear()
+        if obj.type == "MESH":
+            needs_copy = any(
+                slot.material is not None and slot.material in mat_copies
+                for slot in obj.material_slots)
+            if needs_copy:
+                # Only copy mesh data that carries plate/body materials so
+                # per-vehicle material assignments don't bleed into siblings.
+                new_obj.data = obj.data.copy()
+            # Replace plate and body materials with per-vehicle copies
+            for slot in new_obj.material_slots:
+                if slot.material is None:
+                    continue
+                orig = slot.material
+                for tmpl_mat, copy_mat in mat_copies.items():
+                    if orig == tmpl_mat:
+                        slot.material = copy_mat
+                        break
+        bpy.context.scene.collection.objects.link(new_obj)
+        new_objs.append(new_obj)
+
+    # Create the per-vehicle collection
+    coll_name = f"VEH_{veh['id']}_{cls}"
+    coll = bpy.data.collections.new(coll_name)
+    bpy.context.scene.collection.children.link(coll)
+    for obj in new_objs:
+        coll.objects.link(obj)
+        bpy.context.scene.collection.objects.unlink(obj)
+
+    # Now apply plate + color to the per-vehicle collection (the mat copies
+    # were already swapped, so assign_plate_and_color finds the copies)
+    # ponytail: assign_plate_and_color re-finds materials by name prefix;
+    # the copies have the same base name so the finders still work.
     BS.assign_plate_and_color(coll, veh.get("plate", veh["id"]), plates_dir,
                               rgba=veh.get("color"),
                               out_blend_dir=out_blend_dir)
 
-    bpy.ops.object.empty_add(type="PLAIN_AXES", location=(0.0, 0.0, 0.0))
-    root = bpy.context.view_layer.objects.active
-    root.name = f"VEH_{veh['id']}"
+    root = bpy.data.objects.new(f"VEH_{veh['id']}", None)
+    root.empty_display_type = "PLAIN_AXES"
     root["forward_offset_deg"] = float(meta.get("forward_offset_deg", 0.0))
-    bpy.ops.object.select_all(action="DESELECT")
-    for obj in coll.objects:
-        if obj.type == "MESH":
-            obj.select_set(True)
-    root.select_set(True)
-    bpy.context.view_layer.objects.active = root
-    bpy.ops.object.parent_set(type="OBJECT", keep_transform=True)
+    bpy.context.scene.collection.objects.link(root)
+    for obj in new_objs:
+        obj.parent = root
+        obj.matrix_parent_inverse = root.matrix_world.inverted()
     return root
 
 
@@ -116,14 +192,57 @@ def _keyframe_sumo_trajectory(root, veh: dict, frame_end: int,
         if heading_delta > heading_threshold or speed_delta > speed_threshold or int(p["frame"]) % keyframe_stride == 0:
             selected.append(p); prev = p
 
+    # Bulk-populate transform F-curves via the Blender 5.2 slotted-action API.
+    # Bootstrap: one keyframe on each data_path creates the action/slot/layer/channelbag.
+    root.location = (float(pts[0]["x"]), float(pts[0]["y"]), float(pts[0].get("z", 0.0)))
+    root.rotation_euler = (0.0, 0.0, float(pts[0].get("rot_z", 0.0)) + fwd_off)
+    root.keyframe_insert(data_path="location", frame=0)
+    root.keyframe_insert(data_path="rotation_euler", frame=0)
+
+    # Locate all six fcurves (3 loc + 3 rot) via the shared API.
+    loc_fcs = sorted(BS._fcurves_for(root, "location"), key=lambda fc: fc.array_index)
+    rot_fcs = sorted(BS._fcurves_for(root, "rotation_euler"), key=lambda fc: fc.array_index)
+    all_fcs = loc_fcs + rot_fcs
+    if len(all_fcs) != 6:
+        raise RuntimeError(
+            f"Expected 6 FCurves for {root.name}, got {len(all_fcs)}. "
+            f"Check Blender 5.2 slotted-action bootstrap."
+        )
+
+    # Clear the dummy keyframe points we created during bootstrap.
+    for fc in all_fcs:
+        n = len(fc.keyframe_points)
+        for _ in range(n):
+            fc.keyframe_points.remove(fc.keyframe_points[0])
+
+    # Build per-channel flat arrays for foreach_set('co', ...).
+    # co order: [frame0, value0, frame1, value1, ...]
+    n_sel = len(selected)
+    frames_flat: list[float] = []
+    loc_x: list[float] = []; loc_y: list[float] = []; loc_z: list[float] = []
+    rot_x: list[float] = []; rot_y: list[float] = []; rot_z: list[float] = []
     for p in selected:
-        frame = int(p["frame"])
-        root.location = (float(p["x"]), float(p["y"]), float(p.get("z", 0.0)))
-        root.rotation_euler = (0.0, 0.0, float(p.get("rot_z", 0.0)) + fwd_off)
-        root.keyframe_insert(data_path="location", frame=frame)
-        root.keyframe_insert(data_path="rotation_euler", frame=frame)
-    _set_linear(root, "location")
-    _set_linear(root, "rotation_euler")
+        f = float(p["frame"])
+        frames_flat.append(f)
+        loc_x.append(float(p["x"]))
+        loc_y.append(float(p["y"]))
+        loc_z.append(float(p.get("z", 0.0)))
+        rot_x.append(0.0)
+        rot_y.append(0.0)
+        rot_z.append(float(p.get("rot_z", 0.0)) + fwd_off)
+
+    channel_values = [loc_x, loc_y, loc_z, rot_x, rot_y, rot_z]
+
+    for fc, vals in zip(all_fcs, channel_values):
+        fc.keyframe_points.add(n_sel)
+        flat = []
+        for i in range(n_sel):
+            flat.append(frames_flat[i])
+            flat.append(vals[i])
+        fc.keyframe_points.foreach_set("co", flat)
+        fc.keyframe_points.foreach_set("interpolation", [1] * n_sel)
+        fc.update()
+
     _keyframe_visibility(root, pts[0]["frame"], min(int(pts[-1]["frame"]), frame_end))
     return True
 
@@ -147,16 +266,14 @@ def _camera_visible_vehicle(veh: dict, tag: str) -> bool:
     return ex_dir == direction
 
 
-def _filter_visible_vehicles(scenario: dict, camera_tags: list[str]) -> list[dict]:
+def _vehicle_visible(veh: dict, camera_tags: list[str]) -> bool:
+    """Check visibility using top-level vehicle fields only — no trajectory needed."""
     if not camera_tags:
-        return list(scenario.get("vehicles", []))
-    visible = []
-    for veh in scenario.get("vehicles", []):
-        for tag in camera_tags:
-            if _camera_visible_vehicle(veh, tag):
-                visible.append(veh)
-                break
-    return visible
+        return True
+    for tag in camera_tags:
+        if _camera_visible_vehicle(veh, tag):
+            return True
+    return False
 
 
 def _selected_camera_tags(only: str | None) -> list[str]:
@@ -172,26 +289,36 @@ def _selected_camera_tags(only: str | None) -> list[str]:
     return tags
 
 
-def build_unified_scene(scenario: dict, out_blend: str, only: str | None = None,
+def build_unified_scene(scenario_path: str, out_blend: str, only: str | None = None,
                         keyframe_stride: int = 6,
                         heading_threshold_deg: float = 1.0,
                         speed_threshold: float = 0.8):
+    selected_tags = _selected_camera_tags(only)
+
+    # Stream-read top-level metadata (fps, duration_frames), then stream vehicles.
+    # ponytail: ijson streaming avoids holding all trajectory dicts in RAM;
+    # the final .blend still lives in Blender memory, which is the real ceiling.
+    duration_frames = 30 * 10  # default fallback
+    with open(scenario_path, "rb") as f:
+        parser = ijson.parse(f, use_float=True)
+        for prefix, event, value in parser:
+            if prefix == "fps" and event == "number":
+                pass  # read but not needed; frame_end comes from duration_frames
+            elif prefix == "duration_frames" and event == "number":
+                duration_frames = int(value)
+            elif prefix.startswith("vehicles."):
+                # Once we hit vehicles array, break — we'll stream items separately.
+                break
+
+    frame_end = max(0, duration_frames - 1)
+
     bu.reset_scene()
+    _reset_template_cache()  # ponytail: template refs are stale after Blender data wipe
     with open(ROAD_JSON) as f:
         road_meta = json.load(f)
     veh_manifest = BS.load_vehicle_manifest()
     plates_dir = os.path.join(os.path.dirname(out_blend), "plates")
     os.makedirs(plates_dir, exist_ok=True)
-
-    selected_tags = _selected_camera_tags(only)
-    selected_vehicles = _filter_visible_vehicles(scenario, selected_tags)
-    total_vehicles = len(scenario.get("vehicles", []))
-    # Drop non-visible vehicles from the decoded JSON object before appending
-    # Blender assets. Dense 300s scenarios can decode to >2GB of Python objects;
-    # keeping all four directions in RAM while rendering only in_N/out_N is a
-    # direct waste on 16GB VMs.
-    scenario["vehicles"] = selected_vehicles
-    gc.collect()
 
     for d in G.Direction:
         BS.place_road(d, road_meta, is_entry=True, unified=True)
@@ -204,19 +331,26 @@ def build_unified_scene(scenario: dict, out_blend: str, only: str | None = None,
         cam = BS.place_camera(direction, is_in, road_meta, env=env, unified=True)
         cam.name = f"Camera_{tag}"
 
-    frame_end = max(0, int(scenario.get("duration_frames", 1)) - 1)
-    print(f"[unified] placing {len(selected_vehicles)}/{total_vehicles} SUMO vehicles for {len(selected_tags)} camera(s)", flush=True)
+    # Stream vehicles one at a time, process only visible ones, drop after use.
     n = 0
-    for veh in selected_vehicles:
-        root = _make_vehicle_root(veh, veh_manifest, plates_dir,
-                                  out_blend_dir=os.path.dirname(out_blend))
-        if _keyframe_sumo_trajectory(root, veh, frame_end,
-                                     keyframe_stride=keyframe_stride,
-                                     heading_threshold_deg=heading_threshold_deg,
-                                     speed_threshold=speed_threshold):
-            n += 1
-            if n == 1 or n % 10 == 0:
-                print(f"  [unified] keyframed {n} vehicles", flush=True)
+    total_count = 0
+    with open(scenario_path, "rb") as f:
+        for veh in ijson.items(f, "vehicles.item", use_float=True):
+            total_count += 1
+            if not _vehicle_visible(veh, selected_tags):
+                continue
+            root = _make_vehicle_root(veh, veh_manifest, plates_dir,
+                                      out_blend_dir=os.path.dirname(out_blend))
+            if _keyframe_sumo_trajectory(root, veh, frame_end,
+                                         keyframe_stride=keyframe_stride,
+                                         heading_threshold_deg=heading_threshold_deg,
+                                         speed_threshold=speed_threshold):
+                n += 1
+                veh.clear()  # ponytail: drop trajectory dict before next vehicle
+                if n % 10 == 1 or n == 1:
+                    print(f"  [unified] keyframed {n} vehicles", flush=True)
+
+    print(f"[unified] placing {n}/{total_count} SUMO vehicles for {len(selected_tags)} camera(s)", flush=True)
 
     BS.setup_render(samples=48)
     scene = bpy.context.scene
@@ -243,9 +377,7 @@ def main():
     ap.add_argument("--speed-threshold", type=float, default=0.8,
                     help="always keep a pose when speed changed by more than this many m/s")
     ns = ap.parse_args(post)
-    with open(ns.scenario) as f:
-        scenario = json.load(f)
-    build_unified_scene(scenario, ns.out, only=ns.only,
+    build_unified_scene(ns.scenario, ns.out, only=ns.only,
                         keyframe_stride=ns.keyframe_stride,
                         heading_threshold_deg=ns.heading_threshold_deg,
                         speed_threshold=ns.speed_threshold)

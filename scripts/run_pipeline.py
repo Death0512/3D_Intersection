@@ -380,8 +380,12 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
 def step_sumo_unified_build(scenario_path, out_dir, only=None,
                             keyframe_stride=6,
                             heading_threshold_deg=1.0,
-                            speed_threshold=0.8):
+                            speed_threshold=0.8,
+                            force_rebuild=False):
     scene_path = os.path.join(out_dir, "unified_scene.blend")
+    if not force_rebuild and os.path.exists(scene_path):
+        print(f"  Skipping build — {os.path.basename(scene_path)} already exists ({os.path.getsize(scene_path) // 1024 // 1024} MB)")
+        return scene_path
     cmd = [BLENDER, "-b", "--python", os.path.join(HERE, "build_unified_scene.py"), "--",
            "--scenario", scenario_path, "--out", scene_path,
            "--keyframe-stride", str(keyframe_stride),

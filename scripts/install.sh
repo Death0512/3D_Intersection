@@ -80,7 +80,7 @@ APT_DEPS=(fonts-dejavu-core fonts-liberation ca-certificates curl xz-utils tar
           libx11-6 libxrandr2 libxinerama1 libxcursor1 libfontconfig1 libfreetype6)
 FFMPEG_APT_DEPS=(ffmpeg)
 SUMO_APT_DEPS=(sumo sumo-tools)
-PY_DEPS=(Pillow traci sumolib)
+PY_DEPS=(Pillow traci sumolib ijson)
 
 # ---- parse args -------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -306,6 +306,73 @@ echo "  blender : $BV"
 BLENDER_INSTALLED_BIN="$BL"
 
 BLENDER_BIN_DIR="$(dirname "$BL")"
+
+# ---- Blender bundled Python: install ijson for build_unified_scene.py ---------
+# build_unified_scene.py runs inside Blender's embedded Python and uses ijson
+# to stream scenario JSON. The project .venv ijson is NOT visible to Blender.
+# Resolve the bundled Python that ships inside the Blender tarball and pip-install
+# ijson into it. Hard-fail if it cannot be found (Blender won't render anyway).
+_resolve_blender_python() {
+  # Strategy: derive from the binary's containing directory + version subfolder.
+  # Standard Blender 5.2 tarball layout:
+  #   <install>/blender  +  <install>/5.2/python/bin/python3.11
+  local bpy root ver
+  bpy=""
+  # 1. Try to resolve from BLENDER_INSTALL_DIR (set by the download path).
+  if [[ -n "${BLENDER_INSTALL_DIR:-}" ]]; then
+    local d
+    for d in "$BLENDER_INSTALL_DIR"/*; do
+      [[ "$(basename "$d")" =~ ^[0-9]+\.[0-9]+$ ]] || continue
+      local cand="$d/python/bin/python3.11"
+      [[ -x "$cand" ]] && { bpy="$cand"; break; }
+      cand="$d/python/bin/python3"
+      [[ -x "$cand" ]] && { bpy="$cand"; break; }
+    done
+  fi
+  # 2. Derive from the resolved blender binary: <dir containing blender>/<ver>/python/bin/...
+  if [[ -z "$bpy" ]]; then
+    local install_dir resolved
+    resolved="$(readlink -f "$BL" 2>/dev/null)" || resolved="$BL"
+    install_dir="$(dirname "$resolved")"
+    for d in "$install_dir"/*/; do
+      [[ "$(basename "$d")" =~ ^[0-9]+\.[0-9]+$ ]] || continue
+      local cand="${d}python/bin/python3.11"
+      [[ -x "$cand" ]] && { bpy="$cand"; break; }
+      cand="${d}python/bin/python3"
+      [[ -x "$cand" ]] && { bpy="$cand"; break; }
+    done
+  fi
+  # 3. Last resort: ask Blender itself.
+  if [[ -z "$bpy" ]]; then
+    bpy="$("$BL" --python-expr "import sys; print(sys.executable)" 2>/dev/null)" || true
+    [[ -n "$bpy" && -x "$bpy" ]] || bpy=""
+  fi
+  printf '%s\n' "$bpy"
+}
+
+BLENDER_PYTHON="$(_resolve_blender_python)"
+
+if [[ -z "$BLENDER_PYTHON" ]]; then
+  echo "ERROR: could not resolve Blender bundled Python." >&2
+  echo "       build_unified_scene.py requires ijson in Blender's Python." >&2
+  exit 1
+else
+  echo "  blender python : $BLENDER_PYTHON"
+
+  # Blender 5.2 ships Python 3.11 with ensurepip, but pip may not be bootstrapped.
+  # Bootstrap pip if needed, then install ijson.  Hard-fail on failure — ijson is
+  # required for build_unified_scene.py.
+  "$BLENDER_PYTHON" -m ensurepip --default-pip 2>/dev/null || true
+  "$BLENDER_PYTHON" -m pip install --upgrade -q pip 2>/dev/null || true
+
+  if "$BLENDER_PYTHON" -m pip install -q ijson 2>&1; then
+    echo "  ijson          : $( "$BLENDER_PYTHON" -c "import ijson; print(getattr(ijson, '__version__', 'OK'))" 2>&1 )"
+  else
+    echo "ERROR: ijson install into Blender Python ($BLENDER_PYTHON) failed." >&2
+    echo "       build_unified_scene.py requires ijson to stream scenario JSON." >&2
+    exit 1
+  fi
+fi
 
 # ---- NVIDIA GPU check (non-fatal) -------------------------------------------
 if command -v nvidia-smi &>/dev/null; then
