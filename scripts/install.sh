@@ -315,18 +315,26 @@ BLENDER_BIN_DIR="$(dirname "$BL")"
 _resolve_blender_python() {
   # Strategy: derive from the binary's containing directory + version subfolder.
   # Standard Blender 5.2 tarball layout:
-  #   <install>/blender  +  <install>/5.2/python/bin/python3.11
-  local bpy root ver
+  #   <install>/blender  +  <install>/5.2/python/bin/python3.13
+  # (Blender 3.x used python3.10, 4.x used python3.11, 5.x uses python3.13)
+  local bpy d cand
   bpy=""
+
+  _try_py_candidates() {
+    local base="$1"
+    local v
+    for v in python3.13 python3.12 python3.11 python3.10 python3; do
+      cand="$base/bin/$v"
+      [[ -x "$cand" ]] && { bpy="$cand"; return 0; }
+    done
+    return 1
+  }
+
   # 1. Try to resolve from BLENDER_INSTALL_DIR (set by the download path).
   if [[ -n "${BLENDER_INSTALL_DIR:-}" ]]; then
-    local d
-    for d in "$BLENDER_INSTALL_DIR"/*; do
+    for d in "$BLENDER_INSTALL_DIR"/*/; do
       [[ "$(basename "$d")" =~ ^[0-9]+\.[0-9]+$ ]] || continue
-      local cand="$d/python/bin/python3.11"
-      [[ -x "$cand" ]] && { bpy="$cand"; break; }
-      cand="$d/python/bin/python3"
-      [[ -x "$cand" ]] && { bpy="$cand"; break; }
+      _try_py_candidates "${d}python" && break
     done
   fi
   # 2. Derive from the resolved blender binary: <dir containing blender>/<ver>/python/bin/...
@@ -336,10 +344,7 @@ _resolve_blender_python() {
     install_dir="$(dirname "$resolved")"
     for d in "$install_dir"/*/; do
       [[ "$(basename "$d")" =~ ^[0-9]+\.[0-9]+$ ]] || continue
-      local cand="${d}python/bin/python3.11"
-      [[ -x "$cand" ]] && { bpy="$cand"; break; }
-      cand="${d}python/bin/python3"
-      [[ -x "$cand" ]] && { bpy="$cand"; break; }
+      _try_py_candidates "${d}python" && break
     done
   fi
   # 3. Last resort: ask Blender itself.
