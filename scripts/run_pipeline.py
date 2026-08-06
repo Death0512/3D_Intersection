@@ -377,31 +377,37 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     return jobs, assignment
 
 
+def _per_camera_scene_path(out_dir, tag):
+    return os.path.join(out_dir, f"unified_scene_{tag}.blend")
+
+
 def step_sumo_unified_build(scenario_path, out_dir, only=None,
                             keyframe_stride=6,
                             heading_threshold_deg=1.0,
                             speed_threshold=0.8,
                             force_rebuild=False):
-    scene_path = os.path.join(out_dir, "unified_scene.blend")
-    if not force_rebuild and os.path.exists(scene_path):
-        print(f"  Skipping build — {os.path.basename(scene_path)} already exists ({os.path.getsize(scene_path) // 1024 // 1024} MB)")
-        return scene_path
-    cmd = [BLENDER, "-b", "--python", os.path.join(HERE, "build_unified_scene.py"), "--",
-           "--scenario", scenario_path, "--out", scene_path,
-           "--keyframe-stride", str(keyframe_stride),
-           "--heading-threshold-deg", str(heading_threshold_deg),
-           "--speed-threshold", str(speed_threshold)]
-    if only:
-        cmd += ["--only", only]
-    run(cmd, check=True, timeout=7200)
-    return scene_path
+    tags = camera_tags_from_only(only)
+    scene_paths = {}
+    for tag in tags:
+        scene_path = _per_camera_scene_path(out_dir, tag)
+        if not force_rebuild and os.path.exists(scene_path):
+            print(f"  Skipping build — {os.path.basename(scene_path)} already exists ({os.path.getsize(scene_path) // 1024 // 1024} MB)")
+            scene_paths[tag] = scene_path
+            continue
+        cmd = [BLENDER, "-b", "--python", os.path.join(HERE, "build_unified_scene.py"), "--",
+               "--scenario", scenario_path, "--out", scene_path,
+               "--keyframe-stride", str(keyframe_stride),
+               "--heading-threshold-deg", str(heading_threshold_deg),
+               "--speed-threshold", str(speed_threshold),
+               "--only", tag]
+        run(cmd, check=True, timeout=7200)
+        scene_paths[tag] = scene_path
+    return scene_paths
 
 
-def step_sumo_unified_render(scenario_path, out_dir, jobs, samples, only=None,
-                              storage_limit_gib=50):
+def step_sumo_unified_render(scenario_path, out_dir, jobs, samples,
+                              only=None, storage_limit_gib=50):
     scene_path = os.path.join(out_dir, "unified_scene.blend")
-    if not os.path.exists(scene_path):
-        raise SystemExit(f"FAIL: unified scene not found: {scene_path}")
     cmd = [PYTHON, os.path.join(HERE, "render_unified.py"),
            "--scene", scene_path, "--scenario", scenario_path, "--out", out_dir,
            "--jobs", str(max(1, jobs)), "--samples", str(samples),
@@ -532,19 +538,21 @@ def main():
 
     # ---- gpu: step 4 --------------------------------------------------------
     if phase in ("all", "gpu"):
-        print("\n[4a/6] Build unified SUMO scene")
+        camera_tags = camera_tags_from_only(args.only)
+        print("\n[4a/6] Build per-camera unified SUMO scenes")
         step_sumo_unified_build(scn_render, out_dir, args.only,
                                 keyframe_stride=args.keyframe_stride,
                                 heading_threshold_deg=args.heading_threshold_deg,
                                 speed_threshold=args.speed_threshold)
 
-        print("\n[4b/6] Render unified SUMO scene")
+        print("\n[4b/6] Render per-camera unified SUMO scenes")
         n_jobs, _ = _detect_jobs(
-            len(camera_tags_from_only(args.only)), explicit=args.jobs,
+            len(camera_tags), explicit=args.jobs,
             max_workers_per_gpu=args.max_workers_per_gpu,
             vram_budget=VRAM_PER_JOB_MIB * 2)
-        step_sumo_unified_render(scn_render, out_dir, n_jobs, args.samples, args.only,
-                                 storage_limit_gib=args.storage_limit_gib)
+        step_sumo_unified_render(scn_render, out_dir, n_jobs, args.samples,
+                                  only=args.only,
+                                  storage_limit_gib=args.storage_limit_gib)
 
         if phase == "gpu":
             print("\n" + "=" * 60)

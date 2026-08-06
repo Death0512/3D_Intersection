@@ -53,6 +53,20 @@ def _gpu_count() -> int:
     return max(1, len(uuids))
 
 
+def _per_camera_scene(scene_base: str, tag: str) -> str:
+    """Derive the per-camera scene path from the legacy unified scene base path."""
+    base_dir = os.path.dirname(scene_base)
+    path = os.path.join(base_dir, f"unified_scene_{tag}.blend")
+    if not os.path.isfile(path):
+        raise SystemExit(
+            f"FAIL: per-camera scene not found: {path}\n"
+            f"  The build phase must create unified_scene_<tag>.blend for each "
+            f"camera. Run the full pipeline (all/GPU phase) first, or rebuild "
+            f"with: blender -b --python scripts/build_unified_scene.py -- "
+            f"--out {path} --scenario <scenario.json> --only {tag}")
+    return path
+
+
 def _run_one_camera(scene, scenario, out_dir, tag, gpu_id, samples,
                      batch_size, frame_reuse, bitrate: str,
                      storage_cap_bytes: int,
@@ -68,10 +82,11 @@ def _run_one_camera(scene, scenario, out_dir, tag, gpu_id, samples,
     if os.path.isdir(wsl_lib):
         existing = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{wsl_lib}:{existing}" if existing else wsl_lib
+    camera_scene = _per_camera_scene(scene, tag)
     blender_args = [
         "-b", "--python",
         os.path.join(ROOT, "scripts", "render_unified_camera.py"), "--",
-        "--scene", scene, "--camera", tag, "--out", out_dir,
+        "--scene", camera_scene, "--camera", tag, "--out", out_dir,
         "--samples", str(samples), "--scenario", scenario,
         "--batch-size", str(batch_size), "--bitrate", bitrate,
         "--storage-cap-bytes", str(storage_cap_bytes),
@@ -171,9 +186,23 @@ def main():
     total_batches = max(1, math.ceil(duration_frames / batch_size))
 
     # ---- RAM preflight: cap jobs so workers don't OOM ----
-    # Each Blender worker loads the full .blend into RAM; estimate peak as
-    # scene_file_size × 1.5 (Blender datablock expansion overhead).
-    scene_bytes = os.path.getsize(ns.scene) if os.path.exists(ns.scene) else 0
+    # Each Blender worker loads a per-camera .blend into RAM. Verify every
+    # selected camera scene exists before launching any workers, then use the
+    # heaviest one for the worker estimate.
+    scene_base_dir = os.path.dirname(ns.scene)
+    scene_bytes = 0
+    missing_scenes = []
+    for tag in tags:
+        p = os.path.join(scene_base_dir, f"unified_scene_{tag}.blend")
+        if not os.path.isfile(p):
+            missing_scenes.append(p)
+        else:
+            scene_bytes = max(scene_bytes, os.path.getsize(p))
+    if missing_scenes:
+        raise SystemExit(
+            "FAIL: missing per-camera scene file(s):\n  "
+            + "\n  ".join(missing_scenes)
+            + "\nRun the GPU build phase first.")
     # Blender peak RAM per worker = scene load + render buffers + CUDA context.
     # Empirically ~3x scene file size; floor at 1.5 GiB for small scenes.
     ram_per_worker = max(int(1.5 * _GIB), int(scene_bytes * 3.0))
