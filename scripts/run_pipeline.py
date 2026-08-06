@@ -55,7 +55,7 @@ MIN_FREE_VRAM_MIB = 1200
 # Hard limit: consumer NVIDIA GPUs allow at most 3 concurrent NVENC sessions;
 # we stay at 2/GPU to leave headroom for the OS encoder and avoid driver-level
 # NVENC contention.  Raise via --max-workers-per-gpu only for tested hardware.
-MAX_WORKERS_PER_GPU = 2
+MAX_WORKERS_PER_GPU = 1
 
 # Building cached .blend scenes launches Blender processes too. Keep this
 # modest to preserve reliability on laptops/Kaggle while still overlapping the
