@@ -39,15 +39,18 @@ def _camera_tags(only: str | None) -> list[str]:
 
 
 def _gpu_count() -> int:
+    # Use nvidia-smi --query-gpu to count unique physical GPUs by UUID,
+    # avoiding double-counting when CUDA and OPTIX expose the same GPU twice.
     try:
-        out = subprocess.run(["nvidia-smi", "-L"],
-                             capture_output=True, text=True, timeout=10)
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return 0
     if out.returncode != 0:
-        return 1  # ponytail: driver loaded but query failed → assume 1
-    lines = [l for l in out.stdout.splitlines() if l.strip().startswith("GPU")]
-    return max(1, len(lines))
+        return 1
+    uuids = {l.strip() for l in out.stdout.splitlines() if l.strip()}
+    return max(1, len(uuids))
 
 
 def _run_one_camera(scene, scenario, out_dir, tag, gpu_id, samples,
@@ -171,7 +174,9 @@ def main():
     # Each Blender worker loads the full .blend into RAM; estimate peak as
     # scene_file_size × 1.5 (Blender datablock expansion overhead).
     scene_bytes = os.path.getsize(ns.scene) if os.path.exists(ns.scene) else 0
-    ram_per_worker = max(512 * 1024 * 1024, int(scene_bytes * 1.5))  # floor 512 MiB
+    # Blender peak RAM per worker = scene load + render buffers + CUDA context.
+    # Empirically ~3x scene file size; floor at 1.5 GiB for small scenes.
+    ram_per_worker = max(int(1.5 * _GIB), int(scene_bytes * 3.0))
     try:
         with open("/proc/meminfo") as _mf:
             for _line in _mf:
@@ -183,8 +188,8 @@ def main():
     except OSError:
         ram_available = 0
     if ram_available > 0:
-        # Keep 1 GiB headroom for OS + ffmpeg + misc
-        usable_ram = max(0, ram_available - _GIB)
+        # Keep 2 GiB headroom for OS + ffmpeg + misc
+        usable_ram = max(0, ram_available - 2 * _GIB)
         max_jobs_by_ram = max(1, usable_ram // ram_per_worker)
         if max_jobs_by_ram < jobs:
             print(
@@ -193,6 +198,11 @@ def main():
                 f"{jobs} → {max_jobs_by_ram}",
                 flush=True)
             jobs = max_jobs_by_ram
+    print(
+        f"[unified] RAM preflight: available={ram_available >> 20} MiB, "
+        f"scene={scene_bytes >> 20} MiB, est_per_worker={ram_per_worker >> 20} MiB, "
+        f"effective_jobs={jobs}",
+        flush=True)
 
     # ---- Storage preflight ----
     # Invariant: total_limit = existing + reserve + camera_media * (n_cameras + jobs)

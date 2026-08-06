@@ -277,8 +277,22 @@ else
     mkdir -p "$HOME/.local/bin" "$HOME/.local/opt"
     echo "  downloading Blender ${BLENDER_VERSION} ..."
     TARBALL="/tmp/blender-${BLENDER_VERSION}.tar.xz"
-    if ! curl -fL --retry 5 --retry-delay 2 --connect-timeout 30 -o "$TARBALL" "$BLENDER_URL"; then
-      echo "ERROR: Blender download failed: $BLENDER_URL" >&2
+    BLENDER_MIRRORS=(
+      "$BLENDER_URL"
+      "https://mirrors.ocf.berkeley.edu/blender/release/Blender${BLENDER_VERSION%.*}/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+      "https://ftp.nluug.nl/pub/graphics/blender/release/Blender${BLENDER_VERSION%.*}/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+    )
+    _dl_ok=0
+    for _url in "${BLENDER_MIRRORS[@]}"; do
+      echo "  trying: $_url"
+      if curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 -o "$TARBALL" "$_url"; then
+        _dl_ok=1
+        break
+      fi
+      echo "  failed, trying next mirror..."
+    done
+    if [[ "$_dl_ok" -eq 0 ]]; then
+      echo "ERROR: Blender download failed from all mirrors." >&2
       if [[ "$IS_KAGGLE" -eq 1 ]]; then
         echo "       Kaggle tip: upload a Blender 5.x linux-x64 folder/tarball as a" >&2
         echo "       Kaggle Dataset, then rerun with:" >&2
