@@ -167,6 +167,33 @@ def main():
     batch_size = max(1, int(ns.batch_size))
     total_batches = max(1, math.ceil(duration_frames / batch_size))
 
+    # ---- RAM preflight: cap jobs so workers don't OOM ----
+    # Each Blender worker loads the full .blend into RAM; estimate peak as
+    # scene_file_size × 1.5 (Blender datablock expansion overhead).
+    scene_bytes = os.path.getsize(ns.scene) if os.path.exists(ns.scene) else 0
+    ram_per_worker = max(512 * 1024 * 1024, int(scene_bytes * 1.5))  # floor 512 MiB
+    try:
+        with open("/proc/meminfo") as _mf:
+            for _line in _mf:
+                if _line.startswith("MemAvailable:"):
+                    ram_available = int(_line.split()[1]) * 1024
+                    break
+            else:
+                ram_available = 0
+    except OSError:
+        ram_available = 0
+    if ram_available > 0:
+        # Keep 1 GiB headroom for OS + ffmpeg + misc
+        usable_ram = max(0, ram_available - _GIB)
+        max_jobs_by_ram = max(1, usable_ram // ram_per_worker)
+        if max_jobs_by_ram < jobs:
+            print(
+                f"[unified] RAM cap: {ram_available >> 20} MiB available, "
+                f"{ram_per_worker >> 20} MiB/worker → reducing jobs "
+                f"{jobs} → {max_jobs_by_ram}",
+                flush=True)
+            jobs = max_jobs_by_ram
+
     # ---- Storage preflight ----
     # Invariant: total_limit = existing + reserve + camera_media * (n_cameras + jobs)
     # where n_cameras persistent segments/finals + jobs transient concat copies
