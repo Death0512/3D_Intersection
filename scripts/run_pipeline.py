@@ -416,7 +416,7 @@ def step_sumo_unified_build(scenario_path, out_dir, only=None,
         c_endl = min(duration_frames - 1, (ci + 1) * CHUNK_SIZE - 1)
         chunk_out = os.path.join(chunks_dir, f"chunk_{ci:04d}.blend")
 
-        if not force_rebuild and os.path.exists(chunk_out):
+        if not force_rebuild and os.path.isfile(chunk_out) and os.path.getsize(chunk_out) > 0:
             print(f"  [build] chunk {ci}/{total_chunks - 1} "
                   f"[{c_start},{c_endl}] already exists — skip "
                   f"({os.path.getsize(chunk_out) // 1024 // 1024} MB)", flush=True)
@@ -424,7 +424,7 @@ def step_sumo_unified_build(scenario_path, out_dir, only=None,
 
         print(f"  [build] chunk {ci}/{total_chunks - 1} "
               f"[{c_start},{c_endl}] building...", flush=True)
-        cmd = [BLENDER, "-b", "--python", os.path.join(HERE, "build_unified_scene.py"), "--",
+        cmd = [BLENDER, "-b", "--python-exit-code", "1", "--python", os.path.join(HERE, "build_unified_scene.py"), "--",
                "--scenario", scenario_path, "--out", chunk_out,
                "--keyframe-stride", str(keyframe_stride),
                "--heading-threshold-deg", str(heading_threshold_deg),

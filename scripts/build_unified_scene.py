@@ -339,7 +339,9 @@ def build_unified_scene(scenario_path: str, out_blend: str, only: str | None = N
     with open(ROAD_JSON) as f:
         road_meta = json.load(f)
     veh_manifest = BS.load_vehicle_manifest()
-    plates_dir = os.path.join(os.path.dirname(out_blend), "plates")
+    # Plates are pre-generated once per scenario by step_plates(). Chunks must
+    # share that cache; a per-chunk cache would regenerate PNGs in Blender.
+    plates_dir = os.path.join(os.path.dirname(os.path.abspath(scenario_path)), "plates")
     os.makedirs(plates_dir, exist_ok=True)
 
     for d in G.Direction:

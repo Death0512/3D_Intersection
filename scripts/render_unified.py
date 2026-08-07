@@ -91,7 +91,7 @@ def _run_one_camera_chunk(scene_path, out_dir, tag, chunk_idx, gpu_id, samples,
         env["LD_LIBRARY_PATH"] = f"{wsl_lib}:{existing}" if existing else wsl_lib
 
     blender_args = [
-        "-b", "--python",
+        "-b", "--python-exit-code", "1", "--python",
         os.path.join(ROOT, "scripts", "render_unified_camera.py"), "--",
         "--scene", scene_path, "--camera", tag, "--out", out_dir,
         "--samples", str(samples),
