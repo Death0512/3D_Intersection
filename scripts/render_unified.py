@@ -23,7 +23,7 @@ import geometry as G
 BLENDER = (os.environ.get("DOAN_BLENDER") or os.environ.get("BLENDER")
            or shutil.which("blender") or "/root/.local/bin/blender" or "blender")
 
-CHUNK_SIZE = 5000  # global frames per chunk
+CHUNK_SIZE = 7500  # global frames per chunk
 
 
 def _stream_scenario_meta(path: str) -> tuple[int, int]:
