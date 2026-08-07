@@ -377,7 +377,7 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     return jobs, assignment
 
 
-CHUNK_SIZE = 10000  # global frames per chunk
+CHUNK_SIZE = 7500  # global frames per chunk
 
 
 def _stream_scenario_duration_frames(path: str) -> int:
