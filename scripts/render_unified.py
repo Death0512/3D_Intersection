@@ -211,6 +211,24 @@ def _concat_segments(segments: list[str], video_path: str,
     return concat_list
 
 
+def _delete_chunk_if_fully_valid(chunk_blend: str, out_dir: str,
+                                  chunk_idx: int, fps: int,
+                                  chunk_frames: int, tags: list[str]) -> None:
+    """Delete chunk .blend if every camera has a valid segment for this chunk.
+    Does nothing if the .blend is already gone or any segment is missing/invalid."""
+    if not os.path.isfile(chunk_blend):
+        return
+    # Must have valid segments for *all* selected cameras, not just pending_tags,
+    # because a non-pending camera might have a missing segment.
+    for tag in tags:
+        seg_path = os.path.join(out_dir, f"segments_{tag}", f"seg_{chunk_idx:04d}.mp4")
+        if not _segment_valid(seg_path, fps, chunk_frames):
+            return
+    os.remove(chunk_blend)
+    print(f"[unified.chunk{chunk_idx}] freed: removed {os.path.basename(chunk_blend)}",
+          flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene", required=True,
@@ -261,7 +279,16 @@ def main():
 
     # ---- Storage preflight ----
     total_limit = ns.storage_limit_gib * _GIB
-    existing = _existing_usage(ns.out)
+    # ponytail: exclude chunk .blend dir from existing-output accounting;
+    # those build artifacts are consumed/released during rendering, not
+    # permanent output. If the out dir is inside chunks_dir, adjust
+    # existing by that amount.
+    chunks_dir_real = os.path.realpath(chunks_dir)
+    out_dir_real = os.path.realpath(ns.out)
+    chunk_dir_usage = 0
+    if os.path.isdir(chunks_dir) and not out_dir_real.startswith(chunks_dir_real + os.sep) and out_dir_real != chunks_dir_real:
+        chunk_dir_usage = _dir_usage_bytes(chunks_dir)
+    existing = _existing_usage(ns.out) - chunk_dir_usage
     _JPEG_BYTES_PER_FRAME = 512 * 1024
     reserve = 2 * _GIB + jobs * chunk_size * _JPEG_BYTES_PER_FRAME
     remaining = total_limit - existing - reserve
@@ -309,6 +336,17 @@ def main():
         chunk_blend = _chunk_path(chunks_dir, ci)
 
         if not _chunk_exists(chunks_dir, ci):
+            # Check if all camera segments are already valid for this chunk
+            # (chunk .blend was deleted after a prior successful render pass)
+            segment_valid_count = 0
+            for tag in tags:
+                seg_path = os.path.join(ns.out, f"segments_{tag}", f"seg_{ci:04d}.mp4")
+                if _segment_valid(seg_path, fps, chunk_frames):
+                    segment_valid_count += 1
+            if segment_valid_count == len(tags):
+                print(f"[unified] chunk {ci}/{total_chunks - 1} [{c_start},{c_end}] "
+                      f"blend missing but all segments valid — skipping", flush=True)
+                continue
             raise SystemExit(
                 f"FAIL: chunk blend not found: {chunk_blend}\n"
                 f"  Run the build phase first: "
@@ -327,6 +365,8 @@ def main():
         if not remaining_tags:
             print(f"[unified] chunk {ci}/{total_chunks - 1} [{c_start},{c_end}] "
                   f"all cameras already complete — skipping", flush=True)
+            # All camera segments already valid → delete chunk .blend to free disk
+            _delete_chunk_if_fully_valid(chunk_blend, ns.out, ci, fps, chunk_frames, tags)
             continue
 
         if done_tags:
@@ -360,6 +400,9 @@ def main():
                     print(f"[unified.chunk{ci}:{tag}] FAILED: {e}", flush=True)
                     traceback.print_exc()
                     raise RuntimeError(f"render failure chunk {ci} {tag}: {e}") from e
+
+        # All cameras succeeded — delete chunk .blend to free disk
+        _delete_chunk_if_fully_valid(chunk_blend, ns.out, ci, fps, chunk_frames, tags)
 
     # ---- Concatenate per-camera segments into final videos ----
     print("\n[unified] concat phase: merging per-camera segments...", flush=True)
