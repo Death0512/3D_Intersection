@@ -239,13 +239,9 @@ def _render_frame(scene, frame: int, out_path: str) -> None:
     bpy.ops.render.render(write_still=True)
     _verify_jpeg(out_path)
 
-
-
-
-
 def _encode_segment(frames_dir: str, seg_path: str, fps: int,
                     start_frame: int, batch_size: int, tag: str,
-                    bitrate: str, segment_limit_bytes: int = 0) -> None:
+                    bitrate: str) -> None:
     """Encode a contiguous batch of JPEGs to an MP4 segment via ffmpeg NVENC CBR."""
     cmd = ["ffmpeg", "-y",
            "-framerate", str(fps),
@@ -255,8 +251,6 @@ def _encode_segment(frames_dir: str, seg_path: str, fps: int,
            "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p",
            "-rc", "cbr", "-b:v", bitrate, "-maxrate", bitrate,
            "-bufsize", bitrate]
-    if segment_limit_bytes > 0:
-        cmd += ["-fs", str(segment_limit_bytes)]
     cmd.append(seg_path)
     print(f"  [unified:{tag}] encode batch {start_frame}..{start_frame + batch_size - 1}: "
           f"{' '.join(cmd)}", flush=True)
@@ -264,8 +258,6 @@ def _encode_segment(frames_dir: str, seg_path: str, fps: int,
     if p.returncode != 0:
         tail = "\n".join((p.stderr or "").splitlines()[-30:])
         raise RuntimeError(f"ffmpeg segment encode failed for {seg_path}:\n{tail}")
-    # `-fs` may write its final packet past the nominal limit; frame validation
-    # below rejects a truncated segment/final while static budget headroom absorbs it.
     if not os.path.isfile(seg_path) or os.path.getsize(seg_path) <= 0:
         raise RuntimeError(f"segment missing/empty after encode: {seg_path}")
 
@@ -280,8 +272,6 @@ def _concat_segments(segments: list[str], video_path: str,
             f.write(f"file '{os.path.relpath(seg, os.path.dirname(video_path))}'\n")
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
            "-i", concat_list, "-c", "copy"]
-    if concat_limit_bytes > 0:
-        cmd += ["-fs", str(concat_limit_bytes)]
     cmd.append(video_path)
     print(f"  [encode] concat segments -> {video_path}: {' '.join(cmd)}", flush=True)
     p = subprocess.run(cmd, text=True, capture_output=True, timeout=300)
@@ -338,54 +328,6 @@ def _fps_from_scenario(scenario_path: str | None) -> int:
     return 30
 
 
-def _check_usage(out_dir: str, tag: str, cap_bytes: int, label: str) -> None:
-    """Check tag-scoped usage (frames_<tag>/ + segments_<tag>/ + video_<tag>.mp4 +
-    concat manifest) against cap (0 = unlimited). Preserves artifacts."""
-    if cap_bytes <= 0:
-        return
-    used = 0
-    for sub in [f"frames_{tag}", f"segments_{tag}"]:
-        p = os.path.join(out_dir, sub)
-        if os.path.isdir(p):
-            used += _dir_usage_bytes(p)
-    video_path = os.path.join(out_dir, f"video_{tag}.mp4")
-    if os.path.isfile(video_path):
-        used += os.path.getsize(video_path)
-    concat_list = os.path.join(out_dir, f"_video_{tag}.mp4.concat.txt")
-    if os.path.isfile(concat_list):
-        used += os.path.getsize(concat_list)
-    if used > cap_bytes:
-        raise RuntimeError(
-            f"[unified:{tag}] usage cap exceeded {label}: "
-            f"{used} bytes used > {cap_bytes} cap — "
-            f"aborting without deleting artifacts")
-
-
-def _dir_usage_bytes(path: str) -> int:
-    """Return total bytes consumed by path and all children via du -sb."""
-    p = subprocess.run(["du", "-sb", path],
-                       capture_output=True, text=True, timeout=30)
-    if p.returncode != 0:
-        # ponytail: fallback to shutil when du fails (non-POSIX, permission)
-        return _walk_size_bytes(path)
-    try:
-        return int(p.stdout.strip().split()[0])
-    except (ValueError, IndexError):
-        return _walk_size_bytes(path)
-
-
-def _walk_size_bytes(path: str) -> int:
-    total = 0
-    for dirpath, _dirnames, filenames in os.walk(path):
-        for fn in filenames:
-            fp = os.path.join(dirpath, fn)
-            try:
-                total += os.path.getsize(fp)
-            except OSError:
-                pass
-    return total
-
-
 def _clean_stale(segments_dir: str, frames_dir: str) -> None:
     """Remove stale frames/segments from a previous incomplete run."""
     if os.path.isdir(segments_dir):
@@ -409,12 +351,6 @@ def main():
                     help="frames per batch segment (default 1000)")
     ap.add_argument("--bitrate", type=str, default="5M",
                     help="ffmpeg NVENC CBR video bitrate, e.g. 5M (default 5M)")
-    ap.add_argument("--storage-cap-bytes", type=int, default=0,
-                    help="per-camera storage budget in bytes (0 = unlimited)")
-    ap.add_argument("--segment-limit-bytes", type=int, default=0,
-                    help="ffmpeg -fs bound per segment in bytes (0 = unlimited)")
-    ap.add_argument("--concat-limit-bytes", type=int, default=0,
-                    help="ffmpeg -fs bound for concat output in bytes (0 = unlimited)")
     ap.add_argument("--chunk-idx", type=int, default=None,
                     help="chunk index for time-chunk mode (renders single segment)")
     ns = ap.parse_args(post)
@@ -438,9 +374,6 @@ def main():
     batch_size = int(ns.batch_size)
     if not 1 <= batch_size <= 9_999:
         raise SystemExit("--batch-size must be between 1 and 9999")
-    storage_cap_bytes = ns.storage_cap_bytes
-    segment_limit_bytes = ns.segment_limit_bytes
-    concat_limit_bytes = ns.concat_limit_bytes
 
     # ---- Chunk mode: render ONE chunk scene → ONE segment ----
     if chunk_mode:
@@ -500,11 +433,8 @@ def main():
               flush=True)
 
         # Encode chunk to one segment
-        _check_usage(ns.out, ns.camera, storage_cap_bytes, f"before seg {chunk_idx}")
         _encode_segment(frames_dir, seg_path, fps, 0,
-                        chunk_frames, ns.camera, ns.bitrate,
-                        segment_limit_bytes)
-        _check_usage(ns.out, ns.camera, storage_cap_bytes, f"after seg {chunk_idx}")
+                        chunk_frames, ns.camera, ns.bitrate)
 
         # Validate segment
         if not os.path.isfile(seg_path) or os.path.getsize(seg_path) <= 0:
@@ -601,13 +531,8 @@ def main():
 
         # Encode batch to segment MP4
         seg_path = os.path.join(segments_dir, f"seg_{batch_idx:04d}.mp4")
-        _check_usage(ns.out, ns.camera, storage_cap_bytes,
-                      f"before seg {batch_idx}")
         _encode_segment(frames_dir, seg_path, fps, 0,
-                        actual_count, ns.camera, ns.bitrate,
-                        segment_limit_bytes)
-        _check_usage(ns.out, ns.camera, storage_cap_bytes,
-                      f"after seg {batch_idx}")
+                        actual_count, ns.camera, ns.bitrate)
 
         # Validate segment before deleting JPEGs
         if not os.path.isfile(seg_path) or os.path.getsize(seg_path) <= 0:
@@ -622,9 +547,7 @@ def main():
         segments.append(seg_path)
 
     # Concatenate all segments into final video
-    _check_usage(ns.out, ns.camera, storage_cap_bytes, "before concat")
-    concat_list = _concat_segments(segments, video_path, concat_limit_bytes)
-    _check_usage(ns.out, ns.camera, storage_cap_bytes, "after concat")
+    concat_list = _concat_segments(segments, video_path, 0)
 
     # Validate final video
     if not _video_valid(video_path, fps, total_frames):

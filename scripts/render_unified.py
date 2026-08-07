@@ -23,9 +23,7 @@ import geometry as G
 BLENDER = (os.environ.get("DOAN_BLENDER") or os.environ.get("BLENDER")
            or shutil.which("blender") or "/root/.local/bin/blender" or "blender")
 
-_GIB = 1_073_741_824
-
-CHUNK_SIZE = 500  # global frames per chunk
+CHUNK_SIZE = 5000  # global frames per chunk
 
 
 def _stream_scenario_meta(path: str) -> tuple[int, int]:
@@ -77,9 +75,7 @@ def _chunk_exists(chunks_dir: str, idx: int) -> bool:
 
 
 def _run_one_camera_chunk(scene_path, out_dir, tag, chunk_idx, gpu_id, samples,
-                           chunk_frames, bitrate: str,
-                           storage_cap_bytes: int,
-                           segment_limit_bytes: int,
+                           chunk_frames, bitrate: str = "5M",
                            scenario_path: str = "") -> str:
     """Run one Blender camera subprocess for ONE chunk → ONE segment."""
     env = os.environ.copy()
@@ -97,9 +93,6 @@ def _run_one_camera_chunk(scene_path, out_dir, tag, chunk_idx, gpu_id, samples,
         "--samples", str(samples),
         "--batch-size", str(chunk_frames),
         "--bitrate", bitrate,
-        "--storage-cap-bytes", str(storage_cap_bytes),
-        "--segment-limit-bytes", str(segment_limit_bytes),
-        "--concat-limit-bytes", "0",
         "--chunk-idx", str(chunk_idx),
     ]
     if scenario_path:
@@ -118,38 +111,6 @@ def _run_one_camera_chunk(scene_path, out_dir, tag, chunk_idx, gpu_id, samples,
     if proc.returncode != 0:
         raise RuntimeError(f"render failed for {tag} chunk {chunk_idx} (rc={proc.returncode})")
     return tag
-
-
-def _dir_usage_bytes(path: str) -> int:
-    p = subprocess.run(["du", "-sb", path],
-                       capture_output=True, text=True, timeout=30)
-    if p.returncode == 0:
-        try:
-            return int(p.stdout.strip().split()[0])
-        except (ValueError, IndexError):
-            pass
-    total = 0
-    for dirpath, _dirnames, filenames in os.walk(path):
-        for fn in filenames:
-            try:
-                total += os.path.getsize(os.path.join(dirpath, fn))
-            except OSError:
-                pass
-    return total
-
-
-def _existing_usage(out_dir: str) -> int:
-    if not os.path.isdir(out_dir):
-        return 0
-    return _dir_usage_bytes(out_dir)
-
-
-def _bitrate_kbps(total_bytes: int, duration_s: float) -> str:
-    if duration_s <= 0:
-        duration_s = 1.0
-    bps = int(total_bytes * 8 * 0.75 / duration_s)
-    kbps = max(50, min(50_000, bps // 1_000))
-    return f"{kbps}k"
 
 
 def _video_valid(video_path: str, expected_fps: int,
@@ -200,8 +161,6 @@ def _concat_segments(segments: list[str], video_path: str,
             f.write(f"file '{os.path.relpath(seg, os.path.dirname(video_path))}'\n")
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
            "-i", concat_list, "-c", "copy"]
-    if concat_limit_bytes > 0:
-        cmd += ["-fs", str(concat_limit_bytes)]
     cmd.append(video_path)
     print(f"  [encode] concat {len(segments)} segments -> {video_path}: {' '.join(cmd)}", flush=True)
     p = subprocess.run(cmd, text=True, capture_output=True, timeout=600)
@@ -238,15 +197,9 @@ def main():
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--samples", type=int, default=48)
     ap.add_argument("--only", default=None)
-    ap.add_argument("--batch-size", type=int, default=1000,
-                    help="frames per chunk (default 1000)")
-    ap.add_argument("--storage-limit-gib", type=int, default=50)
-    ap.add_argument("--segment-limit-bytes", type=int, default=0,
-                    help="ffmpeg -fs per segment (auto-computed if 0)")
+    ap.add_argument("--batch-size", type=int, default=CHUNK_SIZE,
+                    help=f"frames per chunk (default {CHUNK_SIZE})")
     ns = ap.parse_args()
-
-    if ns.storage_limit_gib <= 0:
-        raise SystemExit("--storage-limit-gib must be positive")
 
     chunk_size = max(1, int(ns.batch_size))
 
@@ -276,55 +229,6 @@ def main():
 
     phys_gpus = _gpu_count()
     jobs = max(1, min(int(ns.jobs), len(pending_tags)))
-
-    # ---- Storage preflight ----
-    total_limit = ns.storage_limit_gib * _GIB
-    # ponytail: exclude chunk .blend dir from existing-output accounting;
-    # those build artifacts are consumed/released during rendering, not
-    # permanent output. If the out dir is inside chunks_dir, adjust
-    # existing by that amount.
-    chunks_dir_real = os.path.realpath(chunks_dir)
-    out_dir_real = os.path.realpath(ns.out)
-    chunk_dir_usage = 0
-    if os.path.isdir(chunks_dir) and not out_dir_real.startswith(chunks_dir_real + os.sep) and out_dir_real != chunks_dir_real:
-        chunk_dir_usage = _dir_usage_bytes(chunks_dir)
-    existing = _existing_usage(ns.out) - chunk_dir_usage
-    _JPEG_BYTES_PER_FRAME = 512 * 1024
-    reserve = 2 * _GIB + jobs * chunk_size * _JPEG_BYTES_PER_FRAME
-    remaining = total_limit - existing - reserve
-    if remaining <= (n_cameras + jobs) * 10_000_000:
-        raise SystemExit(
-            f"Storage preflight FAILED for {ns.out}:\n"
-            f"  limit   = {total_limit >> 20} MiB ({ns.storage_limit_gib} GiB)\n"
-            f"  existing= {existing >> 20} MiB\n"
-            f"  reserve = {reserve >> 20} MiB\n"
-            f"  remaining = {remaining >> 20} MiB for {n_cameras} cameras + "
-            f"{jobs} transient concat copies\n"
-            f"  → per-camera media < 10 MiB — cannot encode video."
-        )
-
-    camera_media_budget = remaining // (n_cameras + jobs)
-    segment_limit_bytes = ns.segment_limit_bytes if ns.segment_limit_bytes > 0 else max(500_000,
-        int(math.ceil(camera_media_budget / total_chunks) * 0.85))
-    concat_limit_bytes = camera_media_budget
-    per_camera_bitrate = _bitrate_kbps(camera_media_budget, duration_s)
-    per_camera_cap_bytes = 2 * camera_media_budget + chunk_size * _JPEG_BYTES_PER_FRAME
-
-    free = shutil.disk_usage(ns.out).free
-    if free < reserve:
-        raise SystemExit(
-            f"Not enough disk space on {ns.out}: "
-            f"{free >> 20} MiB free, need >= {reserve >> 20} MiB")
-
-    print(f"[unified] chunks={total_chunks}, cameras={n_cameras}, "
-          f"effective jobs={jobs}, chunk-size={chunk_size}", flush=True)
-    print(f"[unified] storage: limit={ns.storage_limit_gib} GiB, "
-          f"existing={existing >> 20} MiB, reserve={reserve >> 20} MiB, "
-          f"cam_media={camera_media_budget >> 20} MiB, "
-          f"seg_limit={segment_limit_bytes >> 10} KiB, "
-          f"bitrate={per_camera_bitrate} "
-          f"({duration_frames}f@{fps}fps = {duration_s:.0f}s)",
-          flush=True)
 
     gpu_cycle = itertools.cycle(range(phys_gpus) if phys_gpus > 0 else [0])
 
@@ -384,9 +288,7 @@ def main():
                 f_idx = ex.submit(_run_one_camera_chunk,
                                    chunk_blend, ns.out, tag, ci, gpu_id,
                                    ns.samples, chunk_frames,
-                                   per_camera_bitrate, per_camera_cap_bytes,
-                                   segment_limit_bytes,
-                                   ns.scenario)
+                                   "5M", ns.scenario)
                 futures[f_idx] = (tag, gpu_id)
 
             for f in concurrent.futures.as_completed(futures):
@@ -423,7 +325,7 @@ def main():
                 raise SystemExit(f"FAIL: missing segment for {tag} chunk {ci}: {sp}")
             segs.append(sp)
 
-        concat_list = _concat_segments(segs, video_path, concat_limit_bytes)
+        concat_list = _concat_segments(segs, video_path, 0)
 
         # Validate final video
         if not _video_valid(video_path, fps, duration_frames):

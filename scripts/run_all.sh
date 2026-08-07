@@ -46,9 +46,6 @@
 #   --speed-threshold F
 #                       SUMO unified only: keep extra keyframes when speed
 #                       changes more than F m/s (default: 0.8).
-#   --storage-limit-gib N
-#                       Hard cap total output dir storage in GiB (default 50).
-#                       A Linux filesystem reservation covers every output file.
 #   --blender PATH      Path to blender binary (default: auto-detect)
 #   --python PATH       Path to python binary (default: DOAN_PYTHON env or $PATH)
 #   -h, --help          Show this help
@@ -82,7 +79,6 @@ HEADING_THRESHOLD_DEG=""
 SPEED_THRESHOLD=""
 PHASE="all"
 SCENARIOS=0
-STORAGE_LIMIT_GIB=50
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
@@ -112,7 +108,6 @@ while [[ $# -gt 0 ]]; do
         --keyframe-stride)  KEYFRAME_STRIDE="$2";  shift 2 ;;
         --heading-threshold-deg) HEADING_THRESHOLD_DEG="$2"; shift 2 ;;
         --speed-threshold)  SPEED_THRESHOLD="$2";   shift 2 ;;
-        --storage-limit-gib)  STORAGE_LIMIT_GIB="$2"; shift 2 ;;
         -h|--help)          usage ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -147,7 +142,6 @@ if [[ "$SCENARIOS" -eq 1 ]]; then
     [[ -n "$KEYFRAME_STRIDE" ]] && _base_flags+=(--keyframe-stride "$KEYFRAME_STRIDE")
     [[ -n "$HEADING_THRESHOLD_DEG" ]] && _base_flags+=(--heading-threshold-deg "$HEADING_THRESHOLD_DEG")
     [[ -n "$SPEED_THRESHOLD" ]] && _base_flags+=(--speed-threshold "$SPEED_THRESHOLD")
-    [[ "$STORAGE_LIMIT_GIB" -gt 0 ]] && _base_flags+=(--storage-limit-gib "$STORAGE_LIMIT_GIB")
     [[ -n "$BLENDER_BIN" ]] && _base_flags+=(--blender "$BLENDER_BIN")
     [[ -n "$PYTHON_BIN" ]] && _base_flags+=(--python "$PYTHON_BIN")
 
@@ -211,34 +205,6 @@ if [[ -z "$OUT_DIR" ]]; then
 fi
 OUT_DIR="$(mkdir -p "$OUT_DIR" && cd "$OUT_DIR" && pwd)"
 
-# ponytail: Linux-only fallocate is the smallest way to enforce a whole-output
-# cap across independent SUMO, Blender, ffmpeg, and log writer processes.
-if ! [[ "$STORAGE_LIMIT_GIB" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: --storage-limit-gib must be a positive integer" >&2
-    exit 2
-fi
-STORAGE_LIMIT_BYTES=$(( STORAGE_LIMIT_GIB * 1024 * 1024 * 1024 ))
-EXISTING_OUTPUT_BYTES="$(du -sB1 "$OUT_DIR" | cut -f1)"
-if (( EXISTING_OUTPUT_BYTES > STORAGE_LIMIT_BYTES )); then
-    echo "ERROR: output already uses $EXISTING_OUTPUT_BYTES bytes, above the ${STORAGE_LIMIT_GIB} GiB limit" >&2
-    exit 2
-fi
-ALLOWED_NEW_BYTES=$(( STORAGE_LIMIT_BYTES - EXISTING_OUTPUT_BYTES ))
-FS_FREE_BYTES="$(df -B1 --output=avail "$OUT_DIR" | tail -n 1 | tr -d ' ')"
-RESERVE_BYTES=0
-if (( FS_FREE_BYTES > ALLOWED_NEW_BYTES )); then
-    RESERVE_BYTES=$(( FS_FREE_BYTES - ALLOWED_NEW_BYTES ))
-fi
-RESERVE_FILE="$(mktemp "$(dirname "$OUT_DIR")/.$(basename "$OUT_DIR").storage-reserve.XXXXXX")"
-cleanup_storage_reserve() {
-    rm -f -- "$RESERVE_FILE"
-}
-trap cleanup_storage_reserve EXIT HUP INT TERM
-if (( RESERVE_BYTES > 0 )) && ! fallocate -l "$RESERVE_BYTES" "$RESERVE_FILE"; then
-    echo "ERROR: cannot reserve filesystem space for strict ${STORAGE_LIMIT_GIB} GiB output limit" >&2
-    exit 2
-fi
-
 # Python interpreter: --python flag > DOAN_PYTHON env > DoAn conda env > sys.executable
 if [[ -z "$PYTHON_BIN" ]]; then
     if [[ -n "${DOAN_PYTHON:-}" && -x "${DOAN_PYTHON}" ]]; then
@@ -280,7 +246,6 @@ fi
 echo "  python : $PYTHON_BIN"
 echo "  blender: $BLENDER_BIN"
 echo "  simulator: sumo"
-echo "  storage: ${STORAGE_LIMIT_GIB} GiB hard cap (existing=$EXISTING_OUTPUT_BYTES bytes, reserve=$RESERVE_BYTES bytes)"
 [[ -n "$ONLY" ]] && echo "  only   : $ONLY"
 [[ -n "$DEMAND_SCALE" ]] && echo "  demand : default (scale=${DEMAND_SCALE})"
 echo "============================================================"
@@ -305,7 +270,6 @@ PIPELINE_ARGS=(
 [[ -n "$KEYFRAME_STRIDE" ]]  && PIPELINE_ARGS+=(--keyframe-stride "$KEYFRAME_STRIDE")
 [[ -n "$HEADING_THRESHOLD_DEG" ]] && PIPELINE_ARGS+=(--heading-threshold-deg "$HEADING_THRESHOLD_DEG")
 [[ -n "$SPEED_THRESHOLD" ]]  && PIPELINE_ARGS+=(--speed-threshold "$SPEED_THRESHOLD")
-[[ "$STORAGE_LIMIT_GIB" -gt 0 ]] && PIPELINE_ARGS+=(--storage-limit-gib "$STORAGE_LIMIT_GIB")
 
 # C5: force Python stdout unbuffered so every print(..., flush=True) in
 # render.py / build_scene.py / run_pipeline.py reaches the terminal/log

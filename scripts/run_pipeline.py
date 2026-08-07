@@ -438,13 +438,12 @@ def step_sumo_unified_build(scenario_path, out_dir, only=None,
 
 
 def step_sumo_unified_render(scenario_path, out_dir, jobs, samples,
-                              only=None, storage_limit_gib=50):
+                              only=None):
     chunks_dir = os.path.join(out_dir, "chunks")
     cmd = [PYTHON, os.path.join(HERE, "render_unified.py"),
            "--scene", chunks_dir, "--scenario", scenario_path, "--out", out_dir,
            "--jobs", str(max(1, jobs)), "--samples", str(samples),
-           "--batch-size", str(CHUNK_SIZE),
-           "--storage-limit-gib", str(storage_limit_gib)]
+           "--batch-size", str(CHUNK_SIZE)]
     if only:
         cmd += ["--only", only]
     run(cmd, check=True, timeout=None)
@@ -516,8 +515,6 @@ def main():
                          "'cpu1' (steps 0-3: env+assets+scenario+plates, CPU only), "
                          "'gpu' (step 4: build+render+encode, GPU required), "
                          "'cpu2' (steps 5-6: metadata+validation, CPU only)")
-    ap.add_argument("--storage-limit-gib", type=int, default=50,
-                help="hard storage cap for the entire output dir in GiB (default 50)")
     args = ap.parse_args()
 
     fps = args.fps
@@ -584,8 +581,7 @@ def main():
             max_workers_per_gpu=args.max_workers_per_gpu,
             vram_budget=VRAM_PER_JOB_MIB * 2)
         step_sumo_unified_render(scn_render, out_dir, n_jobs, args.samples,
-                                  only=args.only,
-                                  storage_limit_gib=args.storage_limit_gib)
+                                 only=args.only)
 
         if phase == "gpu":
             print("\n" + "=" * 60)
