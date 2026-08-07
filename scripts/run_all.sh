@@ -71,7 +71,7 @@ DEMAND_PROFILE=""
 BLENDER_BIN=""
 PYTHON_BIN=""
 JOBS=0   # 0 = auto-detect from free VRAM
-MAX_WORKERS_PER_GPU=1
+MAX_WORKERS_PER_GPU=2
 SILENCE_TIMEOUT=0    # 0 = use run_pipeline.py default (600s)
 SAMPLES=0            # 0 = use pipeline default (48)
 KEYFRAME_STRIDE=""
