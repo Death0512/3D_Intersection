@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Blender-side helper: render one camera from unified_scene.blend to JPEGs,
-batch-encode to MP4 segments, then concat into final video."""
+"""Blender-side helper: render one camera from a chunk .blend to one MP4 segment,
+or from a legacy unified scene to JPEGs + batch-encode + concat final video."""
 from __future__ import annotations
 
 import argparse
@@ -328,10 +328,13 @@ def _video_valid(video_path: str, expected_fps: int,
 def _fps_from_scenario(scenario_path: str | None) -> int:
     """Read fps from scenario JSON, default 30."""
     if scenario_path and os.path.isfile(scenario_path):
-        import json
-        with open(scenario_path) as f:
-            sc = json.load(f)
-        return int(sc.get("fps", 30) or 30)
+        import ijson
+        with open(scenario_path, "rb") as f:
+            for prefix, event, value in ijson.parse(f, use_float=True):
+                if prefix == "fps" and event == "number":
+                    return int(value)
+                if prefix.startswith("vehicles."):
+                    break
     return 30
 
 
@@ -412,8 +415,11 @@ def main():
                     help="ffmpeg -fs bound per segment in bytes (0 = unlimited)")
     ap.add_argument("--concat-limit-bytes", type=int, default=0,
                     help="ffmpeg -fs bound for concat output in bytes (0 = unlimited)")
+    ap.add_argument("--chunk-idx", type=int, default=None,
+                    help="chunk index for time-chunk mode (renders single segment)")
     ns = ap.parse_args(post)
 
+    chunk_mode = ns.chunk_idx is not None
     fps = _fps_from_scenario(ns.scenario)
 
     bpy.ops.wm.open_mainfile(filepath=ns.scene)
@@ -422,15 +428,12 @@ def main():
 
     cam = bpy.data.objects.get(f"Camera_{ns.camera}") or bpy.data.objects.get(ns.camera)
     if cam is None:
-        raise SystemExit(f"FAIL: camera not found in unified scene: {ns.camera}")
+        raise SystemExit(f"FAIL: camera not found in scene: {ns.camera}")
     bpy.context.scene.camera = cam
 
-    frames_dir = os.path.join(ns.out, f"frames_{ns.camera}")
-    segments_dir = os.path.join(ns.out, f"segments_{ns.camera}")
-    video_path = os.path.join(ns.out, f"video_{ns.camera}.mp4")
-
+    out_dir = ns.out
     scene = bpy.context.scene
-    total_frames = scene.frame_end - scene.frame_start + 1
+    chunk_frames = scene.frame_end - scene.frame_start + 1
 
     batch_size = int(ns.batch_size)
     if not 1 <= batch_size <= 9_999:
@@ -438,6 +441,89 @@ def main():
     storage_cap_bytes = ns.storage_cap_bytes
     segment_limit_bytes = ns.segment_limit_bytes
     concat_limit_bytes = ns.concat_limit_bytes
+
+    # ---- Chunk mode: render ONE chunk scene → ONE segment ----
+    if chunk_mode:
+        chunk_idx = int(ns.chunk_idx)
+        segments_dir = os.path.join(ns.out, f"segments_{ns.camera}")
+        seg_path = os.path.join(segments_dir, f"seg_{chunk_idx:04d}.mp4")
+
+        # Resume: skip if segment already valid
+        if os.path.isfile(seg_path) and _video_valid(seg_path, fps, chunk_frames):
+            print(f"[unified:{ns.camera}] SKIP chunk {chunk_idx}: segment already valid "
+                  f"({chunk_frames}f@{fps}fps)", flush=True)
+            return
+
+        os.makedirs(segments_dir, exist_ok=True)
+        # Isolated temp frames dir per chunk to avoid collisions
+        frames_dir = os.path.join(ns.out, f"frames_{ns.camera}_chunk{chunk_idx:04d}")
+        if os.path.isdir(frames_dir):
+            shutil.rmtree(frames_dir)
+        os.makedirs(frames_dir, exist_ok=True)
+
+        scene.render.filepath = os.path.join(frames_dir, "f_")
+        scene.render.image_settings.file_format = "JPEG"
+        scene.render.image_settings.quality = 95
+
+        reuse = not ns.no_frame_reuse
+        if not reuse:
+            print(f"[unified:{ns.camera}] rendering chunk {chunk_idx} "
+                  f"[{scene.frame_start},{scene.frame_end}] ({chunk_frames}f) no-reuse",
+                  flush=True)
+        else:
+            reason = _unsupported_reuse_reason(scene)
+            reuse = reason is None
+            mode = "reuse" if reuse else f"no-reuse ({reason})"
+            print(f"[unified:{ns.camera}] rendering chunk {chunk_idx} "
+                  f"[{scene.frame_start},{scene.frame_end}] ({chunk_frames}f) [{mode}]",
+                  flush=True)
+
+        rendered = copied = 0
+        prev_sig = None
+        prev_path = None
+        for index in range(chunk_frames):
+            frame = scene.frame_start + index
+            out_path = _frame_path(frames_dir, index)
+            scene.frame_set(frame)
+            sig = _frame_signature() if reuse else None
+            if reuse and prev_sig == sig and prev_path is not None:
+                shutil.copyfile(prev_path, out_path)
+                _verify_jpeg(out_path)
+                copied += 1
+                continue
+            _render_frame(scene, frame, out_path)
+            rendered += 1
+            prev_sig = sig
+            prev_path = out_path
+
+        print(f"  [unified@{ns.camera}] chunk {chunk_idx}: rendered={rendered} copied={copied}",
+              flush=True)
+
+        # Encode chunk to one segment
+        _check_usage(ns.out, ns.camera, storage_cap_bytes, f"before seg {chunk_idx}")
+        _encode_segment(frames_dir, seg_path, fps, 0,
+                        chunk_frames, ns.camera, ns.bitrate,
+                        segment_limit_bytes)
+        _check_usage(ns.out, ns.camera, storage_cap_bytes, f"after seg {chunk_idx}")
+
+        # Validate segment
+        if not os.path.isfile(seg_path) or os.path.getsize(seg_path) <= 0:
+            raise RuntimeError(f"segment validation failed {seg_path}: missing/empty after encode")
+
+        # Clean temp JPEGs for this chunk
+        for fn_ in os.listdir(frames_dir):
+            if fn_.endswith(".jpg"):
+                os.remove(os.path.join(frames_dir, fn_))
+        os.rmdir(frames_dir)
+
+        print(f"[unified:{ns.camera}] chunk {chunk_idx} segment ready: {seg_path}", flush=True)
+        return
+
+    # ---- Legacy full-scene mode (unchanged) ----
+    frames_dir = os.path.join(ns.out, f"frames_{ns.camera}")
+    segments_dir = os.path.join(ns.out, f"segments_{ns.camera}")
+    video_path = os.path.join(ns.out, f"video_{ns.camera}.mp4")
+    total_frames = chunk_frames
     total_batches = (total_frames + batch_size - 1) // batch_size
 
     # Resumability: valid final video → skip.

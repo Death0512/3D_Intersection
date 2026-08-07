@@ -289,31 +289,53 @@ def _selected_camera_tags(only: str | None) -> list[str]:
     return tags
 
 
+def _veh_trajectory_frames(veh: dict) -> tuple[int, int] | None:
+    """Return (first_global_frame, last_global_frame) or None if no trajectory."""
+    pts = veh.get("trajectory") or []
+    if not pts:
+        return None
+    return (int(pts[0]["frame"]), int(pts[-1]["frame"]))
+
+
+def _veh_overlaps_chunk(veh: dict, chunk_start: int, chunk_end: int) -> bool:
+    tf = _veh_trajectory_frames(veh)
+    if tf is None:
+        return False
+    return tf[0] <= chunk_end and tf[1] >= chunk_start
+
+
 def build_unified_scene(scenario_path: str, out_blend: str, only: str | None = None,
                         keyframe_stride: int = 6,
                         heading_threshold_deg: float = 1.0,
-                        speed_threshold: float = 0.8):
+                        speed_threshold: float = 0.8,
+                        chunk_start: int | None = None,
+                        chunk_end: int | None = None):
     selected_tags = _selected_camera_tags(only)
 
-    # Stream-read top-level metadata (fps, duration_frames), then stream vehicles.
-    # ponytail: ijson streaming avoids holding all trajectory dicts in RAM;
-    # the final .blend still lives in Blender memory, which is the real ceiling.
+    # Stream-read top-level metadata (duration_frames), then stream vehicles.
     duration_frames = 30 * 10  # default fallback
     with open(scenario_path, "rb") as f:
         parser = ijson.parse(f, use_float=True)
         for prefix, event, value in parser:
             if prefix == "fps" and event == "number":
-                pass  # read but not needed; frame_end comes from duration_frames
+                pass
             elif prefix == "duration_frames" and event == "number":
                 duration_frames = int(value)
             elif prefix.startswith("vehicles."):
-                # Once we hit vehicles array, break — we'll stream items separately.
                 break
 
-    frame_end = max(0, duration_frames - 1)
+    full_frame_end = max(0, duration_frames - 1)
+
+    # Chunk mode: use chunk bounds for scene frame range
+    if chunk_start is not None and chunk_end is not None:
+        c_start = int(chunk_start)
+        c_end = int(chunk_end)
+    else:
+        c_start = 0
+        c_end = full_frame_end
 
     bu.reset_scene()
-    _reset_template_cache()  # ponytail: template refs are stale after Blender data wipe
+    _reset_template_cache()
     with open(ROAD_JSON) as f:
         road_meta = json.load(f)
     veh_manifest = BS.load_vehicle_manifest()
@@ -331,31 +353,39 @@ def build_unified_scene(scenario_path: str, out_blend: str, only: str | None = N
         cam = BS.place_camera(direction, is_in, road_meta, env=env, unified=True)
         cam.name = f"Camera_{tag}"
 
-    # Stream vehicles one at a time, process only visible ones, drop after use.
+    # Stream vehicles: only instantiate if trajectory overlaps chunk window.
     n = 0
     total_count = 0
+    skipped_outside = 0
     with open(scenario_path, "rb") as f:
         for veh in ijson.items(f, "vehicles.item", use_float=True):
             total_count += 1
             if not _vehicle_visible(veh, selected_tags):
                 continue
+            if not _veh_overlaps_chunk(veh, c_start, c_end):
+                skipped_outside += 1
+                continue
             root = _make_vehicle_root(veh, veh_manifest, plates_dir,
                                       out_blend_dir=os.path.dirname(out_blend))
-            if _keyframe_sumo_trajectory(root, veh, frame_end,
+            # Keyframe ALL trajectory points (full global frames, never rebase)
+            # so vehicles that straddle the boundary interpolate correctly.
+            if _keyframe_sumo_trajectory(root, veh, full_frame_end,
                                          keyframe_stride=keyframe_stride,
                                          heading_threshold_deg=heading_threshold_deg,
                                          speed_threshold=speed_threshold):
                 n += 1
-                veh.clear()  # ponytail: drop trajectory dict before next vehicle
+                veh.clear()
                 if n % 10 == 1 or n == 1:
                     print(f"  [unified] keyframed {n} vehicles", flush=True)
 
-    print(f"[unified] placing {n}/{total_count} SUMO vehicles for {len(selected_tags)} camera(s)", flush=True)
+    print(f"[unified] chunk [{c_start},{c_end}] placing {n}/{total_count} "
+          f"vehicles for {len(selected_tags)} camera(s) "
+          f"(skipped {skipped_outside} outside chunk)", flush=True)
 
     BS.setup_render(samples=48)
     scene = bpy.context.scene
-    scene.frame_start = 0
-    scene.frame_end = frame_end
+    scene.frame_start = c_start
+    scene.frame_end = c_end
     os.makedirs(os.path.dirname(out_blend), exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=out_blend)
     print(f"[unified] saved {out_blend} ({n} vehicles, {len(selected_tags)} cameras)", flush=True)
@@ -376,11 +406,17 @@ def main():
                     help="always keep a pose when heading changed by more than this many degrees")
     ap.add_argument("--speed-threshold", type=float, default=0.8,
                     help="always keep a pose when speed changed by more than this many m/s")
+    ap.add_argument("--chunk-start", type=int, default=None,
+                    help="global frame start for a time chunk (default: 0)")
+    ap.add_argument("--chunk-end", type=int, default=None,
+                    help="global frame end for a time chunk (default: duration_frames-1)")
     ns = ap.parse_args(post)
     build_unified_scene(ns.scenario, ns.out, only=ns.only,
                         keyframe_stride=ns.keyframe_stride,
                         heading_threshold_deg=ns.heading_threshold_deg,
-                        speed_threshold=ns.speed_threshold)
+                        speed_threshold=ns.speed_threshold,
+                        chunk_start=ns.chunk_start,
+                        chunk_end=ns.chunk_end)
 
 
 if __name__ == "__main__":

@@ -377,8 +377,19 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     return jobs, assignment
 
 
-def _per_camera_scene_path(out_dir, tag):
-    return os.path.join(out_dir, f"unified_scene_{tag}.blend")
+CHUNK_SIZE = 500  # global frames per chunk
+
+
+def _stream_scenario_duration_frames(path: str) -> int:
+    """Stream-parse only duration_frames from scenario JSON."""
+    import ijson
+    with open(path, "rb") as f:
+        for prefix, event, value in ijson.parse(f, use_float=True):
+            if prefix == "duration_frames" and event == "number":
+                return int(value)
+            if prefix.startswith("vehicles."):
+                break
+    return 0
 
 
 def step_sumo_unified_build(scenario_path, out_dir, only=None,
@@ -386,31 +397,53 @@ def step_sumo_unified_build(scenario_path, out_dir, only=None,
                             heading_threshold_deg=1.0,
                             speed_threshold=0.8,
                             force_rebuild=False):
+    """Build ONE .blend per CHUNK_SIZE global-frame chunk containing ALL
+    selected cameras and every vehicle whose trajectory overlaps that window."""
     tags = camera_tags_from_only(only)
-    scene_paths = {}
-    for tag in tags:
-        scene_path = _per_camera_scene_path(out_dir, tag)
-        if not force_rebuild and os.path.exists(scene_path):
-            print(f"  Skipping build — {os.path.basename(scene_path)} already exists ({os.path.getsize(scene_path) // 1024 // 1024} MB)")
-            scene_paths[tag] = scene_path
+    chunks_dir = os.path.join(out_dir, "chunks")
+    os.makedirs(chunks_dir, exist_ok=True)
+
+    duration_frames = _stream_scenario_duration_frames(scenario_path)
+    if duration_frames <= 0:
+        raise SystemExit(f"{scenario_path} has missing/zero duration_frames")
+    total_chunks = max(1, (duration_frames + CHUNK_SIZE - 1) // CHUNK_SIZE)
+
+    print(f"  [build] {total_chunks} chunk(s) ({CHUNK_SIZE} frames each, "
+          f"{len(tags)} camera(s))", flush=True)
+
+    for ci in range(total_chunks):
+        c_start = ci * CHUNK_SIZE
+        c_endl = min(duration_frames - 1, (ci + 1) * CHUNK_SIZE - 1)
+        chunk_out = os.path.join(chunks_dir, f"chunk_{ci:04d}.blend")
+
+        if not force_rebuild and os.path.exists(chunk_out):
+            print(f"  [build] chunk {ci}/{total_chunks - 1} "
+                  f"[{c_start},{c_endl}] already exists — skip "
+                  f"({os.path.getsize(chunk_out) // 1024 // 1024} MB)", flush=True)
             continue
+
+        print(f"  [build] chunk {ci}/{total_chunks - 1} "
+              f"[{c_start},{c_endl}] building...", flush=True)
         cmd = [BLENDER, "-b", "--python", os.path.join(HERE, "build_unified_scene.py"), "--",
-               "--scenario", scenario_path, "--out", scene_path,
+               "--scenario", scenario_path, "--out", chunk_out,
                "--keyframe-stride", str(keyframe_stride),
                "--heading-threshold-deg", str(heading_threshold_deg),
                "--speed-threshold", str(speed_threshold),
-               "--only", tag]
+               "--only", ",".join(tags),
+               "--chunk-start", str(c_start),
+               "--chunk-end", str(c_endl)]
         run(cmd, check=True, timeout=7200)
-        scene_paths[tag] = scene_path
-    return scene_paths
+
+    return chunks_dir
 
 
 def step_sumo_unified_render(scenario_path, out_dir, jobs, samples,
                               only=None, storage_limit_gib=50):
-    scene_path = os.path.join(out_dir, "unified_scene.blend")
+    chunks_dir = os.path.join(out_dir, "chunks")
     cmd = [PYTHON, os.path.join(HERE, "render_unified.py"),
-           "--scene", scene_path, "--scenario", scenario_path, "--out", out_dir,
+           "--scene", chunks_dir, "--scenario", scenario_path, "--out", out_dir,
            "--jobs", str(max(1, jobs)), "--samples", str(samples),
+           "--batch-size", str(CHUNK_SIZE),
            "--storage-limit-gib", str(storage_limit_gib)]
     if only:
         cmd += ["--only", only]
@@ -539,13 +572,13 @@ def main():
     # ---- gpu: step 4 --------------------------------------------------------
     if phase in ("all", "gpu"):
         camera_tags = camera_tags_from_only(args.only)
-        print("\n[4a/6] Build per-camera unified SUMO scenes")
+        print("\n[4a/6] Build time-chunk .blend scenes")
         step_sumo_unified_build(scn_render, out_dir, args.only,
                                 keyframe_stride=args.keyframe_stride,
                                 heading_threshold_deg=args.heading_threshold_deg,
                                 speed_threshold=args.speed_threshold)
 
-        print("\n[4b/6] Render per-camera unified SUMO scenes")
+        print("\n[4b/6] Render chunk scenes sequentially")
         n_jobs, _ = _detect_jobs(
             len(camera_tags), explicit=args.jobs,
             max_workers_per_gpu=args.max_workers_per_gpu,
