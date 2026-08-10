@@ -210,19 +210,51 @@ def _parse_spike_windows(rest: str) -> list[tuple[float, float, float]]:
     return windows
 
 
+def _load_profile_json(path: str) -> list[tuple[float, float, float]]:
+    """Load time-varying demand intervals from a JSON file.
+
+    JSON schema (list of objects, in JSON-time units of seconds):
+      [{"start": 0, "end": 3600, "scale": 2}, {"start": 3600, "end": 7200, "scale": 5}]
+    """
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise SystemExit(f"FAIL: demand profile JSON must be a list: {path}")
+    windows: list[tuple[float, float, float]] = []
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise SystemExit(f"FAIL: demand profile entry {i} is not an object: {item!r}")
+        try:
+            s = float(item["start"]); e = float(item["end"]); sc = float(item["scale"])
+        except (KeyError, TypeError, ValueError) as ex:
+            raise SystemExit(f"FAIL: demand profile entry {i} missing start/end/scale: {ex}")
+        if e <= s:
+            raise SystemExit(f"FAIL: demand profile entry {i} end must be > start")
+        if sc < 0:
+            raise SystemExit(f"FAIL: demand profile entry {i} scale must be >= 0")
+        windows.append((s, e, sc))
+    return windows
+
+
 def _demand_multiplier(profile: str | None) -> tuple[Callable[[float], float], list[float]]:
     """Return (multiplier_fn, probe_times) for time-varying demand.
 
     Supported syntax:
       spike:start=55,end=65,scale=20               # single spike
       spike:start=55,end=65,scale=20;start=90,end=100,scale=30  # multiple
+      file:/path/to/profile.json                    # JSON file with interval list
     """
     if not profile:
         return lambda _t: 1.0, [0.0]
-    kind, _, rest = profile.partition(":")
-    if kind.strip().lower() != "spike":
-        raise SystemExit(f"FAIL: unsupported --demand-profile {profile!r}; expected spike:start=55,end=65,scale=20")
-    windows = _parse_spike_windows(rest)
+    # JSON file form: file:/absolute/path.json
+    if profile.startswith("file:"):
+        windows = _load_profile_json(profile[len("file:"):])
+    else:
+        kind, _, rest = profile.partition(":")
+        if kind.strip().lower() != "spike":
+            raise SystemExit(f"FAIL: unsupported --demand-profile {profile!r}; "
+                             f"expected spike:start=55,end=65,scale=20 or file:/path/profile.json")
+        windows = _parse_spike_windows(rest)
     if not windows:
         return lambda _t: 1.0, [0.0]
     # ponytail: linear scan over small window list; full partition table is overkill.
