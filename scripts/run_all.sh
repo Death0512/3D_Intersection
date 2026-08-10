@@ -266,7 +266,15 @@ PIPELINE_ARGS=(
 [[ "$SILENCE_TIMEOUT" -gt 0 ]] && PIPELINE_ARGS+=(--silence-timeout "$SILENCE_TIMEOUT")
 [[ "$SAMPLES" -gt 0 ]]       && PIPELINE_ARGS+=(--samples "$SAMPLES")
 [[ -n "$DEMAND_SCALE" ]]    && PIPELINE_ARGS+=(--demand-scale "$DEMAND_SCALE")
-[[ -n "$DEMAND_PROFILE" ]]  && PIPELINE_ARGS+=(--demand-profile "$DEMAND_PROFILE")
+if [[ -n "$DEMAND_PROFILE" ]]; then
+    # Auto-prefix file: if user passed a bare .json path instead of the
+    # full file:/path syntax.
+    case "$DEMAND_PROFILE" in
+        file:*) : ;;
+        *.json) DEMAND_PROFILE="file:${DEMAND_PROFILE}" ;;
+    esac
+    PIPELINE_ARGS+=(--demand-profile "$DEMAND_PROFILE")
+fi
 [[ -n "$KEYFRAME_STRIDE" ]]  && PIPELINE_ARGS+=(--keyframe-stride "$KEYFRAME_STRIDE")
 [[ -n "$HEADING_THRESHOLD_DEG" ]] && PIPELINE_ARGS+=(--heading-threshold-deg "$HEADING_THRESHOLD_DEG")
 [[ -n "$SPEED_THRESHOLD" ]]  && PIPELINE_ARGS+=(--speed-threshold "$SPEED_THRESHOLD")
