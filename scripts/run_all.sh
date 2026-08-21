@@ -18,7 +18,7 @@
 #   --seed N            RNG seed (default: 42)
 #   --fps N             Frames per second (default: 30)
 #   --seconds F         Video length in seconds (default: 60)
-#   --samples N         Cycles render samples (default: 48, pipeline default)
+#   --samples N         Cycles render samples (default: 24, pipeline default)
 #   --out DIR           Output directory (default: output/run1)
 #   --scenarios         Run six SUMO North-camera scenarios (empty, sparse,
 #                       moderate, dense, surge_spike, signal_cycle).
@@ -73,7 +73,7 @@ PYTHON_BIN=""
 JOBS=0   # 0 = auto-detect from free VRAM
 MAX_WORKERS_PER_GPU=1
 SILENCE_TIMEOUT=0    # 0 = use run_pipeline.py default (600s)
-SAMPLES=0            # 0 = use pipeline default (48)
+SAMPLES=0            # 0 = use pipeline default (24)
 KEYFRAME_STRIDE=""
 HEADING_THRESHOLD_DEG=""
 SPEED_THRESHOLD=""

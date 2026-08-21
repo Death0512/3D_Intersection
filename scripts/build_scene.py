@@ -579,7 +579,7 @@ def place_camera(approach: G.Direction, is_in: bool, road_meta: dict,
 # GPU configuration (Cycles + OPTIX, headless-safe)
 # ---------------------------------------------------------------------------
 
-CYCLES_SAMPLES = 48
+CYCLES_SAMPLES = 24
 
 
 # Track whether configure_gpu has already refreshed devices in this Blender
@@ -660,12 +660,12 @@ def setup_render(env_lights: dict = None, samples: int = None):
 
     ``samples`` (optional int) overrides the module-level CYCLES_SAMPLES so
     callers (render.py --samples) can trade quality for speed without editing
-    this file.  None/0 keeps the default (48).
+    this file.  None/0 keeps the default (24).
     """
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.device = "GPU"
-    # M9: honor --samples override (None → default 48). Lower sample counts
+    # M9: honor --samples override (None → default 24). Lower sample counts
     # (16-24) let users iterate faster; denoising remains GPU-only below.
     scene.cycles.samples = samples if samples else CYCLES_SAMPLES
     scene.cycles.use_denoising = False

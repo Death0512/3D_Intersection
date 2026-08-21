@@ -384,7 +384,7 @@ def build_unified_scene(scenario_path: str, out_blend: str, only: str | None = N
           f"vehicles for {len(selected_tags)} camera(s) "
           f"(skipped {skipped_outside} outside chunk)", flush=True)
 
-    BS.setup_render(samples=48)
+    BS.setup_render(samples=24)
     scene = bpy.context.scene
     scene.frame_start = c_start
     scene.frame_end = c_end

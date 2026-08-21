@@ -23,7 +23,7 @@ import geometry as G
 BLENDER = (os.environ.get("DOAN_BLENDER") or os.environ.get("BLENDER")
            or shutil.which("blender") or "/root/.local/bin/blender" or "blender")
 
-CHUNK_SIZE = 8000  # global frames per chunk
+CHUNK_SIZE = 3000  # global frames per chunk
 
 
 def _stream_scenario_meta(path: str) -> tuple[int, int]:
@@ -195,7 +195,7 @@ def main():
     ap.add_argument("--scenario", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--jobs", type=int, default=1)
-    ap.add_argument("--samples", type=int, default=48)
+    ap.add_argument("--samples", type=int, default=24)
     ap.add_argument("--only", default=None)
     ap.add_argument("--batch-size", type=int, default=CHUNK_SIZE,
                     help=f"frames per chunk (default {CHUNK_SIZE})")

@@ -377,7 +377,7 @@ def _detect_jobs(camera_count: int, explicit: int = 0,
     return jobs, assignment
 
 
-CHUNK_SIZE = 8000  # global frames per chunk
+CHUNK_SIZE = 3000  # global frames per chunk
 
 
 def _stream_scenario_duration_frames(path: str) -> int:
@@ -483,8 +483,8 @@ def main():
                     help=f"cap on Blender render workers per GPU regardless of "
                          f"free VRAM (default {MAX_WORKERS_PER_GPU}). One worker "
                          f"per GPU avoids VRAM/context contention.")
-    ap.add_argument("--samples", type=int, default=48,
-                    help="Cycles render samples per frame (default 48; lower "
+    ap.add_argument("--samples", type=int, default=24,
+                    help="Cycles render samples per frame (default 24; lower "
                          "= faster, noisier — denoiser compensates. Use 16-24 "
                          "for quick test runs, 48 for production.)")
     ap.add_argument("--skip-asset-check", action="store_true")
