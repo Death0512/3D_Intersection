@@ -1,0 +1,59 @@
+name: temp-render-probe
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sumo sumo-tools python3-pip curl xz-utils
+          python3 -m pip install --user Pillow traci sumolib ijson
+      - name: Install Blender
+        run: |
+          curl -L --fail --retry 3 -o /tmp/blender.tar.xz             https://download.blender.org/release/Blender5.2/blender-5.2.0-linux-x64.tar.xz
+          mkdir -p "$HOME/opt"
+          tar -xJf /tmp/blender.tar.xz -C "$HOME/opt"
+          echo "$HOME/opt/blender-5.2.0-linux-x64" >> "$GITHUB_PATH"
+      - name: Build 1-second exact-profile scene
+        run: |
+          mkdir -p output/probe
+          python3 scripts/run_pipeline.py             --seconds 1             --fps 30             --demand-profile "file:$GITHUB_WORKSPACE/demand_profile_1h.json"             --out "$GITHUB_WORKSPACE/output/probe"             --phase cpu1             --skip-asset-check
+      - name: Build one Blender frame
+        run: |
+          blender -b --python scripts/build_unified_scene.py --             --scenario "$GITHUB_WORKSPACE/output/probe/scenario_blender.json"             --out "$GITHUB_WORKSPACE/output/probe/chunk.blend"             --only in_N             --chunk-start 0             --chunk-end 0
+      - name: Render one real Cycles frame on runner CPU
+        run: |
+          cat > /tmp/one_frame.py <<'PY'
+          import bpy, os
+          bpy.ops.wm.open_mainfile(filepath=os.environ["SCENE"])
+          s=bpy.context.scene
+          s.camera=bpy.data.objects["Camera_in_N"]
+          s.render.engine="CYCLES"
+          s.cycles.device="CPU"
+          s.cycles.samples=24
+          s.render.resolution_percentage=25
+          s.render.image_settings.file_format="JPEG"
+          s.render.filepath=os.environ["OUT"]
+          s.frame_set(0)
+          bpy.ops.render.render(write_still=True)
+          print("RENDERED", os.environ["OUT"])
+          PY
+          mkdir -p output/probe/frame
+          SCENE="$GITHUB_WORKSPACE/output/probe/chunk.blend"           OUT="$GITHUB_WORKSPACE/output/probe/frame/frame_000000.jpg"           blender -b --python /tmp/one_frame.py
+      - name: Upload frame
+        uses: actions/upload-artifact@v4
+        with:
+          name: temp-render-probe
+          path: output/probe/frame/frame_000000.jpg
+          retention-days: 1
